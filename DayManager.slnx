@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DayManager.Api/DayManager.Api.csproj" />
+    <Project Path="src/DayManager.App/DayManager.App.csproj" />
+    <Project Path="src/DayManager.Core/DayManager.Core.csproj" />
+    <Project Path="src/DayManager.Data/DayManager.Data.csproj" />
+  </Folder>
+</Solution>

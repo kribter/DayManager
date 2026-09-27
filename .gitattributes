@@ -1,0 +1,26 @@
+# .gitattributes：统一换行符规则
+#
+# 为什么需要这个文件：
+# Windows 的换行是 CRLF（\r\n），Linux/Mac 是 LF（\n）。
+# 不统一的话，同一行代码在你同事或另一台机器上会显示成"整行被修改"，
+# 导致 diff 里全是噪音，真正的改动反而看不出来。
+#
+# text=auto 的含义：交给 git 判断，文本文件入库时统一转成 LF，
+# 签出到 Windows 工作区时再转回 CRLF。二进制文件（图片、字体）原样不动。
+
+* text=auto
+
+# 这些是二进制资源，绝对不能被"转换换行符"破坏，否则图片/字体会损坏
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg text
+*.ttf binary
+*.otf binary
+*.mp4 binary
+*.pdf binary
+
+# 数据库文件同样按二进制处理
+*.db binary
