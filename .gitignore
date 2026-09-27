@@ -493,8 +493,9 @@ $RECYCLE.BIN/
 *.sqlite
 *.sqlite3
 
-# 本地数据目录（默认是 AppData，但支持用 DAYMANAGER_DATA_DIR 指到项目内）
-/data/
+# AI 协作产生的记忆目录（内含你的个人习惯、作息等私密记录，
+# 属于本地产物，不应随代码一起分享出去）
+/.workbuddy/
 
 # 本地覆盖配置，可能含个人路径/密钥
 appsettings.Local.json
