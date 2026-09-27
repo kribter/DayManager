@@ -1,37 +1,170 @@
 ﻿<?xml version="1.0" encoding="utf-8" ?>
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:vm="clr-namespace:DayManager.App.ViewModels"
              x:Class="DayManager.App.MainPage"
+             x:DataType="vm:MainViewModel"
              Title="DayManager">
 
-    <ScrollView>
-        <VerticalStackLayout Padding="30" Spacing="18">
+    <!--
+      ============================================================
+      XAML 是什么：它就是一份"界面结构说明书"，本质是一棵对象树。
+      <Button .../> 这一行等价于后台代码里 new Button { Text = "..." }。
+      编译器会把它变成真正的代码（SourceGen 模式），所以写错属性名时
+      编译期就能报错，而不是运行时才崩。
 
-            <Label
-                Text="DayManager"
-                Style="{StaticResource Headline}"
-                SemanticProperties.HeadingLevel="Level1" />
+      {Binding xxx} 的含义是"去 BindingContext 里找 xxx 这个属性"。
+      BindingContext 在 MainPage.xaml.cs 里被赋成 MainViewModel，
+      于是这里写的 {Binding SummaryText} 就是 ViewModel 里那个字段。
+      这就是 MVVM 的关键：XAML 只声明"显示哪个数据"，不关心数据从哪来。
 
-            <!-- 这里的 x:Name 相当于给这个控件起了个变量名，
-                 后台代码里就能直接用 StatsLabel.Text = "..." 来改它的内容。 -->
-            <Label
-                x:Name="StatsLabel"
-                Text="正在读取数据库…"
-                Style="{StaticResource SubHeadline}"
-                SemanticProperties.HeadingLevel="Level2" />
+      x:DataType 是为了开启"编译期绑定检查"。加上之后，
+      如果拼错属性名（比如写成 SummaryTxt），编译会直接报错，
+      而不是等到运行时才发现界面一片空白。强烈建议永远写上。
+      ============================================================
 
-            <Label
-                x:Name="DbPathLabel"
-                Text=""
-                FontSize="12" />
+      整个页面用一个 Grid 划成四行：
+        第 0 行 Auto  标题和日期      —— 高度随内容
+        第 1 行 Auto  今日完成统计    —— 高度随内容
+        第 2 行 *     清单列表        —— 吃掉剩下的所有空间
+        第 3 行 Auto  快速添加区      —— 固定在底部
+      "*" 表示"把剩余高度全给我"，所以列表会自动撑满中间。
+    -->
+    <Grid RowDefinitions="Auto,Auto,*,Auto"
+          Padding="18"
+          RowSpacing="14">
 
-            <Button
-                x:Name="AddTestButton"
-                Text="写入一条测试记录"
-                Clicked="OnAddTestClicked"
-                HorizontalOptions="Fill" />
+        <!-- ================= 第 0 行：日期标题 ================= -->
+        <VerticalStackLayout Grid.Row="0" Spacing="2">
+            <Label Text="今天"
+                   FontSize="30"
+                   FontAttributes="Bold" />
+            <Label Text="{Binding DateText}"
+                   FontSize="13"
+                   TextColor="Gray" />
+        </VerticalStackLayout>
+
+        <!-- ================= 第 1 行：完成统计 =================
+             这里也体现了产品原则：先给正反馈。
+             显示的是"已完成几件"，而不是"还剩几件"。 -->
+        <VerticalStackLayout Grid.Row="1" Spacing="6">
+            <Label Text="{Binding SummaryText}"
+                   FontSize="15"
+                   FontAttributes="Bold" />
+            <ProgressBar Progress="{Binding CompletionRatio}"
+                         HeightRequest="6"
+                         ProgressColor="#2E7D5B" />
+        </VerticalStackLayout>
+
+        <!-- ================= 第 2 行：今日清单 =================
+             CollectionView 是列表控件的现代版本。
+             相比老的 ListView，它支持横向/纵向、网格布局，而且性能更好。
+             ItemsSource 绑到 ObservableCollection，集合内容一变界面自动重画。 -->
+        <CollectionView Grid.Row="2"
+                        ItemsSource="{Binding TodayItems}"
+                        SelectionMode="None">
+
+            <CollectionView.EmptyView>
+                <!-- EmptyView：列表为空时显示的内容。
+                     文案刻意写成鼓励而非催促，避免一打开就有压力。 -->
+                <Label Text="今天还没有安排。&#10;在下面加一条，哪怕只是「先看两分钟」。"
+                       HorizontalTextAlignment="Center"
+                       VerticalTextAlignment="Center"
+                       Margin="0,40,0,0"
+                       TextColor="Gray" />
+            </CollectionView.EmptyView>
+
+            <CollectionView.ItemTemplate>
+                <!-- DataTemplate 描述"每一行长什么样"。
+                     它的 BindingContext 是集合里的单个元素，也就是一个 ItemViewModel，
+                     所以下面的 {Binding Title} 取的是某一行的标题。 -->
+                <DataTemplate x:DataType="vm:ItemViewModel">
+                    <Grid ColumnDefinitions="Auto,*,Auto"
+                          ColumnSpacing="10"
+                          Padding="2,6">
+
+                        <!-- 左边的打勾按钮。
+                             Command 需要绑到"页面级"的命令（ToggleCompleteCommand
+                             属于 MainViewModel，不属于每一行的 ItemViewModel），
+                             所以用 RelativeSource AncestorType 往外找，
+                             意思是"沿着界面树往上找第一个类型是 MainViewModel 的父级"。
+                             CommandParameter="{Binding .}" 里的 "." 表示"当前这一行的对象"，
+                             这样命令才知道用户点的是哪一条。 -->
+                        <Button Grid.Column="0"
+                                Text="&#10003;"
+                                FontSize="17"
+                                WidthRequest="38"
+                                HeightRequest="38"
+                                Padding="0"
+                                CornerRadius="19"
+                                BorderWidth="1"
+                                BorderColor="Gray"
+                                BackgroundColor="Transparent"
+                                TextColor="{Binding CheckColor}"
+                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=ToggleCompleteCommand}"
+                                CommandParameter="{Binding .}" />
+
+                        <!-- 中间：标题 + 一行说明（时间/逾期/已进行时长） -->
+                        <VerticalStackLayout Grid.Column="1"
+                                             Spacing="2"
+                                             VerticalOptions="Center">
+                            <Label Text="{Binding Title}"
+                                   TextColor="{Binding TitleColor}"
+                                   FontSize="15"
+                                   LineBreakMode="TailTruncation" />
+                            <Label Text="{Binding Subtitle}"
+                                   TextColor="Gray"
+                                   FontSize="11" />
+                        </VerticalStackLayout>
+
+                        <!-- 右边：⋯ 菜单，收着不常用的操作 -->
+                        <Button Grid.Column="2"
+                                Text="&#8942;"
+                                FontSize="18"
+                                WidthRequest="34"
+                                HeightRequest="34"
+                                Padding="0"
+                                BackgroundColor="Transparent"
+                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=ShowActionsCommand}"
+                                CommandParameter="{Binding .}" />
+
+                    </Grid>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+        </CollectionView>
+
+        <!-- ================= 第 3 行：快速添加 ================= -->
+        <VerticalStackLayout Grid.Row="3" Spacing="8">
+
+            <Entry Text="{Binding NewTitle}"
+                   Placeholder="想做点什么？"
+                   ReturnType="Done"
+                   ReturnCommand="{Binding AddItemCommand}"
+                   FontSize="15" />
+
+            <!-- 一个开关 + 时间选择器，用来决定这条有没有具体开始时间。
+                 TimePicker 的 IsVisible 直接绑到开关的同一个布尔值，
+                 于是勾选后时间选择器才出现——这是最常见的"条件显示"写法。 -->
+            <HorizontalStackLayout Spacing="6">
+                <CheckBox IsChecked="{Binding UseSpecificTime}"
+                          MinimumWidthRequest="0"
+                          Scale="0.85" />
+                <Label Text="指定开始时间"
+                       VerticalOptions="Center"
+                       FontSize="13" />
+                <TimePicker Time="{Binding NewTime}"
+                            IsVisible="{Binding UseSpecificTime}"
+                            Format="HH:mm"
+                            VerticalOptions="Center" />
+            </HorizontalStackLayout>
+
+            <Button Text="加入今天"
+                    Command="{Binding AddItemCommand}"
+                    CornerRadius="8"
+                    HeightRequest="44" />
 
         </VerticalStackLayout>
-    </ScrollView>
+
+    </Grid>
 
 </ContentPage>

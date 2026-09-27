@@ -1,85 +1,50 @@
-﻿using DayManager.Core.Entities;
-using DayManager.Data;
-using Microsoft.EntityFrameworkCore;
+﻿using DayManager.App.ViewModels;
 
 namespace DayManager.App;
 
+/// <summary>
+/// 页面的"后台代码"。
+///
+/// 【注意这一版相比上一版变薄了多少】
+/// 上一版里这里有查数据库、拼字符串、处理点击的一堆逻辑；
+/// 现在只剩下三件事：接收注入进来的 ViewModel、把它设为 BindingContext、页面出现时触发一次加载。
+/// 这就是 MVVM 想要的效果：界面代码只管"界面这件事"，业务逻辑都住在 ViewModel 里。
+///
+/// 【为什么这样写代码更好】
+/// 一个判断标准是：这个文件里有没有一句业务逻辑？
+/// 理想状态是一句都没有。将来要把Windows 端换成别的界面、或者做一个"只看今天"的精简版，
+/// ViewModel 可以直接拿来复用，因为它完全不依赖任何控件。
+/// </summary>
 public partial class MainPage : ContentPage
 {
-	private readonly IDbContextFactory<AppDbContext> _dbFactory;
+    private readonly MainViewModel _viewModel;
 
-	/// <summary>
-	/// 【为什么构造函数要声明一个参数】
-	/// 这叫构造函数注入：页面只声明"我需要数据库能力"，
-	/// 具体实例由 MauiProgram 里注册好的容器自动送过来。
-	/// 好处是页面完全不必知道数据库文件在哪、怎么连接，
-	/// 以后想换存储方式，改注册那一处就够了。
-	///
-	/// 【为什么不直接 new AppDbContext()】
-	/// 自己 new 的话连接字符串就写死在页面里了，
-	/// 而且失去了统一的生命周期管理，是后期很难收拾的典型写法。
-	/// </summary>
-	public MainPage(IDbContextFactory<AppDbContext> dbFactory)
-	{
-		InitializeComponent();
-		_dbFactory = dbFactory;
-		RefreshStats();
-	}
+    public MainPage(MainViewModel viewModel)
+    {
+        InitializeComponent();
 
-	private void RefreshStats()
-	{
-		try
-		{
-			// 每次操作现开一个短命的 DbContext，用完就释放。
-			// using 的作用是保证离开这个花括号时自动 Dispose，把数据库连接还回去。
-			using var db = _dbFactory.CreateDbContext();
+        // BindingContext 是数据绑定的"源头"。
+        // 设置了它之后，XAML 里所有 {Binding xxx} 都会到这个对象上找属性。
+        _viewModel = viewModel;
+        BindingContext = _viewModel;
+    }
 
-			// 把真实的数据库文件路径显示出来，方便你在 M0 阶段确认库确实建出来了
-			var path = db.Database.GetDbConnection().DataSource;
-
-			var itemCount = db.Items.Count();
-			var projectCount = db.Projects.Count();
-
-			StatsLabel.Text = $"已有 {itemCount} 条记录，{projectCount} 个项目";
-			DbPathLabel.Text = path;
-		}
-		catch (Exception ex)
-		{
-			// 【为什么数据库操作要用 try-catch 包住】
-			// 数据库相关的异常（文件损坏、磁盘满、权限被系统回收）在真机上是会发生的，
-			// 尤其在 Android 上。把原因显示到界面上，比程序一声不响崩掉要好查得多。
-			StatsLabel.Text = "数据库未就绪";
-			DbPathLabel.Text = ex.Message;
-		}
-	}
-
-	/// <summary>
-	/// 按钮点击事件。
-	/// async void 基本只用在 UI 事件处理器上（其他地方都应写成 async Task），
-	/// 因为事件本身没有返回值，也就不存在一个可以等待的 Task。
-	///
-	/// 【为什么 sender 要写成 object? 而不是 object】
-	/// 这是 C# 的"可空引用类型"机制：EventHandler 委托把 sender 声明成了可能为 null，
-	/// 我们的实现必须保持一致，否则编译器会警告两边约定不符。
-	/// 加一个问号表示"我清楚它有可能是 null，并且我不会直接解引用它"。
-	/// </summary>
-	private async void OnAddTestClicked(object? sender, EventArgs e)
-	{
-		using var db = await _dbFactory.CreateDbContextAsync();
-
-		// 注意这里没有给 Version 赋值，也没有写 UpdatedAt。
-		// 这两件事在 AppDbContext.ApplySyncMetadata 里统一处理了，
-		// 任何地方的新增或修改都会自动带上，不必担心遗漏导致同步出错。
-		db.Items.Add(new Item
-		{
-			Title = $"测试日程 {DateTime.Now:HH:mm:ss}",
-			StartAt = DateTimeOffset.Now,
-			DueAt = DateTimeOffset.Now.AddHours(2),
-			MinimalStep = "先打开文档写一句开场"
-		});
-
-		await db.SaveChangesAsync();
-
-		RefreshStats();
-	}
+    /// <summary>
+    /// 页面每次显示时调用（包括第一次打开，以及将来从其他页面返回时）。
+    ///
+    /// 【为什么在这里加载数据，而不是在构造函数里】
+    /// 构造函数执行时界面还没显示，此时做异步操作容易引发时序问题；
+    /// 更重要的是：你在手机端改了日程后返回这个页面，需要看到最新的数据，
+    /// 放在 OnAppearing 里就能保证每次出现都刷新。
+    ///
+    /// 【为什么是 async void】
+    /// 重写父类方法必须保持签名一致，而 void 方法没法 await。
+    /// 这是 async void 少数几个正当使用场景之一（另一个是事件处理器）。
+    /// 代价是异常不会被自动捕获，所以 LoadAsync 内部必须自己 try-catch，它确实也那么做了。
+    /// </summary>
+    protected override async void OnAppearing()
+    {
+        base.OnAppearing();
+        await _viewModel.LoadCommand.ExecuteAsync(null);
+    }
 }

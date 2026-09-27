@@ -11,7 +11,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace DayManager.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20260927025104_InitialCreate")]
+    [Migration("20260927084603_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -38,14 +38,17 @@ namespace DayManager.Data.Migrations
                     b.Property<int>("CompletedCount")
                         .HasColumnType("INTEGER");
 
-                    b.Property<DateOnly>("Date")
-                        .HasColumnType("TEXT");
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Date")
+                        .HasColumnType("INTEGER");
 
                     b.Property<int>("DayType")
                         .HasColumnType("INTEGER");
 
-                    b.Property<DateTimeOffset?>("DeletedAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long?>("DeletedAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("DeviceId")
                         .HasColumnType("TEXT");
@@ -65,8 +68,8 @@ namespace DayManager.Data.Migrations
                     b.Property<int>("PlannedCount")
                         .HasColumnType("INTEGER");
 
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("UserNote")
                         .HasColumnType("TEXT");
@@ -93,23 +96,26 @@ namespace DayManager.Data.Migrations
                     b.Property<int?>("ActualMinutes")
                         .HasColumnType("INTEGER");
 
-                    b.Property<DateTimeOffset?>("CompletedAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long?>("CompletedAt")
+                        .HasColumnType("INTEGER");
 
-                    b.Property<DateTimeOffset?>("DeletedAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("DeletedAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("DeviceId")
                         .HasColumnType("TEXT");
 
-                    b.Property<DateTimeOffset?>("DueAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long?>("DueAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<int?>("DurationMinutes")
                         .HasColumnType("INTEGER");
 
-                    b.Property<DateTimeOffset?>("EndAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long?>("EndAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<int?>("EstimateMinutes")
                         .HasColumnType("INTEGER");
@@ -128,8 +134,8 @@ namespace DayManager.Data.Migrations
                         .HasMaxLength(4000)
                         .HasColumnType("TEXT");
 
-                    b.Property<DateTimeOffset?>("OriginalStart")
-                        .HasColumnType("TEXT");
+                    b.Property<long?>("OriginalStart")
+                        .HasColumnType("INTEGER");
 
                     b.Property<Guid?>("ParentTaskId")
                         .HasColumnType("TEXT");
@@ -154,11 +160,11 @@ namespace DayManager.Data.Migrations
                     b.Property<int>("SortOrder")
                         .HasColumnType("INTEGER");
 
-                    b.Property<DateTimeOffset?>("StartAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long?>("StartAt")
+                        .HasColumnType("INTEGER");
 
-                    b.Property<DateTimeOffset?>("StartedAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long?>("StartedAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<int>("Status")
                         .HasColumnType("INTEGER");
@@ -179,13 +185,15 @@ namespace DayManager.Data.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("TEXT");
 
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<int>("Version")
                         .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("CreatedAt");
 
                     b.HasIndex("DueAt");
 
@@ -212,8 +220,11 @@ namespace DayManager.Data.Migrations
                         .HasMaxLength(16)
                         .HasColumnType("TEXT");
 
-                    b.Property<DateTimeOffset?>("DeletedAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("DeletedAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("Description")
                         .HasMaxLength(2000)
@@ -230,11 +241,11 @@ namespace DayManager.Data.Migrations
                     b.Property<int>("Status")
                         .HasColumnType("INTEGER");
 
-                    b.Property<DateTimeOffset?>("TargetDate")
-                        .HasColumnType("TEXT");
+                    b.Property<long?>("TargetDate")
+                        .HasColumnType("INTEGER");
 
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<int>("Version")
                         .HasColumnType("INTEGER");
@@ -263,8 +274,11 @@ namespace DayManager.Data.Migrations
                         .HasMaxLength(300)
                         .HasColumnType("TEXT");
 
-                    b.Property<DateTimeOffset?>("DeletedAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("DeletedAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("DeviceId")
                         .HasColumnType("TEXT");
@@ -272,8 +286,8 @@ namespace DayManager.Data.Migrations
                     b.Property<int>("DurationSeconds")
                         .HasColumnType("INTEGER");
 
-                    b.Property<DateTimeOffset>("EndAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long>("EndAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<bool>("IsEntertainment")
                         .HasColumnType("INTEGER");
@@ -281,11 +295,11 @@ namespace DayManager.Data.Migrations
                     b.Property<int>("Platform")
                         .HasColumnType("INTEGER");
 
-                    b.Property<DateTimeOffset>("StartAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long>("StartAt")
+                        .HasColumnType("INTEGER");
 
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("TEXT");
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<int>("Version")
                         .HasColumnType("INTEGER");

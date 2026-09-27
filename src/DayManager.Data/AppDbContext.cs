@@ -1,5 +1,6 @@
 using DayManager.Core.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace DayManager.Data;
 
@@ -50,6 +51,96 @@ public class AppDbContext : DbContext
         ConfigureProject(modelBuilder.Entity<Project>());
         ConfigureUsageSession(modelBuilder.Entity<UsageSession>());
         ConfigureDailyContext(modelBuilder.Entity<DailyContext>());
+
+        ApplyTimeConverters(modelBuilder);
+    }
+
+    // ==================================================================
+    // 时间类型的存储方式
+    //
+    // 【背景：这里踩了一个真实的坑】
+    // EF Core 的 SQLite 提供程序不支持直接比较 DateTimeOffset。
+    // 也就是说，下面这种看起来完全正常的查询，编译毫无问题，运行时却直接抛异常：
+    //
+    //     db.Items.Where(x => x.StartAt >= 今天零点 && x.StartAt < 明天零点)
+    //     → InvalidOperationException: The LINQ expression could not be translated
+    //
+    // 而日程软件的全部核心查询（查今天、查本周、查某个时间段）都建立在时间范围比较上，
+    // 所以这不是一个能绕开的小问题，必须在模型层彻底解决。
+    //
+    // 【解法：换成整数存储】
+    // 把 DateTimeOffset 统一转成"距 1970 年的毫秒数"（Unix 毫秒）存成 INTEGER。
+    // 好处有三：
+    //   1. 整数可以直接比大小，SQL 翻译不再有任何障碍；
+    //   2. 它表示的是绝对时刻，天然跨时区正确。
+    //      之前直接存带偏移的文本（"2026-09-27 09:00:00+08:00"）时，
+    //      一旦手机和电脑处于不同时区，连"谁在前谁在后"都可能判错；
+    //   3. 体积小、索引效率高。
+    //
+    // 【代价是什么】
+    // 数据库文件里这一列是数字，用 SQLite 浏览器直接看不出日期。
+    // 需要肉眼查看时可以这么查：
+    //     SELECT datetime(StartAt/1000, 'unixepoch', 'localtime') FROM items;
+    // 另外读出来的 DateTimeOffset 偏移量是 0（UTC），
+    // 显示到界面前必须调用 .ToLocalTime() 转成本地时间——这一步千万别漏。
+    //
+    // 【为什么现在改代价最小】
+    // 数据库里目前只有一条测试记录。这类存储方案的修正越晚越贵：
+    // 等真实数据攒了半年再改，就得写一条数据迁移脚本，
+    // 还得承担"迁移过程中数据出错"的风险。所以现在改正是时候。
+    // ==================================================================
+
+    private static readonly ValueConverter<DateTimeOffset, long> DateTimeOffsetToLong = new(
+        v => v.ToUniversalTime().ToUnixTimeMilliseconds(),
+        v => DateTimeOffset.FromUnixTimeMilliseconds(v));
+
+    private static readonly ValueConverter<DateTimeOffset?, long?> NullableDateTimeOffsetToLong = new(
+        v => v.HasValue ? v.Value.ToUniversalTime().ToUnixTimeMilliseconds() : null,
+        v => v.HasValue ? DateTimeOffset.FromUnixTimeMilliseconds(v.Value) : null);
+
+    // DateOnly 同理，存成 20260927 这样的整数，既能比大小也勉强能看懂。
+    private static readonly ValueConverter<DateOnly, int> DateOnlyToInt = new(
+        v => v.Year * 10000 + v.Month * 100 + v.Day,
+        v => new DateOnly(v / 10000, v / 100 % 100, v % 100));
+
+    private static readonly ValueConverter<DateOnly?, int?> NullableDateOnlyToInt = new(
+        v => v.HasValue ? v.Value.Year * 10000 + v.Value.Month * 100 + v.Value.Day : null,
+        v => v.HasValue ? new DateOnly(v.Value / 10000, v.Value / 100 % 100, v.Value % 100) : null);
+
+    /// <summary>
+    /// 自动给所有实体的时间字段套上转换器。
+    ///
+    /// 【为什么不逐个字段写 HasConversion】
+    /// 因为迟早会忘记某个字段。忘了之后的表现非常隐蔽：
+    /// 那个字段能正常读写，但只要一用它做范围查询就崩溃。
+    /// 这里统一遍历一遍模型，任何新增的时间字段都自动生效，不会漏。
+    /// </summary>
+    private static void ApplyTimeConverters(ModelBuilder modelBuilder)
+    {
+        foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+        {
+            foreach (var property in entityType.GetProperties())
+            {
+                var clrType = property.ClrType;
+
+                if (clrType == typeof(DateTimeOffset))
+                {
+                    property.SetValueConverter(DateTimeOffsetToLong);
+                }
+                else if (clrType == typeof(DateTimeOffset?))
+                {
+                    property.SetValueConverter(NullableDateTimeOffsetToLong);
+                }
+                else if (clrType == typeof(DateOnly))
+                {
+                    property.SetValueConverter(DateOnlyToInt);
+                }
+                else if (clrType == typeof(DateOnly?))
+                {
+                    property.SetValueConverter(NullableDateOnlyToInt);
+                }
+            }
+        }
     }
 
     private static void ConfigureItem(Microsoft.EntityFrameworkCore.Metadata.Builders.EntityTypeBuilder<Item> b)
@@ -94,6 +185,7 @@ public class AppDbContext : DbContext
         b.HasIndex(x => x.ProjectId);          // 项目进度查询
         b.HasIndex(x => x.RecurrenceParentId); // 展开重复日程时找覆盖记录
         b.HasIndex(x => x.UpdatedAt);          // 增量同步的核心索引
+        b.HasIndex(x => x.CreatedAt);          // 按创建时间排序 + 启动延迟统计区间查询
 
         // 软删除全局过滤：普通查询自动看不见被删的记录。
         //
@@ -172,6 +264,16 @@ public class AppDbContext : DbContext
             {
                 case EntityState.Added:
                     entry.Entity.UpdatedAt = now;
+
+                    // CreatedAt 只在首次新建时写一次，之后永不更新。
+                    // 判断 default 而不是无条件赋值，是为了给"同步过来的数据"留后路：
+                    // 从服务端拉下来的记录带着它原本的创建时间，不能被本地接收时间覆盖掉，
+                    // 否则跨设备一同步，所有历史任务的启动延迟数据就全废了。
+                    if (entry.Entity.CreatedAt == default)
+                    {
+                        entry.Entity.CreatedAt = now;
+                    }
+
                     // 新建时版本号从 1 开始。允许外部显式指定（比如从服务端同步过来的数据），
                     // 所以只在没设过的情况下赋初值。
                     if (entry.Entity.Version <= 0)

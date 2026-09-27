@@ -1,4 +1,6 @@
-﻿using DayManager.Data;
+﻿using DayManager.App.ViewModels;
+using DayManager.Data;
+using DayManager.Data.Repositories;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -50,6 +52,24 @@ public static class MauiProgram
 		// 用工厂的话，每次操作现造一个短命实例，用完就释放，是最稳妥的用法。
 		builder.Services.AddDbContextFactory<AppDbContext>(options =>
 			options.UseSqlite($"Data Source={dbPath}"));
+
+		// ================= 业务服务注册 =================
+
+		// 【生命周期的三种选择：Singleton / Scoped / Transient】
+		//   Singleton：整个程序共用一个实例
+		//   Scoped   ：一次"作用域"内共用一个（Web 里通常是一次请求）
+		//   Transient：每次要都新建一个
+		// 这里的选择依据是这个对象自己持不持有状态：
+		//   ItemRepository 只拿着数据库工厂，不保存任何业务数据 → Singleton 没问题，省去反复创建
+		//   MainViewModel 会保存一堆当前状态（今天列表、输入框内容）→ 用 Transient，
+		//     这样每次打开页面都是干净的，不会带着上一次的旧数据
+		builder.Services.AddSingleton<ItemRepository>();
+		builder.Services.AddTransient<MainViewModel>();
+
+		// 页面也要注册，因为 AppShell 是通过 DataTemplate 让 DI 容器来创建 MainPage 的。
+		// 不注册的话，容器会尝试找无参构造函数 → MainPage 又需要一个 MainViewModel → 直接崩。
+		// 这是用 Shell + DI 时最容易漏的一步。
+		builder.Services.AddTransient<MainPage>();
 
 #if DEBUG
 		builder.Logging.AddDebug();

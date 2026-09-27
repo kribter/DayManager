@@ -16,7 +16,7 @@ namespace DayManager.Data.Migrations
                 columns: table => new
                 {
                     Id = table.Column<Guid>(type: "TEXT", nullable: false),
-                    Date = table.Column<DateOnly>(type: "TEXT", nullable: false),
+                    Date = table.Column<int>(type: "INTEGER", nullable: false),
                     DayType = table.Column<int>(type: "INTEGER", nullable: false),
                     IsHoliday = table.Column<bool>(type: "INTEGER", nullable: false),
                     UserNote = table.Column<string>(type: "TEXT", nullable: true),
@@ -29,8 +29,9 @@ namespace DayManager.Data.Migrations
                     FocusMinutes = table.Column<int>(type: "INTEGER", nullable: false),
                     EntertainmentMinutes = table.Column<int>(type: "INTEGER", nullable: false),
                     Version = table.Column<int>(type: "INTEGER", nullable: false),
-                    UpdatedAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: false),
-                    DeletedAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: true),
+                    CreatedAt = table.Column<long>(type: "INTEGER", nullable: false),
+                    UpdatedAt = table.Column<long>(type: "INTEGER", nullable: false),
+                    DeletedAt = table.Column<long>(type: "INTEGER", nullable: true),
                     DeviceId = table.Column<string>(type: "TEXT", nullable: true)
                 },
                 constraints: table =>
@@ -46,11 +47,12 @@ namespace DayManager.Data.Migrations
                     Name = table.Column<string>(type: "TEXT", maxLength: 200, nullable: false),
                     Description = table.Column<string>(type: "TEXT", maxLength: 2000, nullable: true),
                     Color = table.Column<string>(type: "TEXT", maxLength: 16, nullable: true),
-                    TargetDate = table.Column<DateTimeOffset>(type: "TEXT", nullable: true),
+                    TargetDate = table.Column<long>(type: "INTEGER", nullable: true),
                     Status = table.Column<int>(type: "INTEGER", nullable: false),
                     Version = table.Column<int>(type: "INTEGER", nullable: false),
-                    UpdatedAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: false),
-                    DeletedAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: true),
+                    CreatedAt = table.Column<long>(type: "INTEGER", nullable: false),
+                    UpdatedAt = table.Column<long>(type: "INTEGER", nullable: false),
+                    DeletedAt = table.Column<long>(type: "INTEGER", nullable: true),
                     DeviceId = table.Column<string>(type: "TEXT", nullable: true)
                 },
                 constraints: table =>
@@ -67,13 +69,14 @@ namespace DayManager.Data.Migrations
                     AppId = table.Column<string>(type: "TEXT", maxLength: 300, nullable: false),
                     AppName = table.Column<string>(type: "TEXT", maxLength: 300, nullable: true),
                     WindowTitle = table.Column<string>(type: "TEXT", maxLength: 1000, nullable: true),
-                    StartAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: false),
-                    EndAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: false),
+                    StartAt = table.Column<long>(type: "INTEGER", nullable: false),
+                    EndAt = table.Column<long>(type: "INTEGER", nullable: false),
                     DurationSeconds = table.Column<int>(type: "INTEGER", nullable: false),
                     IsEntertainment = table.Column<bool>(type: "INTEGER", nullable: false),
                     Version = table.Column<int>(type: "INTEGER", nullable: false),
-                    UpdatedAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: false),
-                    DeletedAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: true),
+                    CreatedAt = table.Column<long>(type: "INTEGER", nullable: false),
+                    UpdatedAt = table.Column<long>(type: "INTEGER", nullable: false),
+                    DeletedAt = table.Column<long>(type: "INTEGER", nullable: true),
                     DeviceId = table.Column<string>(type: "TEXT", nullable: true)
                 },
                 constraints: table =>
@@ -88,22 +91,22 @@ namespace DayManager.Data.Migrations
                     Id = table.Column<Guid>(type: "TEXT", nullable: false),
                     Title = table.Column<string>(type: "TEXT", maxLength: 200, nullable: false),
                     Notes = table.Column<string>(type: "TEXT", maxLength: 4000, nullable: true),
-                    StartAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: true),
-                    EndAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: true),
-                    DueAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: true),
+                    StartAt = table.Column<long>(type: "INTEGER", nullable: true),
+                    EndAt = table.Column<long>(type: "INTEGER", nullable: true),
+                    DueAt = table.Column<long>(type: "INTEGER", nullable: true),
                     IsAllDay = table.Column<bool>(type: "INTEGER", nullable: false),
                     TimeZoneId = table.Column<string>(type: "TEXT", maxLength: 64, nullable: false, defaultValue: "Asia/Shanghai"),
                     DurationMinutes = table.Column<int>(type: "INTEGER", nullable: true),
                     Status = table.Column<int>(type: "INTEGER", nullable: false),
-                    StartedAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: true),
-                    CompletedAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: true),
+                    StartedAt = table.Column<long>(type: "INTEGER", nullable: true),
+                    CompletedAt = table.Column<long>(type: "INTEGER", nullable: true),
                     EstimateMinutes = table.Column<int>(type: "INTEGER", nullable: true),
                     ActualMinutes = table.Column<int>(type: "INTEGER", nullable: true),
                     MinimalStep = table.Column<string>(type: "TEXT", maxLength: 500, nullable: true),
                     RRule = table.Column<string>(type: "TEXT", maxLength: 500, nullable: true),
                     ExDates = table.Column<string>(type: "TEXT", nullable: true),
                     RecurrenceParentId = table.Column<Guid>(type: "TEXT", nullable: true),
-                    OriginalStart = table.Column<DateTimeOffset>(type: "TEXT", nullable: true),
+                    OriginalStart = table.Column<long>(type: "INTEGER", nullable: true),
                     ProjectId = table.Column<Guid>(type: "TEXT", nullable: true),
                     ParentTaskId = table.Column<Guid>(type: "TEXT", nullable: true),
                     Tags = table.Column<string>(type: "TEXT", maxLength: 1000, nullable: true),
@@ -111,8 +114,9 @@ namespace DayManager.Data.Migrations
                     Reminders = table.Column<string>(type: "TEXT", maxLength: 1000, nullable: true),
                     SortOrder = table.Column<int>(type: "INTEGER", nullable: false),
                     Version = table.Column<int>(type: "INTEGER", nullable: false),
-                    UpdatedAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: false),
-                    DeletedAt = table.Column<DateTimeOffset>(type: "TEXT", nullable: true),
+                    CreatedAt = table.Column<long>(type: "INTEGER", nullable: false),
+                    UpdatedAt = table.Column<long>(type: "INTEGER", nullable: false),
+                    DeletedAt = table.Column<long>(type: "INTEGER", nullable: true),
                     DeviceId = table.Column<string>(type: "TEXT", nullable: true)
                 },
                 constraints: table =>
@@ -141,6 +145,11 @@ namespace DayManager.Data.Migrations
                 name: "IX_daily_contexts_UpdatedAt",
                 table: "daily_contexts",
                 column: "UpdatedAt");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_items_CreatedAt",
+                table: "items",
+                column: "CreatedAt");
 
             migrationBuilder.CreateIndex(
                 name: "IX_items_DueAt",

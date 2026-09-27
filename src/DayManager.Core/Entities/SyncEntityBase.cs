@@ -34,6 +34,22 @@ public abstract class SyncEntityBase
     public int Version { get; set; }
 
     /// <summary>
+    /// 创建时间。
+    ///
+    /// 【为什么必须有 CreatedAt，光有 UpdatedAt 不够】
+    /// 你自己的痛点是"知道该做但启动不了"，对应的核心指标是「启动延迟」：
+    ///     启动延迟 = StartedAt（真正开始的时间） - CreatedAt（想到要做的时刻）
+    /// 没有 CreatedAt，这个减法无从下手，我们就只能统计"完成率"这种结果指标，
+    /// 而看不到过程有没有在改善。
+    ///
+    /// 【为什么不能拿 UpdatedAt 顶替】
+    /// UpdatedAt 每次修改都会刷新。假设你在晚上八点把早上创建的任务改了个错别字，
+    /// UpdatedAt 就变成了晚上八点，算出来的"延迟"完全是假的。
+    /// 创建时间必须是只写一次、永不改变的值。
+    /// </summary>
+    public DateTimeOffset CreatedAt { get; set; }
+
+    /// <summary>
     /// 最后更新时间。
     ///
     /// 【为什么用 DateTimeOffset 而不是 DateTime】
