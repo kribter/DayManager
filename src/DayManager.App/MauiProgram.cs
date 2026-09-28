@@ -22,20 +22,26 @@ public static class MauiProgram
 
 		// ================= 数据库注册 =================
 
-		// 【为什么用 FileSystem.AppDataDirectory 而不是写死路径】
-		// 写死路径（比如 "F:\data\app.db"）在手机上会因为没有这条盘符直接崩溃，
-		// 而且各平台规定的应用数据目录完全不一样。这个属性会自动给出
-		// 「本应用专属、有读写权限、卸载时随应用一起清掉」的正确目录。
+		// 【Windows 端固定放在项目下的 data\，手机端走系统标准目录】
 		//
-		// 【为什么又留了一个环境变量开关】
-		// 标准目录虽然规范，但对个人自用有两个麻烦：路径深不好找、不方便备份。
-		// 所以允许你用 DAYMANAGER_DATA_DIR 这个环境变量把库指定到任意位置，
-		// 比如 F:\DayManager\data，甚至网盘同步目录。
-		// 不设这个变量时行为完全不变，手机上永远走标准路径，两全其美。
-		var customDir = Environment.GetEnvironmentVariable("DAYMANAGER_DATA_DIR");
-		var dataDir = string.IsNullOrWhiteSpace(customDir)
-			? FileSystem.AppDataDirectory
-			: customDir;
+		// 为什么 Windows 端可以写死：这是给你自己用的程序，项目位置不会变。
+		// 写死之后，不管你是双击 start.bat、直接点 exe、还是在 Visual Studio 里按 F5，
+		// 用的都是同一个数据库。
+		//
+		// 【这里删掉过一个设计，值得记住为什么】
+		// 原先是读环境变量 DAYMANAGER_DATA_DIR，设了就用环境变量、没设就用默认目录。
+		// 看起来更灵活，实际是个坑：从 bat 启动（有变量）和直接点 exe（没变量）
+		// 会落到两个不同的库，表现为「清单突然空了」，第一反应还以为数据丢了。
+		// 结论：这种基础配置，单一来源比灵活重要得多，能写死就写死。
+		//
+		// 为什么手机端不能写死：Android 上没有 F: 这种盘符，往任意目录写文件也会被系统拒绝。
+		// FileSystem.AppDataDirectory 会给出「本应用专属、有读写权限」的正确目录。
+		//
+		// 为什么用运行时判断而不是 #if WINDOWS：编译符号的名字容易记错，
+		// 写错了不会报错，只会静默走错分支——运行时判断没有这个风险。
+		var dataDir = OperatingSystem.IsWindows()
+			? @"F:\DayManager\data"
+			: FileSystem.AppDataDirectory;
 
 		// 目录不存在就先建出来，避免 SQLite 报「找不到路径」这种低级错误
 		if (!Directory.Exists(dataDir))

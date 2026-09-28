@@ -11,15 +11,14 @@ rem      start.bat nobuild    跳过编译，直接启动上一次的构建结�
 rem
 rem  为什么要这个脚本:
 rem    1. 真正的 exe 藏在 bin\Debug\net10.0-windows...\win-x64\ 深处，手点太麻烦
-rem    2. 双击 exe 时没有设置 DAYMANAGER_DATA_DIR，数据库会跑到系统默认位置，
-rem       于是你会看到一份空的清单，以为数据丢了。这里统一把数据目录固定到项目下的 data\
+rem    2. 数据库位置由程序自己固定在项目下的 data\，不依赖任何环境变量。
+rem       所以不管你怎么启动，用的都是同一个库
 rem    3. 启动前自动关掉旧实例 -- 否则旧进程占着 exe 文件，编译会失败
 rem ============================================================
 
 rem /d 保证切到脚本自己所在的盘符和目录，这样从任何地方双击都能正常工作
 cd /d "%~dp0"
 
-set "DATA_DIR=%~dp0data"
 set "TFM=net10.0-windows10.0.19041.0"
 set "PROJ=src\DayManager.App\DayManager.App.csproj"
 set "EXE=src\DayManager.App\bin\Debug\%TFM%\win-x64\DayManager.App.exe"
@@ -63,11 +62,8 @@ if not exist "%EXE%" (
     exit /b 1
 )
 
-if not exist "%DATA_DIR%" mkdir "%DATA_DIR%"
-
 echo 正在启动 DayManager...
-echo 数据目录: %DATA_DIR%
-set "DAYMANAGER_DATA_DIR=%DATA_DIR%"
+echo 数据目录: 项目下的 data\（程序内固定，不随启动方式改变）
 start "" "%EXE%"
 
 echo 已启动。这个窗口可以关掉了。
