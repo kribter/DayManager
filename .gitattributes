@@ -24,3 +24,9 @@
 
 # 数据库文件同样按二进制处理
 *.db binary
+
+# Windows 批处理脚本必须永远是 CRLF。
+# cmd.exe 对 LF 结尾的 .bat 处理不可靠（goto 标签、括号代码块都可能解析错），
+# 而上面 text=auto 默认入库转 LF，所以这里显式钉死为 CRLF。
+*.bat text eol=crlf
+*.cmd text eol=crlf
