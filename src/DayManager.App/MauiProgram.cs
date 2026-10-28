@@ -236,6 +236,7 @@ public static class MauiProgram
 #if WINDOWS
 		StartUsageTracking(app.Services);
 		StartIntervention(app.Services);
+		WarmUpBackend(app.Services);
 #endif
 
 		return app;
@@ -268,6 +269,45 @@ public static class MauiProgram
 				// 采集挂了不该让程序起不来：用户的日程才是主角。
 				// 但要留下痕迹，否则"时间页一直是空的"会被当成界面 bug 查半天。
 				CrashLogger.Write("使用时长采集启动失败", ex);
+			}
+		});
+	}
+
+	/// <summary>
+	/// 启动时就把后端确保在跑。
+	///
+	/// 【为什么要加这一段】
+	/// 原先后端只在"打开对话页/拆解页"时才被拉起来，因为那是唯一用到它的地方。
+	/// 加上后台常驻之后这条就不成立了：开机自启是 <c>--background</c> 启动的，
+	/// 窗口从头到尾不露面，也就没有任何机会打开那两个页面——
+	/// 结果是"电脑开了一整天，AI 一次都没连上"。
+	/// 马上要做的 AI 主动提醒，恰恰是要在没人碰界面的时刻说话的，缺了后端就只能干等着。
+	///
+	/// 【为什么放在 client 启动路径里，而不是写成开机自启】
+	/// 还是那个原则：由客户端负责把它拉起来，不要让它永远常驻。
+	/// 区别只在于把"要的时候"从"打开对话页"提前到"客户端一启动"。
+	///
+	/// 【为什么扔到后台线程】
+	/// 它内部最多要等 20 秒。放在启动路径上就是"开个程序要等半天"，
+	/// 而这期间界面上并不缺它（日程、时间页、干预全是本地的）。
+	/// 与此同时窗口照常出来，用户在对话页发出的第一个请求
+	/// 会自己再走一遍 BackendGuard —— 那时后端多半已经好了。
+	///
+	/// 【为什么失败了只写日志】
+	/// 后端挂了不该让客户端起不来，用户的日程才是主角。
+	/// 对话页那边的 EnsureAsync 还会再给一次机会，也会把"连不上"显示出来。
+	/// </summary>
+	private static void WarmUpBackend(IServiceProvider services)
+	{
+		_ = Task.Run(async () =>
+		{
+			try
+			{
+				await services.GetRequiredService<BackendGuard>().EnsureAsync();
+			}
+			catch (Exception ex)
+			{
+				CrashLogger.Write("后端预热失败", ex);
 			}
 		});
 	}

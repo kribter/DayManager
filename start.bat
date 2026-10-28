@@ -5,17 +5,19 @@ rem ============================================================
 rem  DayManager 启动脚本
 rem
 rem  用法:
-rem      start.bat            编译最新代码，然后启动后端和 Windows 客户端
+rem      start.bat            编译最新代码，然后启动 Windows 客户端
 rem      start.bat nobuild    跳过编译，直接启动上一次的构建结果
 rem
 rem  为什么要这个脚本:
 rem    1. 真正的 exe 藏在 bin\Debug\net10.0-windows...\win-x64\ 深处，手点太麻烦
 rem    2. 数据库位置由程序自己固定在项目下的 data\，不依赖任何环境变量。
 rem       所以不管你怎么启动，用的都是同一个库
-rem    3. AI 的拆解功能依赖本机后端，脚本会一并拉起来 ——
-rem       单独记着「先开后端」这件事太容易忘，忘了的表现是界面上写着「连不上后端」，
-rem       而你会以为是程序坏了
-rem    4. 启动前自动关掉旧实例 —— 否则旧进程占着文件，编译会失败
+rem    3. 启动前自动关掉旧实例 —— 否则旧进程占着文件，编译会失败
+rem
+rem  【后端不在这里启动了（2026-10-28 起）】
+rem    客户端一启动就会自己把后端拉起来（隐藏窗口，不占任务栏），
+rem    所以这里不再 start 一个控制台窗口 —— 那个黑框弹出来碍事，
+rem    用户还得纠结「能不能关掉」。要看后端日志，见文件末尾的说明。
 rem
 rem  【这个文件必须存成 GBK（ANSI）编码，不能存成 UTF-8】
 rem  cmd 按字节读取批处理文件，遇到 UTF-8 的中文时，有些字会被它当成命令分隔符，
@@ -86,8 +88,8 @@ if errorlevel 1 (
     echo.
     echo [错误] 后端编译失败，上面就是编译器的报错信息，修好后再运行本脚本。
     echo        如果报错里写着「无法复制到 ... DayManager.Api.dll / 文件已被使用」，
-    echo        说明旧后端还占着文件：关掉那个最小化的「DayManager 后端」窗口，
-    echo        或者跑一次 taskkill /F /IM dotnet.exe，再重新运行本脚本。
+    echo        说明旧后端还占着文件：在任务管理器里结束还挂着的 dotnet.exe，
+    echo        或者注销/重启一次，再重新运行本脚本。
     pause
     exit /b 1
 )
@@ -103,24 +105,11 @@ if errorlevel 1 (
 
 :launch
 
-rem ---- 后端：已经在跑就复用，没跑就拉起来 ----
-rem 用 netstat 探测而不是无脑 start 一个新实例：
-rem 重复启动会因为端口被占而立刻退出，留下一个一闪而过的黑窗口，什么都看不清。
-netstat -ano | findstr ":%API_PORT%" | findstr "LISTENING" >nul
-if not errorlevel 1 (
-    echo 后端已在运行。
-    goto :run_app
-)
-
-echo 正在启动后端服务（AI 拆解需要它）...
-rem 用 --project 而不是直接跑编译好的 dll，是因为后者的工作目录是 bin\...，
-rem 而 appsettings.Local.json（里面存着 AI 密钥）不在那个目录下，
-rem 结果就是后端能起来但读不到密钥，界面上显示「AI 还没配好」。
-rem --project 会把项目目录作为工作目录，配置文件才能被正确找到。
-start "DayManager 后端" /MIN "%DOTNET%" run --project "%API_PROJ%" --no-build --no-launch-profile
-
-rem 给后端几秒钟启动完，否则客户端一进去就显示「连不上后端」，白白吓人一跳
-ping -n 9 127.0.0.1 >nul
+rem ---- 后端不在这里启动 ----
+rem 以前这里会 start "DayManager 后端" /MIN dotnet run，弹一个最小化控制台窗口；
+rem 关掉它后端就没了，留着又占地方。现在客户端启动时自己会拉起后端
+rem （MauiProgram.WarmUpBackend -> BackendGuard，隐藏窗口），
+rem 这里再起一个纯属重复，还多占一个窗口。
 
 :run_app
 if not exist "%EXE%" (
@@ -135,8 +124,8 @@ echo 数据目录: 项目下的 data\（程序内固定，不随启动方式改变）
 start "" "%EXE%"
 
 echo.
-echo 已启动。
-echo 那个最小化的「DayManager 后端」窗口别关，关了 AI 拆解就用不了了。
-echo 不需要 AI 的时候，关掉它软件照样能用，只是拆解功能会提示连不上。
+echo 已启动。后端由客户端自己在后台拉起，没有窗口，不用管它。
+echo 想看后端日志（排查 AI 问题时）: 打开 cmd 进入 src\DayManager.Api，
+echo 运行  dotnet run --no-build --no-launch-profile
 ping -n 5 127.0.0.1 >nul
 endlocal
