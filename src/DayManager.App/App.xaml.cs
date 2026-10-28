@@ -2,6 +2,7 @@
 
 #if WINDOWS
 using DayManager.App.Platforms.Windows;
+using DayManager.App.Services;
 #endif
 
 namespace DayManager.App;
@@ -18,6 +19,14 @@ public partial class App : Application
 		var window = new Window(new AppShell());
 
 #if WINDOWS
+		// 托盘：窗口可以不见，采集和提醒不能停。
+		//
+		// 【为什么在这里挂，而不是界面某页里】
+		// 它是"整个程序的去留"，不是某一页的功能；
+		// 而且要在窗口出现之前就准备好——开机自启时窗口从头到尾都不该露面。
+		// 第二个参数就是告诉它：这次是我自己起来的，别出来。
+		MauiProgram.Services.GetService<IWindowShell>()?.Attach(window, WindowsAutoStart.IsLaunchedInBackground());
+
 		// 关窗时把使用时长采集停掉。
 		//
 		// 【为什么不写也能用】

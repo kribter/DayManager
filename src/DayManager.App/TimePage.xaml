@@ -357,6 +357,45 @@
                     </VerticalStackLayout>
                 </Border>
 
+                <!-- ================= 后台与开机 =================
+
+                     【为什么这一块必须摆出来】
+                     "窗口不见了但程序还在跑"这件事如果只有一个地方能改（托盘菜单），
+                     人要么不知道它存在，要么知道了也不知道怎么关掉。
+                     而"以为关掉了其实还在后台记着"是比任何 bug 都严重的失信。 -->
+                <Border Grid.Row="0"
+                        Style="{StaticResource CardStyle}"
+                        IsVisible="{Binding HasShellControls}"
+                        Margin="0,12,0,0"
+                        Padding="14,12">
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="14" />
+                    </Border.StrokeShape>
+
+                    <VerticalStackLayout Spacing="8">
+                        <Label Text="后台与开机"
+                               Style="{StaticResource CardTitle}" />
+
+                        <HorizontalStackLayout Spacing="8">
+                            <Button Text="{Binding AutoStartText}"
+                                    Style="{StaticResource ChipButton}"
+                                    Command="{Binding ToggleAutoStartCommand}" />
+
+                            <Button Text="{Binding CloseToTrayText}"
+                                    Style="{StaticResource ChipButton}"
+                                    Command="{Binding ToggleCloseToTrayCommand}" />
+                        </HorizontalStackLayout>
+
+                        <Label Text="藏起来之后，使用时长照记、提醒照弹。任务栏不再占位置，托盘里能把它叫回来。"
+                               Style="{StaticResource Caption}" />
+
+                        <Button Text="现在就藏到托盘"
+                                Style="{StaticResource ChipButton}"
+                                HorizontalOptions="Start"
+                                Command="{Binding HideToTrayCommand}" />
+                    </VerticalStackLayout>
+                </Border>
+
                 <!-- 空状态里必须说清楚"为什么没有"。
                      只说"还没有数据"，用户会以为是这一页坏了——
                      而实际原因可能是程序刚开、或者人不在。 -->

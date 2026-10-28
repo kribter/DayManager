@@ -30,6 +30,21 @@ public static class MauiProgram
 		// 挂晚了那一批异常一个都记不到。
 		CrashLogger.Init();
 
+#if WINDOWS
+		// 单实例：必须在起来任何东西之前判断。
+		// 放晚了，第二个实例已经启动了自己的采集器和提醒引擎——
+		// 那时候再退出，用户刚才那一下双击已经在他不知道的地方造成影响了。
+		if (!SingleInstance.TryBecomeOwner())
+		{
+			// 已经在跑了：把它叫出来，然后这一份就到此为止。
+			SingleInstance.FocusExisting();
+
+			// 这里不能优雅地返回：调 CreateMauiApp 的那条链路还在等着一个 App 实例。
+			// 进程到此终止，没有任何窗口、没有任何定时器被创建过。
+			Environment.Exit(0);
+		}
+#endif
+
 		var builder = MauiApp.CreateBuilder();
 		builder
 			.UseMauiApp<App>()
@@ -127,6 +142,11 @@ public static class MauiProgram
 		// 干预引擎。只在有采集器和通知的平台上注册——
 		// 它的两个输入缺一个，功能就只能是个空转的定时器。
 		builder.Services.AddSingleton<InterventionService>();
+
+		// 托盘（藏起来但继续跑）与开机自启。
+		// 这两样也是纯平台能力，界面层对着接口说话。
+		builder.Services.AddSingleton<IWindowShell, WindowsTray>();
+		builder.Services.AddSingleton<IAutoStartService, WindowsAutoStart>();
 #endif
 
 		// 任务的「更多」菜单：日程页和大任务详情页共用同一份实现，

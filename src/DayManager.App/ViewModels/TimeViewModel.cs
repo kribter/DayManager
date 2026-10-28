@@ -48,6 +48,17 @@ public partial class TimeViewModel : ObservableObject
     private readonly InterventionService? _intervention;
 
     /// <summary>
+    /// 托盘（把窗口藏起来但让程序继续跑）与开机自启。
+    ///
+    /// 【为什么这两个要用可空 + 接口】
+    /// 和干预引擎一样的处境：它们是 Windows 特有的能力。
+    /// Android 上没有托盘这回事，构造时注入 null，这一块设置就不显示——
+    /// 比在界面层写一堆平台判断干净。
+    /// </summary>
+    private readonly IWindowShell? _shell;
+    private readonly IAutoStartService? _autoStart;
+
+    /// <summary>
     /// 自动刷新间隔。
     ///
     /// 【为什么是 20 秒，而不是跟着采集的 5 秒】
@@ -70,12 +81,16 @@ public partial class TimeViewModel : ObservableObject
         UsageRepository usage,
         PolicyRepository policy,
         AppRuleRepository rules,
-        InterventionService? intervention = null)
+        InterventionService? intervention = null,
+        IWindowShell? shell = null,
+        IAutoStartService? autoStart = null)
     {
         _usage = usage;
         _policy = policy;
         _rules = rules;
         _intervention = intervention;
+        _shell = shell;
+        _autoStart = autoStart;
     }
 
     /// <summary>当前在用的规则（进程名 → 归类）。标记应用之后要重查一次列表，所以留一份。</summary>
@@ -241,6 +256,94 @@ public partial class TimeViewModel : ObservableObject
     /// <summary>时间页上有干预设置区的前提：这个平台注册了干预引擎。</summary>
     public bool HasIntervention => _intervention is not null;
 
+    // ================= 后台与开机（托盘） =================
+
+    /// <summary>
+    /// 时间页上有没有"后台与开机"这一块。
+    ///
+    /// 【为什么按能力显示而不是永远显示】
+    /// 这一整块只有在真能操作托盘的平台上才有意义。
+    /// 显示一堆灰掉的按钮，比不显示更难受——它暗示"这里有，只是你点了没反应"。
+    /// </summary>
+    public bool HasShellControls => _shell?.IsSupported == true;
+
+    /// <summary>注册表里现在登记了没有。</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AutoStartText))]
+    public partial bool IsAutoStartOn { get; set; }
+
+    /// <summary>改不了自启时要说清为什么，而不是让按钮看起来像坏了。</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AutoStartText))]
+    public partial bool IsAutoStartSupported { get; set; }
+
+    public string AutoStartText =>
+        IsAutoStartSupported
+            ? (IsAutoStartOn ? "开机自启：开" : "开机自启：关")
+            : "开机自启：当前不能设置";
+
+    /// <summary>
+    /// 点 X 时是藏起来还是真退出。
+    ///
+    /// 【为什么默认是"藏"】
+    /// 这个软件要拦的是"打开电脑就开始刷"——那一刻没有人会先打开它。
+    /// 默认藏起来意味着它不会因为你关过一次窗口就整天缺席；
+    /// 想要它彻底停下来，从托盘菜单里退出，那是一个明确的动作。
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CloseToTrayText))]
+    public partial bool IsCloseToTray { get; set; } = true;
+
+    public string CloseToTrayText => IsCloseToTray ? "关闭窗口时：藏到托盘继续跑" : "关闭窗口时：真的退出";
+
+    /// <summary>
+    /// 登记 / 取消开机自启。
+    ///
+    /// 【为什么失败要弹框而不是静默】
+    /// 写注册表失败（权限、被策略软件拦）不会自己好转，
+    /// 而用户看到的是"我点了开，它又跳回关"——比任何时候都需要一句解释。
+    /// </summary>
+    [RelayCommand]
+    private async Task ToggleAutoStartAsync()
+    {
+        if (_autoStart is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!_autoStart.TrySetEnabled(!IsAutoStartOn, out var error))
+            {
+                await ShowMessageAsync("没改成", error);
+                return;
+            }
+
+            IsAutoStartOn = _autoStart.IsEnabled;
+        }
+        catch (Exception ex)
+        {
+            CrashLogger.Write("切换开机自启", ex);
+        }
+    }
+
+    /// <summary>切换"X 是藏还是退"。立刻告诉托盘，不用等下一次刷新。</summary>
+    [RelayCommand]
+    private void ToggleCloseToTray()
+    {
+        IsCloseToTray = !IsCloseToTray;
+        _shell?.SetCloseToTray(IsCloseToTray);
+
+        _ = SavePolicyAsync(PolicyKeys.CloseToTray, IsCloseToTray ? "true" : "false");
+    }
+
+    /// <summary>
+    /// 现在就把窗口藏起来——用来立刻验证托盘通不通，
+    /// 不必先琢磨 X 按钮按下去会发生什么。
+    /// </summary>
+    [RelayCommand]
+    private void HideToTray() => _shell?.HideToTray(notify: true);
+
     /// <summary>
     /// 正在把库里的值写进界面。
     ///
@@ -307,11 +410,22 @@ public partial class TimeViewModel : ObservableObject
         {
             var enabled = await _policy.GetBoolAsync(PolicyKeys.InterventionEnabled, true);
             var threshold = await _policy.GetIntAsync(PolicyKeys.ThresholdMinutes, 30);
+            var closeToTray = await _policy.GetBoolAsync(PolicyKeys.CloseToTray, true);
 
             _suppressPolicySave = true;
             IsReminderOn = enabled;
             ThresholdMinutes = threshold;
+            IsCloseToTray = closeToTray;
             _suppressPolicySave = false;
+
+            // 托盘那边马上要知道：它在任何界面操作之前就得按这个偏好拦住"关闭"。
+            _shell?.SetCloseToTray(IsCloseToTray);
+
+            if (_autoStart is not null)
+            {
+                IsAutoStartSupported = _autoStart.IsSupported;
+                IsAutoStartOn = _autoStart.IsEnabled;
+            }
         }
         catch (Exception ex)
         {
@@ -773,6 +887,16 @@ public partial class TimeViewModel : ObservableObject
         }
 
         return minutes == 0 ? $"{hours} 小时" : $"{hours} 小时 {minutes} 分";
+    }
+
+    /// <summary>弹一句话给主人看（和错误提示同一套习惯，别一个用 Alert 一个用别的东西）。</summary>
+    private static async Task ShowMessageAsync(string title, string message)
+    {
+        var page = Application.Current?.Windows.Count > 0 ? Application.Current.Windows[0].Page : null;
+        if (page is not null)
+        {
+            await page.DisplayAlertAsync(title, message, "好");
+        }
     }
 
     private static async Task ReportErrorAsync(Exception ex)

@@ -23,6 +23,9 @@ public static class PolicyKeys
     /// <summary>同一个应用两次提醒之间至少隔多久（分钟）。</summary>
     public const string CooldownMinutes = "intervention.cooldown_minutes";
 
+    /// <summary>点窗口的 X 时是"藏起来继续跑"还是"真的退出"。默认藏着。</summary>
+    public const string CloseToTray = "app.close_to_tray";
+
     /// <summary>「今天别再提了」的前缀，后面接进程名。</summary>
     public const string SnoozePrefix = "intervention.snooze.";
 
