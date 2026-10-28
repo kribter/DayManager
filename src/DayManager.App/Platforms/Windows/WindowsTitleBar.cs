@@ -29,7 +29,6 @@ public static class WindowsTitleBar
     public static void Attach(MauiWindow window)
     {
         _window = window;
-        Diagnose("attach", $"Attach 被调用 ready={IsReady()}");
 
         // Handler 是"这个抽象的窗口"和"系统真正的那个窗口"之间的桥。
         // 窗口刚 new 出来的时候桥还没搭，PlatformView 是空的——
@@ -47,17 +46,9 @@ public static class WindowsTitleBar
         window.Created += OnWindowCreated;
     }
 
-    private static void OnHandlerChanged(object? sender, EventArgs e)
-    {
-        Diagnose("handler", $"HandlerChanged 触发 ready={IsReady()}");
-        TryStart();
-    }
+    private static void OnHandlerChanged(object? sender, EventArgs e) => TryStart();
 
-    private static void OnWindowCreated(object? sender, EventArgs e)
-    {
-        Diagnose("created", $"Created 触发 ready={IsReady()}");
-        TryStart();
-    }
+    private static void OnWindowCreated(object? sender, EventArgs e) => TryStart();
 
     private static void TryStart()
     {
@@ -141,7 +132,6 @@ public static class WindowsTitleBar
         {
             if (_window?.Handler?.PlatformView is not Microsoft.UI.Xaml.Window native)
             {
-                Diagnose("early-exit", $"ApplyCore 早退: platformView={_window?.Handler?.PlatformView?.GetType().Name ?? "null"}");
                 return;
             }
 
@@ -164,6 +154,31 @@ public static class WindowsTitleBar
             if (native.Content is Microsoft.UI.Xaml.FrameworkElement root)
             {
                 root.RequestedTheme = theme;
+                // 【直接给客户区自绘的横条上色】
+                // AppWindow.TitleBar 那套颜色参数在 ExtendsContentIntoTitleBar=true 时
+                // 全部被忽略（2026-10-29 实测：值写进去、屏幕不动、无报错）——
+                // 因为标题条根本不是非客户区，是 MAUI 的 WindowRootView 在客户区里画的。
+                // 所以真正有效的做法是钻进可视树，把画横条的元素挨个找到：
+                //   - 窗口根布局的 Background（标题条区域的底，透明时露出来的就是它）
+                //   - 名叫 AppTitle 的 TextBlock（左上角"DayManager"那行字）
+                //   - NavigationView 的 TopNavArea（顶部标签行那条横带）
+                // 这些元素 MAUI 没给公开的设置口子，只能这样按名字找。
+                SetRootBackground(root);
+                if (TintShell(root) == 0 && !_loadedHooked)
+                {
+                    // Handler 刚搭好时可视树可能还没长出来，一个 NavigationView 都找不到。
+                    // 那就等根布局 Loaded（模板此时已经应用完）再补一次。
+                    _loadedHooked = true;
+                    root.Loaded += (_, _) =>
+                    {
+                        if (_window?.Handler?.PlatformView is Microsoft.UI.Xaml.Window w &&
+                            w.Content is Microsoft.UI.Xaml.FrameworkElement r)
+                        {
+                            SetRootBackground(r);
+                            TintShell(r);
+                        }
+                    };
+                }
             }
 
             // 【为什么这里还有 DWM 上色】
@@ -172,7 +187,26 @@ public static class WindowsTitleBar
             // 病根解除后它才轮得到说话。把它加上是为了精确对齐：
             // WinUI 深色主题给的标题栏底色偏蓝（#0A1428），跟页面 #1A1A1A 差一截，
             // 摆在一起仍看得出一条更蓝的横带。COLORREF 是 0x00BBGGRR，别按 RGBA 写。
+            // 【标题条本身再精确上色一次】
+            // 主题掰正之后 AppWindow.TitleBar 的直接上色也轮得到生效了
+            // （之前失败同样是主题病根盖着它）。DWM 那两行留着当兜底，
+            // 两者目标是同一个颜色，谁先画都一样。
+            // 注意 ButtonForegroundColor 也要设，否则深色条上那三个
+            // 最小化/最大化/关闭按钮还是按浅色主题画的深灰箭头，看不清。
             var handle = WinRT.Interop.WindowNative.GetWindowHandle(native);
+            var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(handle);
+            if (Microsoft.UI.Windowing.AppWindow.GetFromWindowId(windowId) is { } appWindow)
+            {
+                var titleBar = appWindow.TitleBar;
+                titleBar.BackgroundColor = ToWinColor(AppColors.PageBg);
+                titleBar.ForegroundColor = ToWinColor(AppColors.Text);
+                titleBar.ButtonForegroundColor = ToWinColor(AppColors.Text);
+                titleBar.ButtonHoverForegroundColor = ToWinColor(AppColors.Text);
+                titleBar.InactiveBackgroundColor = ToWinColor(AppColors.PageBg);
+                titleBar.InactiveForegroundColor = ToWinColor(AppColors.Faint);
+                titleBar.ButtonInactiveForegroundColor = ToWinColor(AppColors.Faint);
+            }
+
             var caption = ToColorRef(AppColors.PageBg);
             var text = ToColorRef(AppColors.Text);
             DwmSetWindowAttribute(handle, 35, ref caption, sizeof(int)); // 标题栏底色
@@ -192,15 +226,65 @@ public static class WindowsTitleBar
     private static int ToColorRef(Color c) =>
         ((byte)(c.Red * 255)) | (((byte)(c.Green * 255)) << 8) | (((byte)(c.Blue * 255)) << 16);
 
-    private static void Diagnose(string tag, string message)
-    {
-        if (!_diagTags.Add(tag))
-        {
-            return;
-        }
+    private static global::Windows.UI.Color ToWinColor(Color c) =>
+        new() { A = 255, R = (byte)(c.Red * 255), G = (byte)(c.Green * 255), B = (byte)(c.Blue * 255) };
 
-        CrashLogger.Write("标题栏诊断", new Exception($"[{tag}] {message}"));
+    private static Microsoft.UI.Xaml.Media.SolidColorBrush Brush(Color c) => new(ToWinColor(c));
+
+    /// <summary>窗口根布局的底色。Background 在 Panel/Control 上，FrameworkElement 本身没有。</summary>
+    private static void SetRootBackground(Microsoft.UI.Xaml.FrameworkElement root)
+    {
+        switch (root)
+        {
+            case Microsoft.UI.Xaml.Controls.Panel panel:
+                panel.Background = Brush(AppColors.PageBg);
+                break;
+            case Microsoft.UI.Xaml.Controls.Control control:
+                control.Background = Brush(AppColors.PageBg);
+                break;
+        }
     }
 
-    private static readonly HashSet<string> _diagTags = new();
+    private static bool _loadedHooked;
+
+    /// <summary>
+    /// 遍历可视树，给 Shell 的原生绘制部件上色。
+    ///
+    /// 【为什么按名字找而不是走公开 API】
+    /// Shell 在 Windows 上是两层 NavigationView（外层 RootNavigationView 套内层顶部标签栏），
+    /// 顶部标签那条横带的底色是模板里 TopNavArea 的 {ThemeResource NavigationViewTopPaneBackground}，
+    /// MAUI 没有暴露任何属性能改它。资源字典覆盖（应用级 ThemeDictionaries）实测也不生效
+    /// （2026-10-29：标签行仍是纯黑），只能直接对元素赋值——这总会生效，
+    /// 代价是换主题后要重新走一遍（ApplyCore 在 ThemeChangedMessage 时会再次调用）。
+    /// 找不到就跳过：结构变化时宁可退回系统默认，不能崩。
+    /// </summary>
+    /// <returns>找到并处理了几层 NavigationView（0 = 可视树还没长好）。</returns>
+    private static int TintShell(Microsoft.UI.Xaml.DependencyObject node)
+    {
+        var found = 0;
+        switch (node)
+        {
+            case Microsoft.UI.Xaml.Controls.NavigationView nav
+                when node is Microsoft.UI.Xaml.FrameworkElement navElement:
+                // 给 NavigationView 自身资源塞一份覆盖：ShellItemHandler 处理标签项时
+                // 会从这里读 NavigationViewItemForeground（MAUI 源码里就是这么取的）。
+                navElement.Resources["NavigationViewItemForeground"] = Brush(AppColors.Muted);
+                found++;
+                break;
+            case Microsoft.UI.Xaml.Controls.TextBlock tb when tb.Name == "AppTitle":
+                tb.Foreground = Brush(AppColors.Text);
+                break;
+            case Microsoft.UI.Xaml.Controls.StackPanel sp when sp.Name == "TopNavArea":
+                sp.Background = Brush(AppColors.PageBg);
+                break;
+        }
+
+        var count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(node);
+        for (var i = 0; i < count; i++)
+        {
+            found += TintShell(Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(node, i));
+        }
+
+        return found;
+    }
 }

@@ -5,4 +5,12 @@
     xmlns:maui="using:Microsoft.Maui"
     xmlns:local="using:DayManager.App.WinUI">
 
+    <!--
+      【这里不要试图用 ThemeDictionaries 覆盖 NavigationView 的颜色】
+      直觉上在应用级资源里覆盖 NavigationViewTopPaneBackground 一类 key
+      就能改顶部标签行的底色，2026-10-29 实测无效（标签行仍是纯黑）。
+      原因是那条横带画在 Shell 内层 NavigationView 的模板里，
+      应用级主题资源够不到它。有效的做法是钻可视树直接对元素赋值，
+      见 Platforms/Windows/WindowsTitleBar.cs 的 TintShell。
+    -->
 </maui:MauiWinUIApplication>
