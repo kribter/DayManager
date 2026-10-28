@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using CommunityToolkit.Mvvm.Messaging;
 using DayManager.App.Messages;
+using DayManager.App.Services;
 using DayManager.Data.Repositories;
 
 namespace DayManager.App.ViewModels;
@@ -33,6 +34,11 @@ public partial class ProjectsViewModel : ObservableObject
         // 和日程页同一个道理：AI 在对话里改了数据，这一页必须立刻跟着变。
         // 不能指望切 Tab 触发 OnAppearing——Shell 不保证。
         WeakReferenceMessenger.Default.Register<ItemsChangedMessage>(
+            this,
+            (_, _) => _ = LoadCommand.ExecuteAsync(null));
+
+        // 换主题后重读：进度条、日期提示的颜色是在 ViewModel 里算的，不重算就还是旧值。
+        WeakReferenceMessenger.Default.Register<ThemeChangedMessage>(
             this,
             (_, _) => _ = LoadCommand.ExecuteAsync(null));
     }
@@ -427,7 +433,7 @@ public partial class ProjectCardViewModel : ObservableObject
     {
         if (targetDate is null)
         {
-            return ("还没定什么时候做完", Color.FromArgb("#8A8A8A"));
+            return ("还没定什么时候做完", AppColors.Muted);
         }
 
         var today = DateOnly.FromDateTime(DateTime.Now);

@@ -64,6 +64,9 @@ public partial class TimeViewModel : ObservableObject
     /// </summary>
     private readonly ProactiveNudgeService? _proactive;
 
+    /// <summary>界面深浅。每个平台都有，不做成可空。</summary>
+    private readonly ThemeService _theme;
+
     /// <summary>
     /// 自动刷新间隔。
     ///
@@ -90,7 +93,8 @@ public partial class TimeViewModel : ObservableObject
         InterventionService? intervention = null,
         IWindowShell? shell = null,
         IAutoStartService? autoStart = null,
-        ProactiveNudgeService? proactive = null)
+        ProactiveNudgeService? proactive = null,
+        ThemeService? theme = null)
     {
         _usage = usage;
         _policy = policy;
@@ -99,6 +103,7 @@ public partial class TimeViewModel : ObservableObject
         _shell = shell;
         _autoStart = autoStart;
         _proactive = proactive;
+        _theme = theme ?? new ThemeService(policy);
 
         if (_proactive is not null)
         {
@@ -425,6 +430,94 @@ public partial class TimeViewModel : ObservableObject
     [RelayCommand]
     private void HideToTray() => _shell?.HideToTray(notify: true);
 
+    // ==================== 外观：深浅 ====================
+
+    /// <summary>
+    /// 三个选项做成一个三选一，而不是一个开关。
+    ///
+    /// 【为什么必须留"跟随系统"这一档】
+    /// 只给"浅色 / 深色"两个按钮，等于让用户在两个极端之间二选一：
+    /// 白天想要浅、晚上想要深的人，就得每天手动切两次，
+    /// 而切两次的结果是第三天就不切了，界面停在他不想要的那档上。
+    /// "跟随系统"是让系统替他做这件事——多数人的系统本来就是白天浅、晚上深。
+    ///
+    /// 【为什么用三个 bool 而不是一个字符串】
+    /// 界面上要的是"这三个圆点哪个亮着"，三条互斥的布尔值直接对应三个控件，
+    /// 比在 XAML 里写一堆字符串比较清楚。互斥的维护放在下面的 partial 里。
+    /// </summary>
+    [ObservableProperty]
+    public partial bool IsThemeSystem { get; set; } = true;
+
+    [ObservableProperty]
+    public partial bool IsThemeLight { get; set; }
+
+    [ObservableProperty]
+    public partial bool IsThemeDark { get; set; }
+
+    public string ThemeText => IsThemeDark ? "深色" : IsThemeLight ? "浅色" : "跟随系统";
+
+    /// <summary>
+    /// 正在把库里的选择点亮到界面上。
+    /// 三个圆点是双向的：加载时点亮也会触发"值变了 → 保存 + 广播"。
+    /// 那会把一次加载变成一次无谓的写库和全局重读。
+    /// </summary>
+    private bool _suppressThemeApply;
+
+    partial void OnIsThemeSystemChanged(bool value)
+    {
+        if (value && !_suppressThemeApply)
+        {
+            _ = ApplyThemeAsync(ThemeService.System);
+        }
+    }
+
+    partial void OnIsThemeLightChanged(bool value)
+    {
+        if (value && !_suppressThemeApply)
+        {
+            _ = ApplyThemeAsync(ThemeService.Light);
+        }
+    }
+
+    partial void OnIsThemeDarkChanged(bool value)
+    {
+        if (value && !_suppressThemeApply)
+        {
+            _ = ApplyThemeAsync(ThemeService.Dark);
+        }
+    }
+
+    /// <summary>
+    /// 换主题并把选择存下来。
+    ///
+    /// 【为什么存库而不是只改内存】
+    /// 这个软件是常驻后台、开机自启的——
+    /// 只在内存里改，下一次开机启动又变回系统主题，
+    /// 用户会以为自己上次没设置成功。
+    /// </summary>
+    private async Task ApplyThemeAsync(string mode)
+    {
+        try
+        {
+            await _theme.SetAsync(mode);
+            OnPropertyChanged(nameof(ThemeText));
+        }
+        catch (Exception ex)
+        {
+            CrashLogger.Write("切换界面主题", ex);
+        }
+    }
+
+    /// <summary>把某一档设成选中，其余两档清掉（只动选中态，不触发保存）。</summary>
+    private void SelectThemeOnly(string mode)
+    {
+        _suppressThemeApply = true;
+        IsThemeSystem = mode == ThemeService.System;
+        IsThemeLight = mode == ThemeService.Light;
+        IsThemeDark = mode == ThemeService.Dark;
+        _suppressThemeApply = false;
+    }
+
     /// <summary>
     /// 正在把库里的值写进界面。
     ///
@@ -506,6 +599,7 @@ public partial class TimeViewModel : ObservableObject
 
             _suppressPolicySave = true;
             IsReminderOn = enabled;
+            SelectThemeOnly(_theme.Mode);
             ThresholdMinutes = threshold;
             IsCloseToTray = closeToTray;
             IsProactiveOn = proactive;

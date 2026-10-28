@@ -576,7 +576,7 @@ public partial class PlanDayViewModel : ObservableObject
         + (OverMinutes > 0 ? $"，超 {DurationText.Format(OverMinutes)}" : string.Empty);
 
     /// <summary>超预算的那一天把数字标出来，让视线自动落在需要处理的那天上。</summary>
-    public Color TotalColor => OverMinutes > 0 ? Color.FromArgb("#C0392B") : Colors.Gray;
+    public Color TotalColor => OverMinutes > 0 ? AppColors.Danger : AppColors.Muted;
 
     public DateOnly Date => _date;
 }

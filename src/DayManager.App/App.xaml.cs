@@ -16,6 +16,15 @@ public partial class App : Application
 
 	protected override Window CreateWindow(IActivationState? activationState)
 	{
+		// 界面深浅要在建窗口内容**之前**应用上：
+		// 实测放在 MauiProgram.CreateMauiApp 里会被 WinUI 建窗口时按系统主题盖掉，
+		// 而放在这里（窗口已建、还没显示）是真正生效的时机，
+		// 且赶在第一帧排版之前，选了深色的人不会看见一帧白屏。
+		if (MauiProgram.Services is { } services)
+		{
+			services.GetService<ThemeService>()?.ApplyFromStore();
+		}
+
 		var window = new Window(new AppShell());
 
 #if WINDOWS

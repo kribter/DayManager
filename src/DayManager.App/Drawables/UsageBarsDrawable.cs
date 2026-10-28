@@ -1,3 +1,4 @@
+using DayManager.App.Services;
 using DayManager.App.ViewModels;
 
 namespace DayManager.App.Drawables;
@@ -108,9 +109,14 @@ public sealed class UsageBarsDrawable : IDrawable
             var resources = Application.Current?.Resources;
 
             return new Palette(
-                Bar: Get(resources, "Primary", Color.FromArgb("#3F6FB5")),
-                Label: Get(resources, "MutedText", Color.FromArgb("#8A8A8A")),
-                Baseline: Get(resources, "Gray200", Color.FromArgb("#C8C8C8")));
+                // 深色下三个值都要换：主色在黑底上偏暗、次要字的灰近乎隐形，
+                // 而基线反过来要压暗——浅色里它是淡淡的辅助线，深色里 #C8C8C8 会抢戏。
+                Bar: Get(resources, AppColors.IsDark ? "PrimaryDark" : "Primary",
+                         AppColors.IsDark ? Color.FromArgb("#9DB8DE") : Color.FromArgb("#3F6FB5")),
+                Label: Get(resources, AppColors.IsDark ? "TextMutedDark" : "TextMutedLight",
+                           AppColors.IsDark ? Color.FromArgb("#A2A2A2") : Color.FromArgb("#8A8A8A")),
+                Baseline: Get(resources, AppColors.IsDark ? "Gray600" : "Gray200",
+                              AppColors.IsDark ? Color.FromArgb("#404040") : Color.FromArgb("#C8C8C8")));
         }
 
         private static Color Get(ResourceDictionary? resources, string key, Color fallback) =>

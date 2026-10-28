@@ -209,6 +209,9 @@ public static class MauiProgram
 		// 说话之前先确保后端在，不在就自己拉起来。对话页和拆解页共用同一套逻辑。
 		builder.Services.AddSingleton<BackendGuard>();
 
+		// 界面深浅。跟随系统 / 强制浅色 / 强制深色，用户的选择存在策略表里。
+		builder.Services.AddSingleton<ThemeService>();
+
 		// 页面也要注册，因为 AppShell 是通过 DataTemplate 让 DI 容器来创建 MainPage 的。
 		// 不注册的话，容器会尝试找无参构造函数 → MainPage 又需要一个 MainViewModel → 直接崩。
 		// 这是用 Shell + DI 时最容易漏的一步。

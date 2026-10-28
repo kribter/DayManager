@@ -132,9 +132,15 @@
                                 <Border.StrokeShape>
                                     <RoundRectangle CornerRadius="12" />
                                 </Border.StrokeShape>
+                                <!--
+                                  【为什么文字色要绑定，而不是写死 Black】
+                                  气泡底色是 C# 里给的（跟着主题走），
+                                  文字却写死黑色的话，深色模式下就是"深底黑字"。
+                                  这两个值必须一起变，所以文字也交给 ViewModel。
+                                -->
                                 <Label Text="{Binding Text}"
                                        FontSize="14"
-                                       TextColor="Black"
+                                       TextColor="{Binding BubbleTextColor}"
                                        LineBreakMode="WordWrap" />
                             </Border>
 
@@ -142,7 +148,7 @@
                                  把它做得像 AI 说的话，用户会把故障当成内容。 -->
                             <Label Text="{Binding Text}"
                                    FontSize="12"
-                                   TextColor="DarkOrange"
+                                   TextColor="{AppThemeBinding Light={StaticResource WarnOrange}, Dark={StaticResource WarnOrangeDark}}"
                                    IsVisible="{Binding IsSystem}"
                                    LineBreakMode="WordWrap" />
 

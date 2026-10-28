@@ -26,6 +26,19 @@ public static class PolicyKeys
     /// <summary>点窗口的 X 时是"藏起来继续跑"还是"真的退出"。默认藏着。</summary>
     public const string CloseToTray = "app.close_to_tray";
 
+    /// <summary>
+    /// 界面深浅。"system"（跟随系统）/ "light" / "dark"，默认 system。
+    ///
+    /// 【为什么非要有"强制深浅"这一档，只跟随系统不够】
+    /// 典型的一台机器：系统是浅色（很多人从来没改过），
+    /// 但编辑器、浏览器、终端全都被他自己设成了深色。
+    /// 这时候一个"跟随系统"的软件会变成桌面上唯一一块白的——
+    /// 尤其晚上，点开它像开了一盏灯。
+    /// 系统主题表达的是"系统默认什么样"，不是"这个人此刻想看什么样"，
+    /// 所以这个开关必须存在，而且值要存下来（重启后还按用户选的来）。
+    /// </summary>
+    public const string AppTheme = "app.theme";
+
     /// <summary>AI 主动开口的总开关。"true" / "false"，默认开。</summary>
     public const string ProactiveEnabled = "proactive.enabled";
 

@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.Globalization;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -84,6 +84,12 @@ public partial class MainViewModel : ObservableObject
         // 注册晚了这条消息就丢了。构造时就挂上，任何时候到达都能收到。
         //
         WeakReferenceMessenger.Default.Register<ItemsChangedMessage>(
+            this,
+            (_, _) => _ = LoadCommand.ExecuteAsync(null));
+
+        // 换主题后要重读：每一行的标题色、徽章色是 Refresh 那一刻算出来的，
+        // 不重读它们就停在旧主题的值上，界面变成深浅混搭。
+        WeakReferenceMessenger.Default.Register<ThemeChangedMessage>(
             this,
             (_, _) => _ = LoadCommand.ExecuteAsync(null));
     }

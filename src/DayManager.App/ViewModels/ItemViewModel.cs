@@ -1,4 +1,5 @@
-﻿using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.ComponentModel;
+using DayManager.App.Services;
 using DayManager.Core.Entities;
 using DayManager.Core.Enums;
 using DayManager.Core.Planning;
@@ -63,10 +64,10 @@ public partial class ItemViewModel : ObservableObject
     public partial bool IsDone { get; set; }
 
     [ObservableProperty]
-    public partial Color TitleColor { get; set; } = Colors.Black;
+    public partial Color TitleColor { get; set; } = AppColors.Text;
 
     [ObservableProperty]
-    public partial Color CheckColor { get; set; } = Colors.Gray;
+    public partial Color CheckColor { get; set; } = AppColors.Muted;
 
     /// <summary>
     /// 状态徽章要不要显示。待办时不显示——
@@ -113,7 +114,7 @@ public partial class ItemViewModel : ObservableObject
     /// 所以每个值都注明它对应 Colors.xaml 里的哪个语义色。
     /// </summary>
     [ObservableProperty]
-    public partial Color StatusColor { get; set; } = Colors.Gray;
+    public partial Color StatusColor { get; set; } = AppColors.Muted;
 
     /// <summary>
     /// 徽章描边用的画刷。
@@ -126,7 +127,7 @@ public partial class ItemViewModel : ObservableObject
     /// 不依赖框架的隐式行为。
     /// </summary>
     [ObservableProperty]
-    public partial Brush StatusBrush { get; set; } = new SolidColorBrush(Colors.Gray);
+    public partial Brush StatusBrush { get; set; } = new SolidColorBrush(AppColors.Muted);
 
     partial void OnStatusColorChanged(Color value) => StatusBrush = new SolidColorBrush(value);
 
@@ -163,15 +164,19 @@ public partial class ItemViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 正文文字的颜色必须随系统主题走。
+    /// 正文文字的颜色必须跟着当前主题走。
     ///
     /// 【为什么不能写死 Colors.Black】
-    /// 你开着 Windows 的深色模式时，黑色文字会直接消失在黑背景里。
+    /// 深色模式下黑色文字会直接消失在黑背景里。
     /// 这是新手做界面最容易踩的坑之一：本机看着没问题，换个主题就瞎。
-    /// 所以凡是"跟随正文的颜色"，都要按当前主题取值，不能用固定色。
+    ///
+    /// 【为什么走 AppColors 而不是在这里判断 RequestedTheme】
+    /// 这个软件允许用户在软件内部选深浅（多数人的系统是浅色，
+    /// 但编辑器、浏览器都被他自己设成了深色），
+    /// 只看系统的 RequestedTheme 会跟用户在软件里选的结果不一致。
+    /// 判断逻辑收在 AppColors 里，这里只管说"我要正文色"。
     /// </summary>
-    private static Color PrimaryTextColor =>
-        Application.Current?.RequestedTheme == AppTheme.Dark ? Colors.White : Colors.Black;
+    private static Color PrimaryTextColor => AppColors.Text;
 
     private void Refresh()
     {
@@ -196,33 +201,35 @@ public partial class ItemViewModel : ObservableObject
                 StatusText = "待办";
                 HasStatusBadge = false;
                 TitleColor = PrimaryTextColor;
-                CheckColor = Colors.Gray;
+                CheckColor = AppColors.Muted;
                 break;
 
             case ItemStatus.InProgress:
                 StatusText = "进行中";
                 HasStatusBadge = true;
-                StatusColor = Color.FromArgb("#C07820"); // Colors.xaml: ProgressOrange
+                StatusColor = AppColors.Progress;
                 TitleColor = PrimaryTextColor;
-                CheckColor = Colors.DarkOrange;
+                CheckColor = AppColors.Progress;
                 break;
 
             case ItemStatus.Done:
                 StatusText = "完成";
                 HasStatusBadge = true;
-                StatusColor = Color.FromArgb("#2E7D5B"); // Colors.xaml: DoneGreen
-                // 完成的事项降低视觉权重，让视线自然落到还剩下的事情上
-                TitleColor = Colors.Gray;
-                CheckColor = Colors.ForestGreen;
+                StatusColor = AppColors.Done;
+                // 完成的事项降低视觉权重，让视线自然落到还剩下的事情上。
+                // 用 AppColors.Faint 而不是 Colors.Gray：深色模式下的灰太亮，
+                // 划掉的和没划的看着差不多，等于没划。
+                TitleColor = AppColors.Faint;
+                CheckColor = AppColors.Done;
                 TitleDecorations = TextDecorations.Strikethrough;
                 break;
 
             case ItemStatus.Abandoned:
                 StatusText = "不做了";
                 HasStatusBadge = true;
-                StatusColor = Color.FromArgb("#8A8A8A"); // Colors.xaml: MutedText
-                TitleColor = Colors.Gray;
-                CheckColor = Colors.Gray;
+                StatusColor = AppColors.Muted;
+                TitleColor = AppColors.Faint;
+                CheckColor = AppColors.Muted;
                 TitleDecorations = TextDecorations.Strikethrough;
                 break;
 
@@ -245,12 +252,12 @@ public partial class ItemViewModel : ObservableObject
                 //          后面要靠它来主动提出"是不是该拆小一点"。
                 // 隐藏它的代价是：这个线索只有数据库知道，界面和 AI 都不知道。
                 HasStatusBadge = _item.SkipCount > 1;
-                StatusColor = Color.FromArgb("#8A8A8A"); // Colors.xaml: MutedText
+                StatusColor = AppColors.Muted;
                 StatusText = _item.SkipCount > 1
                     ? $"跳过过 {_item.SkipCount} 次"
                     : "待办";
                 TitleColor = PrimaryTextColor;
-                CheckColor = Colors.Gray;
+                CheckColor = AppColors.Muted;
                 break;
         }
 

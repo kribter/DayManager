@@ -72,6 +72,12 @@ public partial class ChatViewModel : ObservableObject
         // 而"通知弹了、打开对话页却找不到那句话"是最让人怀疑自己记错的情况。
         WeakReferenceMessenger.Default.Register<ProactiveSpokeMessage>(
             this, (_, _) => _ = AppendLatestAsync());
+
+        // 气泡的底色和文字色是每个气泡生成时算好的（BubbleColor / BubbleTextColor），
+        // 换个主题它们不会自己变：新气泡是深色、旧气泡还是浅底黑字，
+        // 一屏里两种配色。所以这里整页重读一遍。
+        WeakReferenceMessenger.Default.Register<ThemeChangedMessage>(
+            this, (_, _) => _ = ReloadForThemeAsync());
     }
 
     /// <summary>
@@ -167,7 +173,7 @@ public partial class ChatViewModel : ObservableObject
     public partial Color StatusColor { get; set; } = Colors.Gray;
 
     partial void OnIsServerReadyChanged(bool value) =>
-        StatusColor = value ? Colors.ForestGreen : Colors.Gray;
+        StatusColor = value ? AppColors.Done : AppColors.Muted;
 
     /// <summary>
     /// 有没有候选回复可显示。
@@ -195,6 +201,27 @@ public partial class ChatViewModel : ObservableObject
     /// 静默的后果是"我明明存了却看不到"，用户会以为功能没做。
     /// 存不进去这件事本身必须被看见。
     /// </summary>
+    /// <summary>
+    /// 换主题之后重新读一遍历史。
+    ///
+    /// 【为什么非得整页重读，不能只改颜色属性】
+    /// 气泡的两个颜色都写在 ChatBubble 上，而气泡是数据行、
+    /// 不是控件——没有一个"所有气泡都听着"的通知可以发。
+    /// 重读一次库很便宜（最近 50 条），换来的是配色整齐。
+    /// 历史还没加载过时不用管，等打开页面那一次自然会带上新配色。
+    /// </summary>
+    private async Task ReloadForThemeAsync()
+    {
+        if (!_loaded)
+        {
+            return;
+        }
+
+        _loaded = false;
+        Messages.Clear();
+        await LoadHistoryAsync();
+    }
+
     [RelayCommand]
     private async Task LoadHistoryAsync()
     {
@@ -581,11 +608,23 @@ public partial class ChatBubble : ObservableObject
     public bool ShowAsBubble => !IsSystem;
 
     /// <summary>
-    /// 气泡底色。刻意用固定浅色（不跟随主题），配深色文字：
-    /// 聊天气泡在任何主题下都得保证文字读得清，
-    /// 跟随主题反而在深色模式下容易出现"浅底白字"这种看不见的组合。
+    /// 气泡底色。
+    ///
+    /// 【为什么气泡要自己给底色，而不是直接用页面底色】
+    /// 气泡的作用是"把一轮对话圈出来"，没有底色的话长对话里分不清哪几段是一句。
+    ///
+    /// 【为什么底色和文字色必须由同一处决定】
+    /// 这两个值是一对：底色变深了、文字还是黑的，整段话就消失在气泡里。
+    /// 曾经这里写死浅底 + XAML 里写死黑字，深色模式一开就是"深底黑字"。
+    /// 所以两个值都从 AppColors 取，主题一变两个一起变，不可能只变一半。
     /// </summary>
-    public Color BubbleColor => IsUser ? Color.FromArgb("#DCEEFB") : Color.FromArgb("#F2F2F2");
+    public Color BubbleColor => IsUser ? AppColors.BubbleSelf : AppColors.BubbleAi;
+
+    /// <summary>
+    /// 气泡里的文字色。跟上面的底色配对，不能跟正文走——
+    /// 正文在深色下是浅色，而气泡底色是"比页面亮一点"，配浅字就糊了。
+    /// </summary>
+    public Color BubbleTextColor => AppColors.OnBubble;
 
     /// <summary>
     /// 还没被撤回、且确实有改动时才显示撤回按钮。
