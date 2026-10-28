@@ -1,5 +1,6 @@
 ﻿using DayManager.App.Services;
 using DayManager.App.ViewModels;
+using DayManager.Core.Intervention;
 using DayManager.Data;
 using DayManager.Data.Repositories;
 using Microsoft.EntityFrameworkCore;
@@ -101,12 +102,31 @@ public static class MauiProgram
 		// 设备使用时长（M7）：读写与统计都在共享代码里，两端以后一起用。
 		builder.Services.AddSingleton<UsageRepository>();
 
+		// 干预参数与"今天别再提了"（M9）。参数存库是因为它要能被 AI 动态校准，
+		// 而且改完必须跨重启有效——只放内存的话，"今天别再提"过一夜又忘了。
+		builder.Services.AddSingleton<PolicyRepository>();
+		builder.Services.AddSingleton<AppRuleRepository>();
+
 #if WINDOWS
 		// 采集器只有 Windows 一份实现（全靠 user32.dll）。
 		// 【这里为什么用编译符号而不是像数据库路径那样运行时判断】
 		// 因为 WindowsUsageTracker 这个类型在 Android 上根本不存在，
 		// 运行时判断连编译都过不去。这是唯一必须用 #if 的场合。
 		builder.Services.AddSingleton<WindowsUsageTracker>();
+
+		// 采集器同时是"现在在用什么"的来源。注册成接口，
+		// 是为了让干预服务（共享代码）不必知道 Windows 这个类。
+		builder.Services.AddSingleton<ICurrentUsageSource>(sp =>
+			sp.GetRequiredService<WindowsUsageTracker>());
+
+		// 系统通知。
+		builder.Services.AddSingleton<WindowsNotifier>();
+		builder.Services.AddSingleton<IInterventionNotifier>(sp =>
+			sp.GetRequiredService<WindowsNotifier>());
+
+		// 干预引擎。只在有采集器和通知的平台上注册——
+		// 它的两个输入缺一个，功能就只能是个空转的定时器。
+		builder.Services.AddSingleton<InterventionService>();
 #endif
 
 		// 任务的「更多」菜单：日程页和大任务详情页共用同一份实现，
@@ -195,6 +215,7 @@ public static class MauiProgram
 
 #if WINDOWS
 		StartUsageTracking(app.Services);
+		StartIntervention(app.Services);
 #endif
 
 		return app;
@@ -229,6 +250,31 @@ public static class MauiProgram
 				CrashLogger.Write("使用时长采集启动失败", ex);
 			}
 		});
+	}
+
+	/// <summary>
+	/// 启动干预引擎。
+	///
+	/// 【为什么在这里同步调用，而不是像采集那样扔到后台线程】
+	/// 它启动时要做两件必须在 UI 线程上的事：注册通知通道（COM 注册），
+	/// 以及把"现在在干嘛"这句话交给界面绑定。
+	/// 这两件事加起来是几十毫秒，放在启动路径上用户察觉不到；
+	/// 而扔到后台线程反而要处理"界面已经准备好、引擎还没注册好"的竞态。
+	///
+	/// 轮询本身还是走定时器、在后台跑，不会占住启动。
+	/// </summary>
+	private static void StartIntervention(IServiceProvider services)
+	{
+		try
+		{
+			services.GetRequiredService<InterventionService>().Start();
+		}
+		catch (Exception ex)
+		{
+			// 提醒坏了不该影响日程本身，但原因必须留下：
+			// 用户看到的是"一条提醒都没有"，排查第一句就是"它启动了吗"。
+			CrashLogger.Write("干预引擎启动失败", ex);
+		}
 	}
 #endif
 

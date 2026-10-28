@@ -39,6 +39,9 @@ public class AppDbContext : DbContext
     /// <summary>会自己变的参数（见需求文档 2.7）。</summary>
     public DbSet<PolicySetting> PolicySettings => Set<PolicySetting>();
 
+    /// <summary>每个应用算什么（娱乐 / 工作 / 没标记），干预判定的依据。</summary>
+    public DbSet<AppRule> AppRules => Set<AppRule>();
+
     /// <summary>
     /// 与 AI 的对话记录。**关掉程序也要留着**，见 ChatMessage 的说明。
     /// </summary>
@@ -66,6 +69,7 @@ public class AppDbContext : DbContext
         ConfigureDailyContext(modelBuilder.Entity<DailyContext>());
         ConfigureActionLog(modelBuilder.Entity<ActionLog>());
         ConfigurePolicySetting(modelBuilder.Entity<PolicySetting>());
+        ConfigureAppRule(modelBuilder.Entity<AppRule>());
         ConfigureChatMessage(modelBuilder.Entity<ChatMessage>());
 
         ApplyTimeConverters(modelBuilder);
@@ -309,6 +313,23 @@ public class AppDbContext : DbContext
         // 表现为"设置改了但没生效"——这类 bug 极难查，因为数据看起来是对的。
         // 数据库层面的唯一约束是唯一可靠的兜底（代码里先查再插会有竞态）。
         b.HasIndex(x => x.Key).IsUnique();
+
+        b.HasQueryFilter(x => x.DeletedAt == null);
+    }
+
+    private static void ConfigureAppRule(Microsoft.EntityFrameworkCore.Metadata.Builders.EntityTypeBuilder<AppRule> b)
+    {
+        b.ToTable("app_rules");
+        b.HasKey(x => x.Id);
+
+        b.Property(x => x.AppId).IsRequired().HasMaxLength(128);
+        b.Property(x => x.AppName).IsRequired().HasMaxLength(128);
+
+        // 【为什么 AppId 要唯一】
+        // 同一个进程名存两行的话，读取时取到哪一行不确定，
+        // 表现为"我明明把它标成工作了，还是照样弹提醒"。
+        // 代码里"先查再插"在多线程下会漏，唯一约束是唯一可靠的兜底。
+        b.HasIndex(x => x.AppId).IsUnique();
 
         b.HasQueryFilter(x => x.DeletedAt == null);
     }

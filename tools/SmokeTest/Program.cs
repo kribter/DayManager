@@ -3,6 +3,7 @@
 
 using DayManager.Core.Entities;
 using DayManager.Core.Enums;
+using DayManager.Core.Intervention;
 using DayManager.Core.Planning;
 using DayManager.Data;
 using DayManager.Data.Repositories;
@@ -951,6 +952,134 @@ Check("跨多天的区间把总量加起来", rWeek.TotalSeconds >= 1800, $"{rWe
 Check("日统计和区间统计口径一致（同一段数据，两个入口同一个数）",
     (await usage.GetDaySummaryAsync(rDay)).TotalSeconds == rRange.TotalSeconds,
     $"{(await usage.GetDaySummaryAsync(rDay)).TotalSeconds} vs {rRange.TotalSeconds}");
+
+Console.WriteLine();
+Console.WriteLine("=== 20. 干预引擎：什么时候该说话、说给谁听 ===");
+
+var policyRepo = new PolicyRepository(factory);
+var ruleRepo = new AppRuleRepository(factory);
+
+var iToday = DateOnly.FromDateTime(DateTime.Now);
+var iNow = DateTimeOffset.Now;
+
+// 判定器的输入有十来个字段，每次 new 一遍会淹没断言本身。
+// 这个局部函数只写"这一条关心"的那几个参数，其余走默认值。
+InterventionContext Ctx(
+    string appId,
+    string appName,
+    int minutes,
+    AppKind kind = AppKind.Neutral,
+    bool enabled = true,
+    int threshold = 30,
+    int cooldown = 30,
+    DateTimeOffset? lastNotified = null,
+    DateOnly? snoozed = null,
+    int remaining = 0,
+    string? first = null)
+    => new(appId, appName, minutes, kind, enabled, threshold, cooldown,
+        lastNotified, snoozed, iToday, remaining, first, iNow);
+
+// ---- 名单 ----
+
+Check("内置名单认得 B 站",
+    EntertainmentApps.IsEntertainment("bilibili.exe"));
+
+Check("带路径、大小写混写也认得",
+    EntertainmentApps.IsEntertainment(@"C:\Program Files\BiliBili\BiliBili.EXE"));
+
+Check("浏览器绝不算娱乐",
+    !EntertainmentApps.IsEntertainment("chrome.exe"),
+    "否则一整天的网页浏览都会被当成刷视频");
+
+Check("名单是空的输入也不炸",
+    !EntertainmentApps.IsEntertainment(null) && !EntertainmentApps.IsEntertainment("  "));
+
+Check("用户标成工作就压过名单（用 B 站看网课）",
+    EntertainmentApps.Classify("bilibili", AppKind.Work) == AppKind.Work);
+
+Check("没标记时由名单决定",
+    EntertainmentApps.Classify("bilibili", AppKind.Neutral) == AppKind.Entertainment);
+
+Check("名单外的应用保持未标记（不打扰）",
+    EntertainmentApps.Classify("notepad", AppKind.Neutral) == AppKind.Neutral);
+
+// ---- 判定 ----
+
+Check("关掉开关就一句都不说",
+    InterventionDecider.Decide(Ctx("bilibili", "B 站", 60, enabled: false)).Reason
+        == InterventionSkipReason.Disabled);
+
+Check("标成工作之后连名单都不看",
+    InterventionDecider.Decide(Ctx("bilibili", "B 站", 60, kind: AppKind.Work)).Reason
+        == InterventionSkipReason.NotEntertainment);
+
+Check("没到阈值先不打扰",
+    InterventionDecider.Decide(Ctx("bilibili", "B 站", 29)).Reason
+        == InterventionSkipReason.BelowThreshold);
+
+Check("刚好到阈值就该说话",
+    InterventionDecider.Decide(Ctx("bilibili", "B 站", 30)).ShouldNotify);
+
+var withTask = InterventionDecider.Decide(
+    Ctx("bilibili", "B 站", 42, remaining: 3, first: "写开题报告"));
+
+Check("文案里点名了那一件没做完的事", withTask.Notice?.Body.Contains("写开题报告") == true);
+Check("文案给出小到不用下决心的动作", withTask.Notice?.Body.Contains("10 分钟") == true);
+Check("标题写清了是哪一段用了多久", withTask.Notice?.Title.Contains("B 站") == true
+    && withTask.Notice.Title.Contains("42 分钟") == true);
+
+var noTask = InterventionDecider.Decide(Ctx("bilibili", "B 站", 42, remaining: 0));
+
+Check("今天的事都做完了就给许可，而不是继续催",
+    noTask.ShouldNotify && noTask.Notice!.Title.Contains("都做完了"),
+    noTask.Notice?.Title);
+
+Check("按过「今天别再提了」就一整天都不提",
+    InterventionDecider.Decide(Ctx("bilibili", "B 站", 60, snoozed: iToday)).Reason
+        == InterventionSkipReason.Snoozed);
+
+Check("昨天按的赦免不影响今天",
+    InterventionDecider.Decide(Ctx("bilibili", "B 站", 60, snoozed: iToday.AddDays(-1))).ShouldNotify);
+
+Check("冷却时间内不重复提",
+    InterventionDecider.Decide(Ctx("bilibili", "B 站", 60, lastNotified: iNow.AddMinutes(-5))).Reason
+        == InterventionSkipReason.CoolingDown);
+
+Check("冷却过了可以再提",
+    InterventionDecider.Decide(Ctx("bilibili", "B 站", 60, lastNotified: iNow.AddMinutes(-40))).ShouldNotify);
+
+Check("阈值配成 0 不会变成疯狂弹窗",
+    InterventionDecider.Decide(Ctx("bilibili", "B 站", 60, threshold: 0)).Reason
+        == InterventionSkipReason.BelowThreshold);
+
+// ---- 落库 ----
+
+await ruleRepo.SetKindAsync("bilibili", "哔哩哔哩", AppKind.Work);
+Check("应用标记能落库", (await ruleRepo.GetAsync("bilibili"))?.Kind == AppKind.Work);
+
+await ruleRepo.SetKindAsync("bilibili", "哔哩哔哩", AppKind.Entertainment);
+Check("同一个应用再标一次是改，不是多插一行",
+    (await ruleRepo.GetAllAsync()).Count(x => x.AppId == "bilibili") == 1);
+
+await policyRepo.SetAsync(PolicyKeys.ThresholdMinutes, "45", PolicySource.User);
+Check("参数能落库并读回来",
+    await policyRepo.GetIntAsync(PolicyKeys.ThresholdMinutes, 30) == 45);
+
+Check("没设过的参数用默认值",
+    await policyRepo.GetIntAsync("intervention.not.set.yet", 30) == 30);
+
+Check("参数被写成非数字时退回默认值，而不是让功能停摆",
+    await WriteBadPolicyAndReadAsync(policyRepo) == 30);
+
+await policyRepo.SnoozeAsync("bilibili", iToday);
+Check("「今天别再提了」是存库的（重启之后仍然算数）",
+    await policyRepo.GetSnoozeDateAsync("bilibili") == iToday);
+
+async Task<int> WriteBadPolicyAndReadAsync(PolicyRepository p)
+{
+    await p.SetAsync("intervention.cooldown_minutes", "半小时", PolicySource.User);
+    return await p.GetIntAsync("intervention.cooldown_minutes", 30);
+}
 
 Console.WriteLine();
 Console.WriteLine($"===== 结果：通过 {passed} 项，失败 {failed} 项 =====");

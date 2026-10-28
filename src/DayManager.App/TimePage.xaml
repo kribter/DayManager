@@ -211,7 +211,7 @@
                             <BindableLayout.ItemTemplate>
                                 <DataTemplate x:DataType="vm:AppUsageRow">
                                     <VerticalStackLayout Spacing="5">
-                                        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+                                        <Grid ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="8">
                                             <Label Text="{Binding Name}"
                                                    FontSize="13"
                                                    LineBreakMode="TailTruncation"
@@ -228,6 +228,19 @@
                                                    Text="{Binding DurationText}"
                                                    Style="{StaticResource Caption}"
                                                    VerticalOptions="Center" />
+
+                                            <!--
+                                              「标记」放在这一行上，是因为人想改的时候，
+                                              正是看见"B 站 1 小时 20 分"的这一刻。
+                                              汇总行（其余 N 个）没有对应的进程，按钮藏起来。
+                                            -->
+                                            <Button Grid.Column="3"
+                                                    Text="标记"
+                                                    Style="{StaticResource ChipButton}"
+                                                    IsVisible="{Binding CanMark}"
+                                                    ToolTipProperties.Text="算娱乐 / 算工作 / 不标记"
+                                                    Command="{Binding Source={RelativeSource AncestorType={x:Type vm:TimeViewModel}}, Path=MarkAppCommand}"
+                                                    CommandParameter="{Binding .}" />
                                         </Grid>
 
                                         <!-- 条形长度按第一名归一，用来扫"谁占大头"；
@@ -239,6 +252,108 @@
                                 </DataTemplate>
                             </BindableLayout.ItemTemplate>
                         </VerticalStackLayout>
+                    </VerticalStackLayout>
+                </Border>
+
+                <!-- ================= 娱乐超时提醒（M9） =================
+                     【为什么这块放在统计下面，而不是做成一个单独的设置页】
+                     这一页已经在回答"我的时间去哪了"。紧接着自然的一个问题是
+                     "那能不能拦我一下"——两个问题挨着问，人才会顺手去设。
+                     藏进二级页面，等于把最需要被打开的那个开关放到了没人去的地方。
+                     同时它是统计之后的内容，不抢首屏——这一页第一眼要给的仍然是"你今天用了多久"。 -->
+                <Border Style="{StaticResource CardStyle}"
+                        Padding="16,14"
+                        IsVisible="{Binding HasIntervention}">
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="12" />
+                    </Border.StrokeShape>
+
+                    <VerticalStackLayout Spacing="10">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <Label Text="娱乐超时提醒"
+                                   Style="{StaticResource CardTitle}"
+                                   VerticalOptions="Center" />
+                            <Switch Grid.Column="1"
+                                    IsToggled="{Binding IsReminderOn}" />
+                        </Grid>
+
+                        <Label Text="{Binding ThresholdText}"
+                               Style="{StaticResource Caption}" />
+
+                        <!-- 四档固定值，不做输入框：可选的数字键在小屏/中文输入法下很容易打错，
+                             而打错一个数字的后果是"提醒永远不来"或者"两分钟弹一次"。 -->
+                        <HorizontalStackLayout Spacing="6">
+                            <Button Text="15 分钟"
+                                    Style="{StaticResource ChipButton}"
+                                    Command="{Binding SetThresholdCommand}"
+                                    CommandParameter="15">
+                                <Button.Triggers>
+                                    <DataTrigger TargetType="Button" Binding="{Binding IsThreshold15}" Value="True">
+                                        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                                        <Setter Property="BorderColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                                        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource White}, Dark={StaticResource PrimaryDarkText}}" />
+                                    </DataTrigger>
+                                </Button.Triggers>
+                            </Button>
+
+                            <Button Text="30 分钟"
+                                    Style="{StaticResource ChipButton}"
+                                    Command="{Binding SetThresholdCommand}"
+                                    CommandParameter="30">
+                                <Button.Triggers>
+                                    <DataTrigger TargetType="Button" Binding="{Binding IsThreshold30}" Value="True">
+                                        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                                        <Setter Property="BorderColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                                        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource White}, Dark={StaticResource PrimaryDarkText}}" />
+                                    </DataTrigger>
+                                </Button.Triggers>
+                            </Button>
+
+                            <Button Text="45 分钟"
+                                    Style="{StaticResource ChipButton}"
+                                    Command="{Binding SetThresholdCommand}"
+                                    CommandParameter="45">
+                                <Button.Triggers>
+                                    <DataTrigger TargetType="Button" Binding="{Binding IsThreshold45}" Value="True">
+                                        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                                        <Setter Property="BorderColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                                        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource White}, Dark={StaticResource PrimaryDarkText}}" />
+                                    </DataTrigger>
+                                </Button.Triggers>
+                            </Button>
+
+                            <Button Text="60 分钟"
+                                    Style="{StaticResource ChipButton}"
+                                    Command="{Binding SetThresholdCommand}"
+                                    CommandParameter="60">
+                                <Button.Triggers>
+                                    <DataTrigger TargetType="Button" Binding="{Binding IsThreshold60}" Value="True">
+                                        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                                        <Setter Property="BorderColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                                        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource White}, Dark={StaticResource PrimaryDarkText}}" />
+                                    </DataTrigger>
+                                </Button.Triggers>
+                            </Button>
+                        </HorizontalStackLayout>
+
+                        <!--
+                          引擎自己的心跳。
+                          【为什么要把"它现在看到什么"写出来】
+                          一个只在关键时刻出声的功能，平时完全静默。没有这行字，
+                          用户分不清"还没到 30 分钟"、"它坏了"、"它根本没启动"——
+                          这三种情况在界面上长得一模一样：什么都没有。
+                        -->
+                        <Label Text="{Binding Intervention.StatusText}"
+                               Style="{StaticResource Caption}" />
+
+                        <HorizontalStackLayout Spacing="10">
+                            <Button Text="发一条测试通知"
+                                    Style="{StaticResource ChipButton}"
+                                    Command="{Binding SendTestNoticeCommand}" />
+                            <Label Text="{Binding Intervention.LastCheckText}"
+                                   Style="{StaticResource Caption}"
+                                   VerticalOptions="Center" />
+                        </HorizontalStackLayout>
                     </VerticalStackLayout>
                 </Border>
 

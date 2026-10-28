@@ -1,6 +1,9 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using DayManager.App.Services;
+using DayManager.Core.Enums;
+using DayManager.Core.Intervention;
 using DayManager.Data.Repositories;
 
 namespace DayManager.App.ViewModels;
@@ -30,6 +33,19 @@ public enum UsageSpan
 public partial class TimeViewModel : ObservableObject
 {
     private readonly UsageRepository _usage;
+    private readonly PolicyRepository _policy;
+    private readonly AppRuleRepository _rules;
+
+    /// <summary>
+    /// 干预引擎。**可空**：它依赖采集器和系统通知，而这两样只有 Windows 端有。
+    /// Android 早期还没有这一块，构造时注入 null，界面上的设置区就不显示。
+    ///
+    /// 【为什么不抽一个接口出来】
+    /// 这一页只用到它的两样东西：一句话状态、一个"发测试通知"的按钮。
+    /// 为一个只读属性 + 一个按钮抽接口，多出来的抽象比省下的代码还多。
+    /// 等 Android 真的要做时再抽，那时才知道两边共同的部分到底是什么。
+    /// </summary>
+    private readonly InterventionService? _intervention;
 
     /// <summary>
     /// 自动刷新间隔。
@@ -50,10 +66,20 @@ public partial class TimeViewModel : ObservableObject
     /// <summary>当前看的是哪一天。周/月/年都从它推出来。</summary>
     private DateOnly _anchor = DateOnly.FromDateTime(DateTime.Today);
 
-    public TimeViewModel(UsageRepository usage)
+    public TimeViewModel(
+        UsageRepository usage,
+        PolicyRepository policy,
+        AppRuleRepository rules,
+        InterventionService? intervention = null)
     {
         _usage = usage;
+        _policy = policy;
+        _rules = rules;
+        _intervention = intervention;
     }
+
+    /// <summary>当前在用的规则（进程名 → 归类）。标记应用之后要重查一次列表，所以留一份。</summary>
+    private Dictionary<string, AppKind> _kindByApp = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// 开始自动刷新（幂等，重复调用没有副作用）。
@@ -73,6 +99,10 @@ public partial class TimeViewModel : ObservableObject
         }
 
         _autoRefreshStarted = true;
+
+        // 干预设置从库里读一次。放在这里而不是构造里：
+        // 构造函数里不能 await，而用 _ = 硬起一个任务又会让"界面已经能点、设置还没到"中间那一下闪烁。
+        _ = LoadPolicyAsync();
 
         _ = Task.Run(async () =>
         {
@@ -159,6 +189,207 @@ public partial class TimeViewModel : ObservableObject
 
     [ObservableProperty]
     public partial bool HasApps { get; set; }
+
+    // ================= 干预设置（M9） =================
+
+    /// <summary>
+    /// 干预引擎本身，直接暴露给界面绑它的状态文字。
+    ///
+    /// 【为什么把服务对象直接摆出来，而不是每个字段都抄一份到 ViewModel】
+    /// 引擎每 60 秒会自己改 StatusText。抄一份就得订阅事件、切线程、再赋值，
+    /// 抄三行代码换来的只是"ViewModel 里看起来干净一点"。
+    /// 而状态文字本来就是"引擎此刻在想什么"，直接绑过去，说的和做的永远一致。
+    /// </summary>
+    public InterventionService? Intervention => _intervention;
+
+    /// <summary>娱乐超时提醒开没开。</summary>
+    [ObservableProperty]
+    public partial bool IsReminderOn { get; set; } = true;
+
+    /// <summary>连续用多久开始提醒（分钟）。</summary>
+    [ObservableProperty]
+    public partial int ThresholdMinutes { get; set; } = 30;
+
+    public string ThresholdText => $"连续用同一个娱乐应用超过 {ThresholdMinutes} 分钟，弹一条系统通知";
+
+    /// <summary>阈值档位的选中态。和顶部日/周/月/年那组按钮用的是同一套高亮做法。</summary>
+    public bool IsThreshold15 => ThresholdMinutes == 15;
+
+    public bool IsThreshold30 => ThresholdMinutes == 30;
+
+    public bool IsThreshold45 => ThresholdMinutes == 45;
+
+    public bool IsThreshold60 => ThresholdMinutes == 60;
+
+    /// <summary>时间页上有干预设置区的前提：这个平台注册了干预引擎。</summary>
+    public bool HasIntervention => _intervention is not null;
+
+    /// <summary>
+    /// 正在把库里的值写进界面。
+    ///
+    /// 【为什么需要它】
+    /// 开关是双向绑定：读库赋值时也会触发"值变了 → 保存"，于是刚读完就原样写回去一遍。
+    /// 更糟的是自动刷新每 20 秒可能来一次，等于每 20 秒往库里写一行。
+    /// 用一个标志把"这是加载"和"这是用户点的"分开，是处理双向绑定最简单可靠的办法。
+    /// </summary>
+    private bool _suppressPolicySave;
+
+    /// <summary>干预设置只从库里读一次，之后由用户操作和引擎状态接管。</summary>
+    private bool _policyLoaded;
+
+    partial void OnIsReminderOnChanged(bool value)
+    {
+        if (_suppressPolicySave)
+        {
+            return;
+        }
+
+        _ = SavePolicyAsync(PolicyKeys.InterventionEnabled, value ? "true" : "false");
+    }
+
+    partial void OnThresholdMinutesChanged(int value)
+    {
+        OnPropertyChanged(nameof(ThresholdText));
+        OnPropertyChanged(nameof(IsThreshold15));
+        OnPropertyChanged(nameof(IsThreshold30));
+        OnPropertyChanged(nameof(IsThreshold45));
+        OnPropertyChanged(nameof(IsThreshold60));
+
+        if (_suppressPolicySave)
+        {
+            return;
+        }
+
+        _ = SavePolicyAsync(PolicyKeys.ThresholdMinutes, value.ToString());
+    }
+
+    private async Task SavePolicyAsync(string key, string value)
+    {
+        try
+        {
+            // Source 写 User：需求 2.7 定了用户手动改过的参数 AI 不得再自动覆盖。
+            await _policy.SetAsync(key, value, PolicySource.User);
+        }
+        catch (Exception ex)
+        {
+            CrashLogger.Write("保存干预设置", ex);
+        }
+    }
+
+    /// <summary>从库里读一次干预设置。</summary>
+    private async Task LoadPolicyAsync()
+    {
+        if (_policyLoaded)
+        {
+            return;
+        }
+
+        _policyLoaded = true;
+
+        try
+        {
+            var enabled = await _policy.GetBoolAsync(PolicyKeys.InterventionEnabled, true);
+            var threshold = await _policy.GetIntAsync(PolicyKeys.ThresholdMinutes, 30);
+
+            _suppressPolicySave = true;
+            IsReminderOn = enabled;
+            ThresholdMinutes = threshold;
+            _suppressPolicySave = false;
+        }
+        catch (Exception ex)
+        {
+            CrashLogger.Write("读取干预设置", ex);
+        }
+    }
+
+    /// <summary>点阈值档位。</summary>
+    [RelayCommand]
+    private void SetThreshold(string raw)
+    {
+        if (int.TryParse(raw, out var minutes) && minutes > 0 && minutes != ThresholdMinutes)
+        {
+            ThresholdMinutes = minutes;
+        }
+    }
+
+    /// <summary>
+    /// 把一个应用标成娱乐 / 工作 / 不标记。
+    ///
+    /// 【为什么这个入口必须在这儿，而不是只在对话里让 AI 改】
+    /// 看到"B 站 1 小时 20 分"这一刻，才最可能想起"对了，这个得管一下"。
+    /// 要他去对话页描述"把 B 站标成娱乐"，是把一个两次点击的动作变成一次输入。
+    /// </summary>
+    [RelayCommand]
+    private async Task MarkAppAsync(AppUsageRow row)
+    {
+        if (row is null || !row.CanMark)
+        {
+            return;
+        }
+
+        var page = CurrentPage;
+        if (page is null)
+        {
+            return;
+        }
+
+        var choice = await page.DisplayActionSheetAsync(
+            row.Name, "取消", null, "算娱乐", "算工作", "不标记");
+
+        AppKind? kind = choice switch
+        {
+            "算娱乐" => AppKind.Entertainment,
+            "算工作" => AppKind.Work,
+            "不标记" => AppKind.Neutral,
+            _ => null
+        };
+
+        if (kind is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _rules.SetKindAsync(row.AppId, row.Name, kind.Value);
+
+            // 重算一次这一页：徽章和娱乐时长都要跟着变。
+            await LoadCoreAsync(quiet: true);
+        }
+        catch (Exception ex)
+        {
+            await ReportErrorAsync(ex);
+        }
+    }
+
+    /// <summary>
+    /// 发一条测试通知。
+    ///
+    /// 【为什么这个按钮值得摆出来】
+    /// 系统通知能不能显示，取决于 Windows 的通知总开关、专注助手、以及应用有没有被静音。
+    /// 这些都发生在程序外面——程序自己不弹一次，永远不知道自己是不是被系统吞了。
+    /// 没有它，"为什么一条提醒都没有"要从三四个方向一个个排除。
+    /// </summary>
+    [RelayCommand]
+    private async Task SendTestNoticeAsync()
+    {
+        if (_intervention?.SendTestNotice() == true)
+        {
+            return;
+        }
+
+        var page = CurrentPage;
+        if (page is not null)
+        {
+            await page.DisplayAlertAsync(
+                "没发出去",
+                "系统通知被拦住了。到 Windows 设置 → 系统 → 通知里看看 DayManager 是不是被关掉或静音了。",
+                "好");
+        }
+    }
+
+    private static Page? CurrentPage =>
+        Application.Current?.Windows.Count > 0 ? Application.Current.Windows[0].Page : null;
 
     [ObservableProperty]
     public partial bool CanGoNext { get; set; }
@@ -248,6 +479,11 @@ public partial class TimeViewModel : ObservableObject
 
             var range = await _usage.GetRangeAsync(from, to);
 
+            // 规则表一个应用一行，几十条顶天了。每次刷新读一遍，
+            // 换来的是"刚标记完，徽章立刻变"——比加一层缓存再想办法失效简单得多。
+            _kindByApp = (await _rules.GetAllAsync())
+                .ToDictionary(x => x.AppId, x => x.Kind, StringComparer.OrdinalIgnoreCase);
+
             TotalText = FormatDuration(range.TotalSeconds);
             IsEmpty = range.TotalSeconds == 0;
 
@@ -261,7 +497,7 @@ public partial class TimeViewModel : ObservableObject
                   + $"（占 {range.EntertainmentSeconds * 100 / range.TotalSeconds}%）";
 
             Apps.Clear();
-            foreach (var row in BuildAppRows(range))
+            foreach (var row in BuildAppRows(range, _kindByApp))
             {
                 Apps.Add(row);
             }
@@ -431,7 +667,9 @@ public partial class TimeViewModel : ObservableObject
 
     // ================= 应用排行 =================
 
-    private static IEnumerable<AppUsageRow> BuildAppRows(UsageRange range)
+    private static IEnumerable<AppUsageRow> BuildAppRows(
+        UsageRange range,
+        IReadOnlyDictionary<string, AppKind> rules)
     {
         const int TopCount = 8;
 
@@ -448,21 +686,38 @@ public partial class TimeViewModel : ObservableObject
         foreach (var app in top)
         {
             yield return new AppUsageRow(
+                app.AppId,
                 app.DisplayName,
                 FormatDuration(app.Seconds),
                 max == 0 ? 0 : (double)app.Seconds / max,
-                app.IsEntertainment);
+                ResolveKind(app.AppId, rules));
         }
 
         if (range.Apps.Count > TopCount)
         {
             var rest = range.Apps.Skip(TopCount).ToList();
             yield return new AppUsageRow(
+                // 这一行是汇总，不对应任何进程，所以 AppId 留空、不能标记。
+                string.Empty,
                 $"其余 {rest.Count} 个应用",
                 FormatDuration(rest.Sum(x => x.Seconds)),
                 max == 0 ? 0 : (double)rest.Sum(x => x.Seconds) / max,
-                false);
+                AppKind.Neutral);
         }
+    }
+
+    /// <summary>
+    /// 这个应用现在算什么。规则表里有的以用户标记为准，否则问内置名单。
+    ///
+    /// 【为什么判断本身写在 Core 里，这里只做一次查表】
+    /// 干预引擎用的是同一个判断（<see cref="EntertainmentApps.Classify"/>）。
+    /// 两处各写一遍的话，会出现"时间页标着娱乐、干预却不拦"，
+    /// 而且两边都不报错——只能靠人拿两个页面对比才发现。
+    /// </summary>
+    internal static AppKind ResolveKind(string appId, IReadOnlyDictionary<string, AppKind> rules)
+    {
+        var marked = rules.TryGetValue(appId, out var kind) ? kind : AppKind.Neutral;
+        return EntertainmentApps.Classify(appId, marked);
     }
 
     // ================= 格式化 =================
@@ -514,11 +769,21 @@ public partial class TimeViewModel : ObservableObject
 /// 按总时长归一的话，前八名加起来如果是总时长的 70%，
 /// 所有条都会被压到很短，粗细差别看不出来——那就失去了"扫一眼"的作用。
 /// </summary>
-public record AppUsageRow(string Name, string DurationText, double Ratio, bool IsEntertainment)
+/// <param name="AppId">进程名。汇总行（"其余 N 个"）没有对应的进程，为空。</param>
+/// <param name="Kind">现在算娱乐、工作还是没标记。徽章和"标记"按钮都看它。</param>
+public record AppUsageRow(string AppId, string Name, string DurationText, double Ratio, AppKind Kind)
 {
-    public string BadgeText => IsEntertainment ? "娱乐" : string.Empty;
+    public string BadgeText => Kind switch
+    {
+        AppKind.Entertainment => "娱乐",
+        AppKind.Work => "工作",
+        _ => string.Empty
+    };
 
-    public bool HasBadge => IsEntertainment;
+    public bool HasBadge => Kind != AppKind.Neutral;
+
+    /// <summary>汇总行不能标记，按钮要藏起来——点它没有对象可改。</summary>
+    public bool CanMark => !string.IsNullOrEmpty(AppId);
 }
 
 /// <summary>柱状图里的一根柱子。</summary>

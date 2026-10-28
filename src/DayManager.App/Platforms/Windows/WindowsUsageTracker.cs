@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using DayManager.Core.Enums;
+using DayManager.Core.Intervention;
 using DayManager.Data.Repositories;
 
 namespace DayManager.App.Platforms.Windows;
@@ -21,7 +22,7 @@ namespace DayManager.App.Platforms.Windows;
 /// 误差最多 5 秒——判断"今天在 B 站待了多久"完全够用。
 /// 精确不是这里的目标，稳定不出错才是：这份数据是干预引擎的唯一输入。
 /// </summary>
-public sealed class WindowsUsageTracker : IDisposable
+public sealed class WindowsUsageTracker : ICurrentUsageSource, IDisposable
 {
     /// <summary>采样间隔。5 秒：精度够用，一整天也就一万七千次，开销可忽略。</summary>
     private static readonly TimeSpan SampleInterval = TimeSpan.FromSeconds(5);
@@ -37,25 +38,18 @@ public sealed class WindowsUsageTracker : IDisposable
     private static readonly TimeSpan IdleThreshold = TimeSpan.FromMinutes(3);
 
     /// <summary>
-    /// 娱乐应用的初始名单（**进程名**，小写）。
+    /// 娱乐名单**只有一份**，在 <see cref="DayManager.Core.Intervention.EntertainmentApps"/>。
     ///
-    /// 【为什么先给一版硬编码的】
-    /// "娱乐怎么判定"本来是待确认项（手动黑名单 / 按类别自动判断 / 标一次就记住），
-    /// 但空名单会导致"娱乐时长"永远显示 0——算出来了却恒为 0，
-    /// 和没做是一样的。先给一个说得过去的起点，等 M9 干预引擎时
-    /// 换成用户可以自己在对话里改的名单（那时候也才有真实数据可校准）。
+    /// 【为什么这里原来有一份硬编码的，后来删掉了】
+    /// M7 做采集时，名单是为了给"娱乐时长"这个统计数字分类；
+    /// M9 做干预时又需要判断"该不该拦"，如果各留一份，
+    /// 迟早会出现"时间页说这个应用算娱乐，但干预拦不住"——
+    /// 两个地方各说各话，而且都不会报错，只能靠人对着两个页面比才发现。
     ///
-    /// 【为什么认进程名】
-    /// 窗口标题每次都不同，认标题等于认不出；进程名稳定，一次认准永久有效。
+    /// 合并时口径也收紧了一点：音乐播放器、知乎这类不再算娱乐。
+    /// 它们在工作时是背景音和查资料，把它们算进"娱乐 3 小时"，
+    /// 那个数字就不再是"我今天逃避了多久"，而只是一个没用的大数。
     /// </summary>
-    private static readonly HashSet<string> EntertainmentApps = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "bilibili", "douyu", "huya", "douyin", "kuaishou", "qqmusic", "neteasemusic",
-        "steam", "wegame", "epicgameslauncher", "origin", "uplay",
-        "youku", "iqiyi", "tencentvideo", "iqiyivideo", "pptv", "letv",
-        "weibo", "zhihu", "xiaohongshu", "rednote",
-        "genshin", "yuanren", "honkai", "lol", "tencentgames"
-    };
 
     /// <summary>
     /// 这些进程有窗口，但**不算在用电脑**——它们是"人不在"的标志。
@@ -111,6 +105,25 @@ public sealed class WindowsUsageTracker : IDisposable
     private Timer? _timer;
     private Guid _currentSessionId;
     private string _currentAppId = string.Empty;
+
+    /// <summary>
+    /// 现在这一段的快照（谁、从几点开始）。给干预引擎读。
+    ///
+    /// 【为什么不是让干预引擎自己去查库】
+    /// 库里那一段的 StartAt 是"这一段开始"没错，但要拿到它就得先知道 sessionId；
+    /// 而"现在到底是哪一段"只有采集器自己清楚（切应用、从空闲回来都会换段）。
+    /// 让查询方去猜，等于把采集器的内部状态复制一份到外面——
+    /// 两边的判断只要有一处不一致，就会出现"提醒里说你在 B 站，其实你早换到编辑器了"。
+    ///
+    /// 【为什么是 volatile 字段而不是属性加锁】
+    /// 写入方是采样线程，读取方是干预线程，读写都只是替换一个引用。
+    /// 引用赋值本身是原子的，volatile 保证"读的时候一定能看到最新那次写入"，
+    /// 对这个场景已经够了；加锁只会让每 5 秒的采样多一次争抢。
+    /// </summary>
+    private volatile CurrentUsageSnapshot? _current;
+
+    /// <summary>当前这一段在用什么。没人用（空闲、锁屏、刚起来）时为 null。</summary>
+    public CurrentUsageSnapshot? Current => _current;
 
     /// <summary>
     /// 上一次**计入时间**的采样时刻。为 null 表示"刚从空闲里回来"或"还没开始"，
@@ -183,6 +196,7 @@ public sealed class WindowsUsageTracker : IDisposable
         _currentSessionId = Guid.Empty;
         _currentAppId = string.Empty;
         _lastCreditedAt = null;
+        _current = null;
 
         // 只是把结束时间停在最后一次采样。时长早就累加好了，
         // 这时候再按时间差重算一遍，反而会把关机的空档算进去。
@@ -340,7 +354,7 @@ public sealed class WindowsUsageTracker : IDisposable
             info.AppId,
             info.AppName,
             info.Title,
-            EntertainmentApps.Contains(info.AppId),
+            DayManager.Core.Intervention.EntertainmentApps.IsEntertainment(info.AppId),
             at);
 
         _currentSessionId = session.Id;
@@ -349,6 +363,8 @@ public sealed class WindowsUsageTracker : IDisposable
         // 这一段从"现在"开始算，本次采样不加时间——
         // 加了就等于把切换的这 5 秒同时记给新旧两个应用。
         _lastCreditedAt = at;
+
+        _current = new CurrentUsageSnapshot(info.AppId, info.AppName, at, info.Title);
 
         Say($"开始记录 {info.AppName}（{info.AppId}）{(string.IsNullOrWhiteSpace(info.Title) ? "" : "：" + info.Title)}");
     }
@@ -366,6 +382,10 @@ public sealed class WindowsUsageTracker : IDisposable
         var id = _currentSessionId;
         _currentSessionId = Guid.Empty;
         _currentAppId = string.Empty;
+
+        // 先清快照再收尾：清晚了的话，收尾那几毫秒里干预引擎会读到
+        // "还在用上一个应用"，并可能据此弹一条已经过时的提醒。
+        _current = null;
 
         await _usage.ExtendAsync(id, at);
     }
@@ -459,6 +479,7 @@ public sealed class WindowsUsageTracker : IDisposable
 
     private static class NativeMethods
     {
+
         [DllImport("user32.dll")]
         internal static extern IntPtr GetForegroundWindow();
 
