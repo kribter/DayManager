@@ -86,6 +86,11 @@ builder.Services.AddDbContextFactory<DayManager.Data.AppDbContext>(options =>
 // Repository 内部通过工厂现造 DbContext，自己没有可变状态，做成单例最省。
 builder.Services.AddSingleton<DayManager.Data.Repositories.ItemRepository>();
 builder.Services.AddSingleton<DayManager.Data.Repositories.ActionLogRepository>();
+builder.Services.AddSingleton<DayManager.Data.Repositories.UsageRepository>();
+builder.Services.AddSingleton<DayManager.Data.Repositories.ChatRepository>();
+
+// AI 主动开口：它要自己读今天排了什么、做了多少、娱乐多久、昨天聊过什么。
+builder.Services.AddSingleton<ProactiveService>();
 
 // AI 建任务时要能把它挂到项目下（否则大任务页永远是空的）。
 builder.Services.AddSingleton<DayManager.Data.Repositories.ProjectRepository>();
@@ -230,6 +235,35 @@ app.MapPost("/api/ai/agent", async Task<IResult> (
     // 用户看到的是"连不上服务器"，而不是真正的原因。
     // 真正的网络/认证问题早在前置环节就返回 4xx/5xx 了。
     return Results.Ok(result);
+});
+
+// ------------------------------------------------------------------
+// 主动开口：没有人提问，AI 自己找话说
+//
+// 【为什么触发判断不在后端】
+// 后端不知道客户端还活着没有，也没有通知能力（它是个控制台进程，
+// 弹不出 toast）。所以"该不该说"由客户端判断，"说什么"才交给这里。
+// 后端要做的只是把话说好——它需要的数据全在库里，自己查得到。
+// ------------------------------------------------------------------
+app.MapPost("/api/ai/proactive", async Task<IResult> (
+    ProactiveRequest request,
+    ProactiveService proactive,
+    CancellationToken cancellationToken) =>
+{
+    if (!Enum.TryParse<DayManager.Core.Proactive.ProactiveKind>(
+            request.Kind, ignoreCase: true, out var kind) || kind == DayManager.Core.Proactive.ProactiveKind.None)
+    {
+        return Results.BadRequest(new { error = $"kind 不认识：{request.Kind}" });
+    }
+
+    var today = request.Today ?? DateOnly.FromDateTime(DateTime.Now);
+    var result = await proactive.SpeakAsync(kind, request.ItemId, today, cancellationToken);
+
+    // 【为什么失败也返回 200】
+    // 和 /api/ai/agent 同一个道理：说不出话是"这次没说"，不是网络故障。
+    // 客户端拿到 ok=false 安静跳过就行，没必要弹一个错误给用户——
+    // 他根本没主动请求过这句话，凭什么给他看一个报错。
+    return Results.Ok(new { ok = result.Ok, title = result.Title, text = result.Text, error = result.Error });
 });
 
 // ------------------------------------------------------------------

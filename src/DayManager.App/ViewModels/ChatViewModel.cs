@@ -66,6 +66,58 @@ public partial class ChatViewModel : ObservableObject
 
         // 「清空」按钮只在聊过之后出现，集合变了要通知一次，不然它永远不显示。
         Messages.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasMessages));
+
+        // AI 主动说的话要能立刻看见。它是在后台线程上写进库的，
+        // 不订阅就只有下次重新进这个页面时才出现——
+        // 而"通知弹了、打开对话页却找不到那句话"是最让人怀疑自己记错的情况。
+        WeakReferenceMessenger.Default.Register<ProactiveSpokeMessage>(
+            this, (_, _) => _ = AppendLatestAsync());
+    }
+
+    /// <summary>
+    /// 把最新一条记录追加到界面上（AI 主动说话后调用）。
+    ///
+    /// 【为什么重新读库而不是把文字传过来】
+    /// 消息里带上文字当然更省事，但那样这份显示逻辑就有了两条路：
+    /// 一条从库里读、一条从消息里拿，两条路的字段迟早不一致（撤回状态就是个例子）。
+    /// 重读一次库很便宜，口径只有一份。
+    /// </summary>
+    private async Task AppendLatestAsync()
+    {
+        // 历史还没加载过的话不用管：等打开页面时那一次加载自然会带上它。
+        if (!_loaded)
+        {
+            return;
+        }
+
+        try
+        {
+            var records = await _chat.GetRecentAsync(1);
+
+            if (records.Count == 0)
+            {
+                return;
+            }
+
+            var bubble = ChatBubble.FromRecord(records[0]);
+
+            // 集合只能在 UI 线程上改——后台线程改 ObservableCollection
+            // 抛的异常会被静默吞掉，表现是"界面一动不动"。
+            await MainThread.InvokeOnMainThreadAsync(() =>
+            {
+                // 重复追加要防：消息可能因为重试到了两次。
+                if (Messages.Count > 0 && Messages[^1].Text == bubble.Text)
+                {
+                    return;
+                }
+
+                Messages.Add(bubble);
+            });
+        }
+        catch (Exception ex)
+        {
+            CrashLogger.Write("追加 AI 主动说的话", ex);
+        }
     }
 
     /// <summary>有没有聊过。决定「清空」按钮要不要出现。</summary>

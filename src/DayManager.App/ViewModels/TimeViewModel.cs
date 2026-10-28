@@ -59,6 +59,12 @@ public partial class TimeViewModel : ObservableObject
     private readonly IAutoStartService? _autoStart;
 
     /// <summary>
+    /// AI 主动开口。可空：它要连后端和模型，Android 端早期没有。
+    /// 为 null 时这一块设置不显示。
+    /// </summary>
+    private readonly ProactiveNudgeService? _proactive;
+
+    /// <summary>
     /// 自动刷新间隔。
     ///
     /// 【为什么是 20 秒，而不是跟着采集的 5 秒】
@@ -83,7 +89,8 @@ public partial class TimeViewModel : ObservableObject
         AppRuleRepository rules,
         InterventionService? intervention = null,
         IWindowShell? shell = null,
-        IAutoStartService? autoStart = null)
+        IAutoStartService? autoStart = null,
+        ProactiveNudgeService? proactive = null)
     {
         _usage = usage;
         _policy = policy;
@@ -91,6 +98,19 @@ public partial class TimeViewModel : ObservableObject
         _intervention = intervention;
         _shell = shell;
         _autoStart = autoStart;
+        _proactive = proactive;
+
+        if (_proactive is not null)
+        {
+            // 服务那边状态一变就同步过来。它是定时跑的，
+            // 平时完全静默——界面上没有这句话，用户没法区分"还没到点儿"和"坏了"。
+            _proactive.StatusChanged += () =>
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    ProactiveStatusText = _proactive.StatusText;
+                    OnPropertyChanged(nameof(ProactiveStatusText));
+                });
+        }
     }
 
     /// <summary>当前在用的规则（进程名 → 归类）。标记应用之后要重查一次列表，所以留一份。</summary>
@@ -244,6 +264,67 @@ public partial class TimeViewModel : ObservableObject
 
     public string ThresholdText => $"连续用同一个娱乐应用超过 {ThresholdMinutes} 分钟，弹一条系统通知";
 
+    /// <summary>AI 主动开口开没开。</summary>
+    [ObservableProperty]
+    public partial bool IsProactiveOn { get; set; } = true;
+
+    /// <summary>它在想什么 / 最近说过什么。</summary>
+    [ObservableProperty]
+    public partial string ProactiveStatusText { get; set; } = "还没检查过";
+
+    /// <summary>这一块只在有这个能力时显示（要能通知 + 能连后端）。</summary>
+    public bool HasProactive => _proactive is not null;
+
+    /// <summary>
+    /// 四种场合、各自什么时候会说话。写死在这里，因为它就是当前的规则本身。
+    /// </summary>
+    public string ProactiveRuleText =>
+        "早晨（8–11 点首次启动）说今天的计划；有开始时间的日程提前 10 分钟提醒；"
+        + "21 点后说一句晚间总结；连着三天完成率不到三成时会来谈一次。"
+        + "同一种一天只说一次，两次之间至少隔一小时。";
+
+    /// <summary>
+    /// 现在就让 AI 说一句。
+    ///
+    /// 【为什么要有这个按钮】
+    /// 否则只能干等到晚上九点才知道它到底说得好不好。
+    /// 一个"能不能用"的问题如果需要等十二小时才能验证，那就等于没法验证。
+    ///
+    /// 【为什么不算"今天说过了"】
+    /// 它是测试，不该把今天真正的那次开口顶掉。
+    /// </summary>
+    [RelayCommand]
+    private async Task TestProactiveAsync()
+    {
+        if (_proactive is null)
+        {
+            return;
+        }
+
+        ProactiveStatusText = "正在让 AI 想一句……";
+
+        try
+        {
+            // 按当前时刻挑一个场合：不指定就不会挑，而挑出来的才接近真实效果。
+            var kind = DateTime.Now.Hour is >= 8 and < 11
+                ? DayManager.Core.Proactive.ProactiveKind.Morning
+                : DateTime.Now.Hour >= 21
+                    ? DayManager.Core.Proactive.ProactiveKind.Evening
+                    : DayManager.Core.Proactive.ProactiveKind.LowRate;
+
+            var text = await _proactive.SpeakNowAsync(kind, markAsFired: false);
+
+            ProactiveStatusText = string.IsNullOrWhiteSpace(text)
+                ? _proactive.StatusText
+                : $"说了：{text}";
+        }
+        catch (Exception ex)
+        {
+            CrashLogger.Write("试一句主动开口", ex);
+            ProactiveStatusText = $"没说出来：{ex.Message}";
+        }
+    }
+
     /// <summary>阈值档位的选中态。和顶部日/周/月/年那组按钮用的是同一套高亮做法。</summary>
     public bool IsThreshold15 => ThresholdMinutes == 15;
 
@@ -367,6 +448,16 @@ public partial class TimeViewModel : ObservableObject
         _ = SavePolicyAsync(PolicyKeys.InterventionEnabled, value ? "true" : "false");
     }
 
+    partial void OnIsProactiveOnChanged(bool value)
+    {
+        if (_suppressPolicySave)
+        {
+            return;
+        }
+
+        _ = SavePolicyAsync(PolicyKeys.ProactiveEnabled, value ? "true" : "false");
+    }
+
     partial void OnThresholdMinutesChanged(int value)
     {
         OnPropertyChanged(nameof(ThresholdText));
@@ -411,12 +502,19 @@ public partial class TimeViewModel : ObservableObject
             var enabled = await _policy.GetBoolAsync(PolicyKeys.InterventionEnabled, true);
             var threshold = await _policy.GetIntAsync(PolicyKeys.ThresholdMinutes, 30);
             var closeToTray = await _policy.GetBoolAsync(PolicyKeys.CloseToTray, true);
+            var proactive = await _policy.GetBoolAsync(PolicyKeys.ProactiveEnabled, true);
 
             _suppressPolicySave = true;
             IsReminderOn = enabled;
             ThresholdMinutes = threshold;
             IsCloseToTray = closeToTray;
+            IsProactiveOn = proactive;
             _suppressPolicySave = false;
+
+            if (_proactive is not null)
+            {
+                ProactiveStatusText = _proactive.StatusText;
+            }
 
             // 托盘那边马上要知道：它在任何界面操作之前就得按这个偏好拦住"关闭"。
             _shell?.SetCloseToTray(IsCloseToTray);

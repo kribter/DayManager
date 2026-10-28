@@ -357,6 +357,45 @@
                     </VerticalStackLayout>
                 </Border>
 
+                <!-- ================= AI 主动开口 =================
+
+                     【为什么要在这里给它一个开关和一个"现在就说一句"】
+                     它是唯一一个"没人请求就自己出声"的功能，
+                     比任何其他东西都更需要：① 一个能一键关掉的地方；
+                     ② 一个立刻能验证它到底说得好不好的按钮。
+                     少了前者它会变成骚扰，少了后者只能干等一整天。 -->
+                <Border Grid.Row="0"
+                        Style="{StaticResource CardStyle}"
+                        IsVisible="{Binding HasProactive}"
+                        Margin="0,12,0,0"
+                        Padding="16,14">
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="12" />
+                    </Border.StrokeShape>
+
+                    <VerticalStackLayout Spacing="10">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <Label Text="AI 主动开口"
+                                   Style="{StaticResource CardTitle}"
+                                   VerticalOptions="Center" />
+                            <Switch Grid.Column="1"
+                                    IsToggled="{Binding IsProactiveOn}" />
+                        </Grid>
+
+                        <Label Text="{Binding ProactiveRuleText}"
+                               Style="{StaticResource Caption}" />
+
+                        <!-- 心跳：它平时完全静默，没有这行字就分不清"还没到点儿"和"坏了"。 -->
+                        <Label Text="{Binding ProactiveStatusText}"
+                               Style="{StaticResource Caption}" />
+
+                        <Button Text="现在让它说一句"
+                                Style="{StaticResource ChipButton}"
+                                HorizontalOptions="Start"
+                                Command="{Binding TestProactiveCommand}" />
+                    </VerticalStackLayout>
+                </Border>
+
                 <!-- ================= 后台与开机 =================
 
                      【为什么这一块必须摆出来】

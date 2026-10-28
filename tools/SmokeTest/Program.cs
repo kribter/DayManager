@@ -5,6 +5,7 @@ using DayManager.Core.Entities;
 using DayManager.Core.Enums;
 using DayManager.Core.Intervention;
 using DayManager.Core.Planning;
+using DayManager.Core.Proactive;
 using DayManager.Data;
 using DayManager.Data.Repositories;
 using DayManager.Data.Snapshots;
@@ -1111,6 +1112,146 @@ Console.WriteLine("=== 21. 最小启动步骤：两分钟能做完的第一步 =
 
     var stepMissing = await repo.SetMinimalStepAsync(Guid.NewGuid(), "不存在的记录");
     Check("记录不存在时返回 null 而不是抛异常", stepMissing is null);
+}
+
+Console.WriteLine();
+Console.WriteLine("=== 22. AI 主动开口：什么时候该说话 ===");
+
+{
+    // 【为什么要给这一块写测试】
+    // 触发条件是这个功能里唯一称得上"逻辑"的部分，而它在真机上极难验：
+    // 早晨那条要等到早上八点，连续低完成率要连着三天不做事。
+    // 做成纯函数之后，把时钟拨到任意时刻，几毫秒就能验完。
+
+    var day = new DateOnly(2026, 10, 28);
+    DateTimeOffset At(int hour, int minute = 0) =>
+        new(day.Year, day.Month, day.Day, hour, minute, 0, TimeSpan.FromHours(8));
+
+    // ---- 早晨 ----
+
+    var morning = ProactiveDecider.Decide(new ProactiveContext { Now = At(8, 30) });
+    Check("早上八点半该说早晨计划",
+        morning.Kind == ProactiveKind.Morning, morning.Kind.ToString());
+
+    Check("早晨计划的窗口到下 11 点为止",
+        ProactiveDecider.Decide(new ProactiveContext { Now = At(11, 0) }).Kind != ProactiveKind.Morning);
+
+    Check("早上七点不算（太早了）",
+        ProactiveDecider.Decide(new ProactiveContext { Now = At(7, 0) }).Kind != ProactiveKind.Morning);
+
+    // ---- 晚间 ----
+
+    var evening = ProactiveDecider.Decide(new ProactiveContext { Now = At(21, 10) });
+    Check("晚上九点后该说晚间总结",
+        evening.Kind == ProactiveKind.Evening, evening.Kind.ToString());
+
+    // ---- 日程前提醒 ----
+
+    var itemId = Guid.NewGuid();
+    var before = ProactiveDecider.Decide(new ProactiveContext
+    {
+        Now = At(9, 0),
+        Upcoming = new[]
+        {
+            new ProactiveUpcoming(itemId, "开会", "把文档打开", At(9, 8)),
+            new ProactiveUpcoming(Guid.NewGuid(), "写报告", null, At(15, 0))
+        }
+    });
+    Check("10 分钟内要开始的会被点名",
+        before.Kind == ProactiveKind.Before && before.ItemId == itemId,
+        $"{before.Kind} / {before.ItemId}");
+
+    var tooFar = ProactiveDecider.Decide(new ProactiveContext
+    {
+        Now = At(9, 0),
+        Upcoming = new[] { new ProactiveUpcoming(itemId, "写报告", null, At(15, 0)) }
+    });
+    Check("还有六小时的不提前这么多说", tooFar.Kind != ProactiveKind.Before, tooFar.Kind.ToString());
+
+    // 已经过了开始时间：再说"还有 8 分钟"就是错的。
+    var alreadyStarted = ProactiveDecider.Decide(new ProactiveContext
+    {
+        Now = At(9, 0),
+        Upcoming = new[] { new ProactiveUpcoming(itemId, "开会", null, At(8, 50)) }
+    });
+    Check("已经开始的不提醒（不说过期的话）",
+        alreadyStarted.Kind != ProactiveKind.Before, alreadyStarted.Kind.ToString());
+
+    // ---- 连续低完成率 ----
+
+    var low = new[]
+    {
+        new ProactiveDayRatio(day.AddDays(-3), 5, 1),
+        new ProactiveDayRatio(day.AddDays(-2), 4, 0),
+        new ProactiveDayRatio(day.AddDays(-1), 6, 1)
+    };
+
+    var lowRate = ProactiveDecider.Decide(new ProactiveContext { Now = At(14, 0), RecentDays = low });
+    Check("连着三天完成率不到三成，要来谈一次",
+        lowRate.Kind == ProactiveKind.LowRate, lowRate.Kind.ToString());
+
+    var notLow = ProactiveDecider.Decide(new ProactiveContext
+    {
+        Now = At(14, 0),
+        RecentDays = new[]
+        {
+            new ProactiveDayRatio(day.AddDays(-3), 5, 1),
+            new ProactiveDayRatio(day.AddDays(-2), 4, 4),   // 这一天全做完了
+            new ProactiveDayRatio(day.AddDays(-1), 6, 1)
+        }
+    });
+    Check("中间有一天做完了就不算'一直很差'",
+        notLow.Kind != ProactiveKind.LowRate, notLow.Kind.ToString());
+
+    // 周末休息两天不能被判成"你最近三天什么都没做成"。
+    var weekend = ProactiveDecider.Decide(new ProactiveContext
+    {
+        Now = At(14, 0),
+        RecentDays = new[]
+        {
+            new ProactiveDayRatio(day.AddDays(-3), 0, 0),
+            new ProactiveDayRatio(day.AddDays(-2), 0, 0),
+            new ProactiveDayRatio(day.AddDays(-1), 5, 1)
+        }
+    });
+    Check("空着的两天不算低完成率（休息不是失败）",
+        weekend.Kind != ProactiveKind.LowRate, weekend.Kind.ToString());
+
+    Check("只有两天记录时不下判断",
+        !ProactiveDecider.IsConsistentlyLow(new[]
+        {
+            new ProactiveDayRatio(day.AddDays(-2), 5, 0),
+            new ProactiveDayRatio(day.AddDays(-1), 5, 0)
+        }));
+
+    // ---- 一天只说一次 + 冷却 ----
+
+    var fired = new HashSet<ProactiveKind> { ProactiveKind.Morning };
+    Check("同一种一天只说一次",
+        ProactiveDecider.Decide(new ProactiveContext { Now = At(9, 0), FiredToday = fired })
+            .Kind != ProactiveKind.Morning);
+
+    var cooling = ProactiveDecider.Decide(new ProactiveContext
+    {
+        Now = At(9, 30),
+        LastFiredAt = At(9, 0)
+    });
+    Check("刚说过半小时内不再说（防止连着弹）",
+        cooling.Reason == ProactiveSkipReason.CoolingDown, cooling.Reason.ToString());
+
+    Check("关掉总开关就一句都不说",
+        ProactiveDecider.Decide(new ProactiveContext { Now = At(9, 0), Enabled = false })
+            .Reason == ProactiveSkipReason.Disabled);
+
+    // ---- 优先级：时效强的先说 ----
+
+    var both = ProactiveDecider.Decide(new ProactiveContext
+    {
+        Now = At(8, 55),
+        Upcoming = new[] { new ProactiveUpcoming(itemId, "开会", null, At(9, 0)) }
+    });
+    Check("早晨和日程前撞车时，先说更急的那件",
+        both.Kind == ProactiveKind.Before, both.Kind.ToString());
 }
 
 Console.WriteLine();

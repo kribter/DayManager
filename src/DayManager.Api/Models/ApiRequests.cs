@@ -16,6 +16,27 @@ public sealed class AgentChatRequest
     public DateOnly? Today { get; set; }
 }
 
+/// <summary>
+/// 让 AI 主动说一句话（没有人提问）。
+/// </summary>
+public sealed class ProactiveRequest
+{
+    /// <summary>
+    /// 场合：morning / before / evening / lowrate。
+    ///
+    /// 【为什么用字符串而不是枚举】
+    /// 这个值要跨进程传，用字符串在网络上和日志里都一眼可读；
+    /// 用枚举传的是数字，抓包看到 "3" 还得回去查表。
+    /// </summary>
+    public string Kind { get; set; } = "morning";
+
+    /// <summary>场合为 before（日程前提醒）时，是那一条的 id。</summary>
+    public Guid? ItemId { get; set; }
+
+    /// <summary>"今天"是哪一天（yyyy-MM-dd）。可空，默认服务端当天。</summary>
+    public DateOnly? Today { get; set; }
+}
+
 /// <summary>手工新建一条（不经 AI）。</summary>
 public sealed class CreateItemRequest
 {

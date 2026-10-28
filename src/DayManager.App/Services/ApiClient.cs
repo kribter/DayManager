@@ -202,6 +202,76 @@ public sealed class ApiClient
     }
 
     /// <summary>
+    /// 让 AI 主动说一句话。**没有人提问**，是客户端判断"该开口了"之后调的。
+    /// </summary>
+    /// <param name="kind">场合：morning / before / evening / lowrate。</param>
+    /// <param name="itemId">场合为 before 时，是那一条的 id。</param>
+    /// <param name="today">你正看着哪一天。</param>
+    public async Task<ProactiveReply> ProactiveAsync(
+        string kind,
+        Guid? itemId,
+        DateOnly? today,
+        CancellationToken cancellationToken = default)
+    {
+        var payload = new
+        {
+            kind,
+            itemId,
+            today = today?.ToString("yyyy-MM-dd")
+        };
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, BuildUrl("/api/ai/proactive"))
+            {
+                Content = JsonContent.Create(payload, options: JsonOpts)
+            };
+
+            if (!string.IsNullOrWhiteSpace(_settings.Token))
+            {
+                request.Headers.Add(TokenHeader, _settings.Token);
+            }
+
+            using var response = await _http.SendAsync(request, cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return ProactiveReply.Fail(ExplainStatus((int)response.StatusCode, body, _settings.Token));
+            }
+
+            return ParseProactive(body);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return ProactiveReply.Fail(DescribeConnectionError(ex));
+        }
+    }
+
+    private static ProactiveReply ParseProactive(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            var ok = root.TryGetProperty("ok", out var okNode) && okNode.GetBoolean();
+
+            return new ProactiveReply
+            {
+                Ok = ok,
+                Title = root.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "",
+                Text = root.TryGetProperty("text", out var x) ? x.GetString() ?? "" : "",
+                Error = root.TryGetProperty("error", out var e) ? e.GetString() : null
+            };
+        }
+        catch (JsonException ex)
+        {
+            return ProactiveReply.Fail($"服务器返回的内容不是合法 JSON：{ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// 最近有哪些 AI 的改动可以撤销。
     /// </summary>
     public async Task<List<UndoBatchDto>> GetUndoableAsync(CancellationToken cancellationToken = default)
@@ -410,6 +480,23 @@ public sealed class ApiClient
             return AiReply.Fail(0, $"解析 AI 返回内容失败：{ex.Message}");
         }
     }
+}
+
+/// <summary>
+/// AI 主动开口的结果。
+///
+/// 【为什么 Ok=false 不算错误】
+/// 用户没有请求这句话，AI 没说出话来（模型抽风、今天没事可说）时，
+/// 正确行为是安静跳过——弹出一个"AI 说话失败"给他看，等于凭空制造一次打扰。
+/// </summary>
+public sealed class ProactiveReply
+{
+    public bool Ok { get; init; }
+    public string Title { get; init; } = string.Empty;
+    public string Text { get; init; } = string.Empty;
+    public string? Error { get; init; }
+
+    public static ProactiveReply Fail(string error) => new() { Ok = false, Error = error };
 }
 
 public sealed class HealthResult

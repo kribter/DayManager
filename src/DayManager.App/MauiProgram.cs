@@ -143,6 +143,9 @@ public static class MauiProgram
 		// 它的两个输入缺一个，功能就只能是个空转的定时器。
 		builder.Services.AddSingleton<InterventionService>();
 
+		// AI 主动开口：定时判断"该不该说话"，说出去之前会自己把后端拉起来。
+		builder.Services.AddSingleton<ProactiveNudgeService>();
+
 		// 「先做 10 分钟」的计时器（启动辅助）。
 		// 它到点要靠系统通知说话，所以跟干预引擎一样只在有通知实现的平台上注册；
 		// 没有它的时候 MainViewModel 拿到的是 null，界面上那两块自然不出现。
@@ -241,6 +244,7 @@ public static class MauiProgram
 #if WINDOWS
 		StartUsageTracking(app.Services);
 		StartIntervention(app.Services);
+		StartProactive(app.Services);
 		WarmUpBackend(app.Services);
 #endif
 
@@ -339,6 +343,29 @@ public static class MauiProgram
 			// 提醒坏了不该影响日程本身，但原因必须留下：
 			// 用户看到的是"一条提醒都没有"，排查第一句就是"它启动了吗"。
 			CrashLogger.Write("干预引擎启动失败", ex);
+		}
+	}
+
+	/// <summary>
+	/// 开始"AI 主动开口"的定时检查。
+	///
+	/// 【为什么和干预引擎分开启动，而不是塞进它里面】
+	/// 两者唯一的共同点是"都定时跑"。除此之外完全不同：
+	/// 干预引擎是纯本地判断、永远出声条件明确；
+	/// 这个要连后端、要等模型几十秒、还可能因为 AI 没配好整个不可用。
+	/// 混在一起，任何一边的失败都会把另一边也拖垮。
+	/// </summary>
+	private static void StartProactive(IServiceProvider services)
+	{
+		try
+		{
+			services.GetRequiredService<ProactiveNudgeService>().Start();
+		}
+		catch (Exception ex)
+		{
+			// 它不说就不说，日程照样能用。但原因要留下，
+			// 否则用户看到的是"AI 从来不主动找我"，而根本不知道该去哪儿查。
+			CrashLogger.Write("AI 主动开口启动失败", ex);
 		}
 	}
 #endif

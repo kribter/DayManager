@@ -26,6 +26,39 @@ public static class PolicyKeys
     /// <summary>点窗口的 X 时是"藏起来继续跑"还是"真的退出"。默认藏着。</summary>
     public const string CloseToTray = "app.close_to_tray";
 
+    /// <summary>AI 主动开口的总开关。"true" / "false"，默认开。</summary>
+    public const string ProactiveEnabled = "proactive.enabled";
+
+    /// <summary>
+    /// 某一种场合今天已经说过了。后面接场合名 + 日期。
+    ///
+    /// 【为什么要按日期存而不是只存"说过没有"】
+    /// 明天要重新说。只存布尔值的话，第二天早晨它还是"说过了"，
+    /// 于是早晨计划这个功能只在第一天生效过一次。
+    /// </summary>
+    public const string ProactiveFiredPrefix = "proactive.fired.";
+
+    /// <summary>
+    /// 某一条日程已经提醒过了。后面接条目 id。
+    ///
+    /// 【为什么不按日期】同一条日程不会天天有，按条目记一次就够；
+    /// 记成日期反而是给数据库添无限增长的垃圾。
+    /// </summary>
+    public const string ProactiveBeforePrefix = "proactive.before.";
+
+    /// <summary>上一次开口的时刻（yyyy-MM-dd HH:mm），用来做冷却。</summary>
+    public const string ProactiveLastAt = "proactive.last_at";
+
+    /// <summary>
+    /// 点过通知上「今天别再提了」的那一天（yyyy-MM-dd）。
+    ///
+    /// 【为什么主动开口也要有赦免权】
+    /// 它比干预提醒更容易招人烦——干预至少是在你真的刷了半小时之后才响，
+    /// 而这个是它自己找上门。没有一次性关掉今天的办法，
+    /// 用户关掉的就是整个软件。
+    /// </summary>
+    public const string ProactiveSnoozed = "proactive.snoozed";
+
     /// <summary>「今天别再提了」的前缀，后面接进程名。</summary>
     public const string SnoozePrefix = "intervention.snooze.";
 
