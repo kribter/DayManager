@@ -1082,6 +1082,38 @@ async Task<int> WriteBadPolicyAndReadAsync(PolicyRepository p)
 }
 
 Console.WriteLine();
+Console.WriteLine("=== 21. 最小启动步骤：两分钟能做完的第一步 ===");
+
+{
+    var stepItem = await repo.AddAsync("写季度报告");
+
+    var stepSet = await repo.SetMinimalStepAsync(stepItem.Id, "  打开文档写个标题  ");
+    Check("第一步被存下来，并且去掉前后空白",
+        stepSet?.MinimalStep == "打开文档写个标题", stepSet?.MinimalStep ?? "(null)");
+
+    // 重新读一次库：确认是真的落库了，而不是只在内存里改了
+    await using (var db = factory.CreateDbContext())
+    {
+        var stepReread = await db.Items.AsNoTracking().FirstAsync(x => x.Id == stepItem.Id);
+        Check("重读数据库仍然一致",
+            stepReread.MinimalStep == "打开文档写个标题", stepReread.MinimalStep ?? "(null)");
+    }
+
+    var stepBlank = await repo.SetMinimalStepAsync(stepItem.Id, "   ");
+    Check("只给空白等于清掉", stepBlank?.MinimalStep is null, stepBlank?.MinimalStep ?? "(null)");
+
+    var stepNull = await repo.SetMinimalStepAsync(stepItem.Id, null);
+    Check("传 null 同样能清掉", stepNull?.MinimalStep is null);
+
+    var stepCut = await repo.SetMinimalStepAsync(stepItem.Id, new string('字', 600));
+    Check("超长截断到 500，不把数据库写爆",
+        stepCut?.MinimalStep?.Length == 500, $"实际 {stepCut?.MinimalStep?.Length} 字");
+
+    var stepMissing = await repo.SetMinimalStepAsync(Guid.NewGuid(), "不存在的记录");
+    Check("记录不存在时返回 null 而不是抛异常", stepMissing is null);
+}
+
+Console.WriteLine();
 Console.WriteLine($"===== 结果：通过 {passed} 项，失败 {failed} 项 =====");
 
 try { File.Delete(dbFile); } catch { }

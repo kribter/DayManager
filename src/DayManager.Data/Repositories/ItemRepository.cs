@@ -498,6 +498,43 @@ public class ItemRepository
     }
 
     /// <summary>
+    /// 改「最小启动步骤」——两分钟能做完的第一步。
+    ///
+    /// 【为什么值得单独开一个方法，而不是让调用方自己改字段】
+    /// 跟改标题一个道理：真正的规则是"空白就当成没有"和"不能超长"，
+    /// 写在外面迟早有一处忘了去空白，存进去一个空格，
+    /// 界面上就多出一行空的「第一步：」。
+    ///
+    /// 【为什么允许传 null 把它清掉】
+    /// AI 拆解时给每条都填了第一步，但填得不好的情况也有
+    /// （比如 AI 给的"第一步"其实还是整件事）。
+    /// 那时用户要能把它去掉，而不是被迫天天看一句没用的话。
+    /// </summary>
+    public async Task<Item?> SetMinimalStepAsync(Guid id, string? value,
+        CancellationToken ct = default)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var item = await db.Items.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (item is null)
+        {
+            return null;
+        }
+
+        var trimmed = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+        item.MinimalStep = trimmed is { Length: > MaxMinimalStepLength }
+            ? trimmed[..MaxMinimalStepLength]
+            : trimmed;
+
+        await db.SaveChangesAsync(ct);
+        return item;
+    }
+
+    /// <summary>「最小启动步骤」的长度上限，与 AppDbContext 里的 HasMaxLength 保持一致。</summary>
+    private const int MaxMinimalStepLength = 500;
+
+    /// <summary>
     /// 软删除。
     ///
     /// 【为什么不是真的 Remove】

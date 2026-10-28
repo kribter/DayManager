@@ -34,10 +34,41 @@ public partial class MainViewModel : ObservableObject
     /// </summary>
     private readonly ItemActionService _actions;
 
-    public MainViewModel(ItemRepository itemRepository, ItemActionService actions)
+    /// <summary>
+    /// 「先做 10 分钟」的计时器。
+    ///
+    /// 【为什么是可选参数，而不是直接注入】
+    /// 它要用系统通知，而通知只有 Windows 有实现——Android 上压根没注册这个服务。
+    /// 写成必填的话，那一边一构造这个 ViewModel 就崩。
+    /// 可空 + 每个对外属性都判空，是没有这个能力时最省事的安静降级
+    /// （时间页的 InterventionService 也是这么做的）。
+    /// </summary>
+    private readonly FocusSessionService? _focus;
+
+    public MainViewModel(
+        ItemRepository itemRepository,
+        ItemActionService actions,
+        FocusSessionService? focus = null)
     {
         _itemRepository = itemRepository;
         _actions = actions;
+        _focus = focus;
+
+        if (_focus is not null)
+        {
+            // 计时器的状态不在本类里，界面却绑在本类的属性上，
+            // 所以"它变了"这件事必须转发过来，否则界面会停在旧状态上。
+            // 这里图省事监听了全部变化：计时器一共就六个属性，
+            // 每秒一次的通知量也不值得再细分。
+            _focus.PropertyChanged += (_, _) =>
+            {
+                OnPropertyChanged(nameof(FocusActive));
+                OnPropertyChanged(nameof(FocusRunning));
+                OnPropertyChanged(nameof(FocusFinished));
+                OnPropertyChanged(nameof(FocusRunningText));
+                OnPropertyChanged(nameof(FocusPromptText));
+            };
+        }
 
         //
         // 订阅"日程变了"这个消息：拆解页写入完成之后会发一条过来。
@@ -326,6 +357,92 @@ public partial class MainViewModel : ObservableObject
     private async Task ShowActionsAsync(ItemViewModel item)
     {
         await _actions.ShowMenuAsync(item, LoadAsync);
+    }
+
+    // ================= 「先做 10 分钟」 =================
+
+    public bool FocusActive => _focus?.IsActive == true;
+
+    /// <summary>
+    /// 正在计时（还没到点）。
+    ///
+    /// 【为什么"在计时"和"到点了"要分成两个状态】
+    /// 界面上这是两块完全不同的东西：一块是倒计时，一块是收尾时的正反馈和选择。
+    /// 合成一个的话，XAML 里就要靠一层层 IsVisible 去区分，改一处容易漏另一处。
+    /// </summary>
+    public bool FocusRunning => _focus is { IsActive: true, IsFinished: false };
+
+    public bool FocusFinished => _focus?.IsFinished == true;
+
+    /// <summary>计时中那一行文字："正在做：写报告 · 剩 9:58"。</summary>
+    public string FocusRunningText => _focus is null
+        ? string.Empty
+        : $"正在做：{_focus.ItemTitle} · 剩 {_focus.RemainingText}";
+
+    public string FocusPromptText => _focus?.PromptText ?? string.Empty;
+
+    /// <summary>
+    /// 点条目上的「10 分钟」。
+    ///
+    /// 【为什么点正在计时的那一条是"结束"而不是"再来一轮"】
+    /// 按钮上写着「10 分钟」，再点一次合理的期待是"让它停下"。
+    /// 如果它变成"又来一轮"，按钮的含义就随状态漂移了——
+    /// 每次点之前都得先想一下现在点下去是什么。含义固定的按钮才不用想。
+    /// </summary>
+    [RelayCommand]
+    private async Task StartFocusAsync(ItemViewModel item)
+    {
+        if (_focus is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (_focus.IsActive && _focus.ItemId == item.Id)
+            {
+                _focus.FinishNow();
+                return;
+            }
+
+            var updated = await _focus.StartAsync(item.Id, item.Title);
+
+            if (updated is not null)
+            {
+                // 刷新这一行：状态刚被改成"进行中"，徽章和副标题都要跟着变。
+                item.Update(updated);
+                UpdateSummary();
+            }
+        }
+        catch (Exception ex)
+        {
+            await ReportErrorAsync(ex);
+        }
+    }
+
+    [RelayCommand]
+    private async Task ContinueFocusAsync()
+    {
+        if (_focus is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _focus.ContinueAsync();
+        }
+        catch (Exception ex)
+        {
+            await ReportErrorAsync(ex);
+        }
+    }
+
+    /// <summary>「今天先到这」/ 计时中的「停」。</summary>
+    [RelayCommand]
+    private void EndFocus()
+    {
+        _focus?.End();
     }
 
     private async Task ChangeStatusAsync(ItemViewModel item, ItemStatus status)

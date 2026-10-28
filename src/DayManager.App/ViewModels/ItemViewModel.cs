@@ -76,6 +76,35 @@ public partial class ItemViewModel : ObservableObject
     public partial bool HasStatusBadge { get; set; }
 
     /// <summary>
+    /// 最小启动步骤：「打开文档写个标题」这种两分钟能做完的第一步。
+    ///
+    /// 【为什么现在要把它显示出来】
+    /// 这个字段从数据模型建好那天就在，AI 拆解时也一直给每条都填，
+    /// 可它只在拆解结果页露过面——一旦落到日程清单里就再也看不见了。
+    /// 于是实际效果是：拆完那会儿看得见"第一步"，过一天想动手时反而没了。
+    /// **凡是算出来的东西，一定要显示出来**，不然跟没算一样。
+    ///
+    /// 【为什么不放在副标题那一行】
+    /// 副标题是"什么时候做"（估时 / 截止 / 逾期），
+    /// 第一步是"怎么开始"——两件事挤在一行会读成一句话，扫视时两边都丢。
+    /// 它单独占一行，正好落在标题下方，也就是人判断"这条怎么下手"时看的地方。
+    /// </summary>
+    [ObservableProperty]
+    public partial string StepText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial bool HasMinimalStep { get; set; }
+
+    /// <summary>
+    /// 这一条现在能不能开「先做 10 分钟」。
+    ///
+    /// 完成和放弃已经了结，再给一个"先做 10 分钟"是自相矛盾；
+    /// 跳过过的任务正需要它——那正是"启动不了"的典型。
+    /// </summary>
+    [ObservableProperty]
+    public partial bool CanFocus { get; set; }
+
+    /// <summary>
     /// 状态徽章的颜色。
     ///
     /// 【为什么这里写死色值，而不是去 XAML 里取资源】
@@ -151,6 +180,9 @@ public partial class ItemViewModel : ObservableObject
         // 否则上一次的残留会留到下一次——详见 TitleDecorations 的注释。
         TitleDecorations = TextDecorations.None;
         HasStatusBadge = false;
+        HasMinimalStep = false;
+        CanFocus = false;
+        StepText = string.Empty;
 
         Title = _item.Title;
         IsDone = _item.Status == ItemStatus.Done;
@@ -223,6 +255,16 @@ public partial class ItemViewModel : ObservableObject
         }
 
         Subtitle = BuildSubtitle();
+
+        // 【第一步只在"还没了结"的时候出现】
+        // 已经做完、或者已经决定不做的事，不需要再教人怎么开头。
+        HasMinimalStep = !string.IsNullOrWhiteSpace(_item.MinimalStep)
+                         && _item.Status is not (ItemStatus.Done or ItemStatus.Abandoned);
+
+        StepText = HasMinimalStep ? $"第一步：{_item.MinimalStep}" : string.Empty;
+
+        CanFocus = _item.Status
+            is ItemStatus.Pending or ItemStatus.Skipped or ItemStatus.InProgress;
     }
 
     /// <summary>

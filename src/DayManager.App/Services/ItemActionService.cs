@@ -83,6 +83,10 @@ public class ItemActionService
                     changed = true;
                     break;
 
+                case MenuStep:
+                    changed = await EditStepAsync(page, item);
+                    break;
+
                 case "重命名":
                     changed = await RenameAsync(page, item);
                     break;
@@ -109,6 +113,7 @@ public class ItemActionService
     // 点了没反应，还不报错，是最难查的一类 bug。
     private const string MenuSkip = "今天先跳过（明天再来）";
     private const string MenuAbandon = "放弃不做了";
+    private const string MenuStep = "改第一步";
 
     /// <summary>
     /// 菜单项按当前状态动态生成：已经完成的条目不该再显示"标记完成"。
@@ -147,6 +152,12 @@ public class ItemActionService
         else if (item.Item.Status == ItemStatus.Abandoned)
         {
             choices.Add("还是要做（改回待办）");
+        }
+
+        // 已经了结的事不需要再教人怎么开头
+        if (item.Item.Status != ItemStatus.Done && item.Item.Status != ItemStatus.Abandoned)
+        {
+            choices.Add(MenuStep);
         }
 
         choices.Add("重命名");
@@ -201,6 +212,41 @@ public class ItemActionService
         }
 
         await _items.SetStatusAsync(item.Id, ItemStatus.Abandoned, null);
+        return true;
+    }
+
+    /// <summary>
+    /// 改「最小启动步骤」：两分钟能做完的第一步。
+    ///
+    /// 【为什么允许留空】
+    /// 留空 = 不要这一步。AI 拆解时给每条都填了，但填得不好的情况也有
+    /// （它给的"第一步"其实还是整件事），那时用户要能把它去掉，
+    /// 而不是被迫天天看一句没用的话。
+    ///
+    /// 【为什么"取消"和"留空"必须分开处理】
+    /// 取消是"我没想好"，空串是"我不要了"——
+    /// 合成一种的话，想删掉这句话的人就永远删不掉。
+    /// </summary>
+    private async Task<bool> EditStepAsync(Page page, ItemViewModel item)
+    {
+        var value = await page.DisplayPromptAsync(
+            "最小启动步骤",
+            "两分钟能做完的第一步。留空就是不要了。",
+            initialValue: item.Item.MinimalStep ?? string.Empty);
+
+        // 点取消返回 null，留空返回空串。
+        if (value is null)
+        {
+            return false;
+        }
+
+        var updated = await _items.SetMinimalStepAsync(item.Id, value);
+        if (updated is null)
+        {
+            return false;
+        }
+
+        item.Update(updated);
         return true;
     }
 

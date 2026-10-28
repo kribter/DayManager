@@ -143,6 +143,11 @@ public static class MauiProgram
 		// 它的两个输入缺一个，功能就只能是个空转的定时器。
 		builder.Services.AddSingleton<InterventionService>();
 
+		// 「先做 10 分钟」的计时器（启动辅助）。
+		// 它到点要靠系统通知说话，所以跟干预引擎一样只在有通知实现的平台上注册；
+		// 没有它的时候 MainViewModel 拿到的是 null，界面上那两块自然不出现。
+		builder.Services.AddSingleton<FocusSessionService>();
+
 		// 托盘（藏起来但继续跑）与开机自启。
 		// 这两样也是纯平台能力，界面层对着接口说话。
 		builder.Services.AddSingleton<IWindowShell, WindowsTray>();

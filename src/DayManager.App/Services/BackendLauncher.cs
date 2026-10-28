@@ -102,6 +102,24 @@ public sealed class BackendLauncher
             // 用 WhenAny 给一个自己的上限，到点就当"没在跑"。
             if (await Task.WhenAny(connect, Task.Delay(timeout)) != connect)
             {
+                //
+                // 【为什么要专门接住这个已经不等了的任务】
+                // 走到这里说明超时了，可那个 connect 还在后台跑。
+                // 它最后一定会抛：要么连接被拒，要么是下面 using 把 socket 释放掉、
+                // 把这次 I/O 中止掉（SocketException 995）。
+                // 抛出来却没有人 await，就变成"未观察异常"，
+                // 最后被记进崩溃日志——看上去像程序出了故障，其实只是"这会儿没人监听"。
+                //
+                // 这条路径以前只有打开对话页才走一次，现在每次启动都会走
+                // （启动即预热），不接住的话日志里会稳定多出两条噪音，
+                // 把将来真正要看的故障淹没掉。
+                //
+                _ = connect.ContinueWith(
+                    t => _ = t.Exception,
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted,
+                    TaskScheduler.Default);
+
                 return false;
             }
 

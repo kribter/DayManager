@@ -23,18 +23,20 @@
       而不是等到运行时才发现界面一片空白。强烈建议永远写上。
       ============================================================
 
-      整个页面用一个 Grid 划成四行：
+      整个页面用一个 Grid 划成六行：
         第 0 行 Auto  标题和日期      —— 高度随内容
         第 1 行 Auto  今日完成统计    —— 高度随内容
-        第 2 行 *     清单列表        —— 吃掉剩下的所有空间
-        第 3 行 Auto  快速添加区      —— 固定在底部
+        第 2 行 Auto  「正在做」/「到点了」—— 平时折起来，不占空间
+        第 3 行 *     清单列表        —— 吃掉剩下的所有空间
+        第 4 行 Auto  快速添加区      —— 固定在底部
+        第 5 行 Auto  时间选择器      —— 只有勾了「定时」才出来
       "*" 表示"把剩余高度全给我"，所以列表会自动撑满中间。
     -->
     <!--
       空着的时候不说"没有任务"，而说"加一条，哪怕只是先看两分钟"——
       这一句是给正在逃避的人留的最低门槛。
     -->
-    <Grid RowDefinitions="Auto,Auto,*,Auto,Auto"
+    <Grid RowDefinitions="Auto,Auto,Auto,*,Auto,Auto"
           Padding="18"
           RowSpacing="12">
 
@@ -107,11 +109,62 @@
                          ProgressColor="{StaticResource DoneGreen}" />
         </VerticalStackLayout>
 
-        <!-- ================= 第 2 行：今日清单 =================
+        <!-- ================= 第 2 行：正在做 / 到点了 =================
+             平时这一行等于不存在（两块都折起来），一点空间都不占；
+             只有计时中、或者 10 分钟到点等着收尾时才出现。
+
+             【为什么到点了要在界面上问一句，而不是只发一条通知】
+             通知会滑走，而这一句正反馈恰恰要落在看得见的地方：
+             做完的要有个收尾，没做完的要知道这 10 分钟算数。
+             界面上留一块，用户什么时候回来都还在。 -->
+        <Border Grid.Row="2"
+                IsVisible="{Binding FocusRunning}"
+                Padding="10,8"
+                Stroke="{StaticResource ProgressOrange}"
+                StrokeThickness="1">
+            <Border.StrokeShape>
+                <RoundRectangle CornerRadius="8" />
+            </Border.StrokeShape>
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                <Label Grid.Column="0"
+                       Text="{Binding FocusRunningText}"
+                       FontSize="13"
+                       VerticalOptions="Center" />
+                <Button Grid.Column="1"
+                        Text="停"
+                        Style="{StaticResource ChipButton}"
+                        WidthRequest="46"
+                        Command="{Binding EndFocusCommand}" />
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="2"
+                IsVisible="{Binding FocusFinished}"
+                Padding="10,8"
+                Stroke="{StaticResource DoneGreen}"
+                StrokeThickness="1">
+            <Border.StrokeShape>
+                <RoundRectangle CornerRadius="8" />
+            </Border.StrokeShape>
+            <VerticalStackLayout Spacing="8">
+                <Label Text="{Binding FocusPromptText}"
+                       FontSize="13" />
+                <HorizontalStackLayout Spacing="8">
+                    <Button Text="再来 10 分钟"
+                            Style="{StaticResource ChipButton}"
+                            Command="{Binding ContinueFocusCommand}" />
+                    <Button Text="今天先到这"
+                            Style="{StaticResource ChipButton}"
+                            Command="{Binding EndFocusCommand}" />
+                </HorizontalStackLayout>
+            </VerticalStackLayout>
+        </Border>
+
+        <!-- ================= 第 3 行：今日清单 =================
              CollectionView 是列表控件的现代版本。
              相比老的 ListView，它支持横向/纵向、网格布局，而且性能更好。
              ItemsSource 绑到 ObservableCollection，集合内容一变界面自动重画。 -->
-        <CollectionView Grid.Row="2"
+        <CollectionView Grid.Row="3"
                         ItemsSource="{Binding TodayItems}"
                         SelectionMode="None">
 
@@ -138,7 +191,7 @@
                       扫视时相邻两条的说明文字容易看成同一条的。
                       这个软件的清单是要"扫一眼就知道还剩什么"的，行距是功能不是装饰。
                     -->
-                    <Grid ColumnDefinitions="Auto,*,Auto"
+                    <Grid ColumnDefinitions="Auto,*,Auto,Auto"
                           ColumnSpacing="10"
                           Padding="6,10">
                         <!-- 左边的打勾按钮。
@@ -191,6 +244,12 @@
                                 </Border>
                             </HorizontalStackLayout>
 
+                            <!-- 最小启动步骤：只在还没了结时出现（见 ItemViewModel.StepText） -->
+                            <Label Text="{Binding StepText}"
+                                   Style="{StaticResource Caption}"
+                                   TextColor="{StaticResource MutedText}"
+                                   IsVisible="{Binding HasMinimalStep}" />
+
                             <Label Text="{Binding Subtitle}"
                                    Style="{StaticResource Caption}" />
                         </VerticalStackLayout>
@@ -205,7 +264,26 @@
                                   于是用户根本不知道删除藏在里面。
                              写成"更多"两个字，不依赖任何字形，而且字面上就说明
                              "点开还有东西"。两个字的宽度换掉了"找不到删除在哪"这个问题，划算。 -->
+                        <!--
+                          「先做 10 分钟」
+
+                          【为什么直接放在条目上，而不是收进「更多」菜单】
+                          这个按钮的全部价值就是"少一步"。
+                          让人先想起来去菜单里找它，等于把承诺又抬高了一点——
+                          而它存在的唯一理由是降低承诺。
+                          已完成 / 已放弃的条目不显示（CanFocus）：
+                          那是已经了结的事，再给一个"开始"是自相矛盾。
+                        -->
                         <Button Grid.Column="2"
+                                Text="10 分钟"
+                                Style="{StaticResource ChipButton}"
+                                WidthRequest="60"
+                                IsVisible="{Binding CanFocus}"
+                                ToolTipProperties.Text="先做 10 分钟，只做 10 分钟"
+                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=StartFocusCommand}"
+                                CommandParameter="{Binding .}" />
+
+                        <Button Grid.Column="3"
                                 Text="更多"
                                 Style="{StaticResource ChipButton}"
                                 WidthRequest="46"
@@ -218,7 +296,7 @@
             </CollectionView.ItemTemplate>
         </CollectionView>
 
-        <!-- ================= 第 3 行：快速添加 =================
+        <!-- ================= 第 4 行：快速添加 =================
              输入框和按钮并排，省掉一整行的高度。
 
              【为什么时间选项缩成一个方框，点开才出现时间选择器】
@@ -226,7 +304,7 @@
              底部占掉三分之一屏，清单反而被挤得很短。
              而"指定开始时间"是个低频操作——大多数随手加的待办不需要几点几分。
              所以把它收进一个勾选框，勾了才展开时间选择器。 -->
-        <Grid Grid.Row="3"
+        <Grid Grid.Row="4"
               ColumnDefinitions="Auto,Auto,*,Auto"
               ColumnSpacing="4">
             <CheckBox Grid.Column="0"
@@ -256,7 +334,7 @@
         </Grid>
 
         <!-- 只有勾了上面的框才会出现，不占平时的空间 -->
-        <TimePicker Grid.Row="4"
+        <TimePicker Grid.Row="5"
                     Time="{Binding NewTime}"
                     IsVisible="{Binding UseSpecificTime}"
                     IsEnabled="{Binding UseSpecificTime}"
