@@ -71,6 +71,17 @@ public partial class ProjectDetailViewModel : ObservableObject
     [ObservableProperty]
     public partial string TargetText { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 目标日期的**原值**（本地时间，日期粒度）。
+    ///
+    /// 【为什么除了 TargetText 还要留一份】
+    /// TargetText 是给人看的那句"还剩 12 天"，已经丢掉了具体是哪一天。
+    /// 改日期的时候日历要停在原来那天上（在这天上微调比重挑一次省事），
+    /// 只有"还剩几天"这个数字推不回日期。列表页的卡片也是同样的理由留了一份。
+    /// </summary>
+    [ObservableProperty]
+    public partial DateTime? TargetDate { get; set; }
+
     [ObservableProperty]
     public partial bool IsBusy { get; set; }
 
@@ -123,6 +134,7 @@ public partial class ProjectDetailViewModel : ObservableObject
             if (summary is not null)
             {
                 Name = summary.Name;
+                TargetDate = summary.TargetDate?.ToLocalTime().DateTime;
                 TargetText = BuildTargetText(summary.TargetDate);
             }
         }
@@ -206,6 +218,124 @@ public partial class ProjectDetailViewModel : ObservableObject
             await ReportErrorAsync(ex);
         }
     }
+
+    // ================= 改目标日期 =================
+
+    /// <summary>
+    /// 日期面板要不要显示。
+    ///
+    /// 【为什么这一页也要这个入口】
+    /// 原来只有列表页的「更多」里能改，于是想调一天期限得先返回、找到那张卡片、
+    /// 再点两层菜单。而人真正会想改日期的时刻，往往就是打开这一页看见
+    /// "还剩 2 天、底下还有 7 条没做"的那一刻——入口不在这里，等于没有。
+    ///
+    /// 【为什么面板本身不用再写一遍】
+    /// 用的是 <see cref="Controls.DatePickerSheet"/>，和列表页同一个控件。
+    /// 各写一遍的话，以后调样式、改措辞要记得改两处，而漏掉一处的表现是
+    /// 同一个动作在两个页面长得不一样——不报错，只是不像一个软件。
+    /// </summary>
+    [ObservableProperty]
+    public partial bool IsDatePanelVisible { get; set; }
+
+    /// <summary>日历上当前选中的那天。初值在 <see cref="OpenDatePanel"/> 里按原目标日期算。</summary>
+    [ObservableProperty]
+    public partial DateTime EditingDate { get; set; } = DateTime.Today.AddDays(1);
+
+    /// <summary>日历能往前翻到哪。</summary>
+    public DateTime EarliestDate => DateTime.Today;
+
+    /// <summary>
+    /// 打开面板。
+    ///
+    /// 【为什么初值取"原目标日期"和"明天"里较晚的那个】
+    /// 已经有目标的：停在原来那天，改的时候是在原基础上微调。
+    /// 没有目标、或者原目标已经过期的：从明天开始——
+    /// 一个已经过期的日子还选在日历上，看着像"你上次定的就是这个"。
+    /// </summary>
+    [RelayCommand]
+    private void OpenDatePanel()
+    {
+        var today = DateTime.Today;
+        var existing = TargetDate?.Date;
+
+        EditingDate = existing is null || existing.Value < today
+            ? today.AddDays(1)
+            : existing.Value;
+
+        IsDatePanelVisible = true;
+    }
+
+    /// <summary>把日历上选的那天存下去。</summary>
+    [RelayCommand]
+    private async Task ConfirmDateAsync()
+    {
+        if (_projectId == Guid.Empty)
+        {
+            return;
+        }
+
+        IsDatePanelVisible = false;
+
+        try
+        {
+            await _projects.SetTargetDateAsync(_projectId, DateOnly.FromDateTime(EditingDate));
+
+            // 重查一次而不是就地改 TargetText：那句"还剩几天"是由 summary 算出来的，
+            // 在内存里再算一遍等于把同一套算法抄第二份。
+            await LoadAsync();
+
+            // 列表页卡片上的"还剩 X 天"也要跟着变。
+            // 自己也会收到这条消息、再查一次，代价是一次多余的读——数据量是一个人用的，不为它加排除逻辑。
+            WeakReferenceMessenger.Default.Send(new ItemsChangedMessage());
+        }
+        catch (Exception ex)
+        {
+            await ReportErrorAsync(ex);
+        }
+    }
+
+    /// <summary>清掉目标日期（还没想好什么时候做完）。</summary>
+    [RelayCommand]
+    private async Task ClearDateAsync()
+    {
+        if (_projectId == Guid.Empty)
+        {
+            return;
+        }
+
+        IsDatePanelVisible = false;
+
+        try
+        {
+            await _projects.SetTargetDateAsync(_projectId, null);
+            await LoadAsync();
+            WeakReferenceMessenger.Default.Send(new ItemsChangedMessage());
+        }
+        catch (Exception ex)
+        {
+            await ReportErrorAsync(ex);
+        }
+    }
+
+    /// <summary>快捷日期：3 天后 / 一周后 / 两周后 / 一个月后。</summary>
+    [RelayCommand]
+    private void PickQuickDate(string code)
+    {
+        var today = DateTime.Today;
+
+        EditingDate = code switch
+        {
+            "3d" => today.AddDays(3),
+            "1w" => today.AddDays(7),
+            "2w" => today.AddDays(14),
+            "1m" => today.AddMonths(1),
+            _ => EditingDate
+        };
+    }
+
+    /// <summary>什么都不改，收起面板。</summary>
+    [RelayCommand]
+    private void CancelDate() => IsDatePanelVisible = false;
 
     /// <summary>子任务的"更多"菜单，和日程页共用同一套。</summary>
     [RelayCommand]
