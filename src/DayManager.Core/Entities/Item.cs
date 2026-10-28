@@ -19,6 +19,18 @@ public class Item : SyncEntityBase
 
     public string? Notes { get; set; }
 
+    /// <summary>
+    /// 这件事是「该做的」还是「想做的」。
+    ///
+    /// 【默认值为什么是 MustDo】
+    /// 大多数记录属于这一类，而且默认值必须是一个"说错了也无妨"的方向：
+    /// 把想做的事误标成该做的，后果只是它暂时没被当成奖励推给你；
+    /// 反过来把该做的误标成想做的，一件有截止日期的正事会变成"奖励"，
+    /// 出现在你刚做完另一件事的时候——那才是真的乱套。
+    /// </summary>
+    public ItemKind Kind { get; set; } = ItemKind.MustDo;
+
+
     // ---------- 时间：三个字段表达所有形态 ----------
 
     /// <summary>
@@ -66,6 +78,7 @@ public class Item : SyncEntityBase
     /// </summary>
     public int? DurationMinutes { get; set; }
 
+
     // ---------- 状态：抗拖延的核心数据 ----------
 
     public ItemStatus Status { get; set; } = ItemStatus.Pending;
@@ -84,6 +97,45 @@ public class Item : SyncEntityBase
 
     /// <summary>完成时间。统计完成分布、生成每日总结时要用。</summary>
     public DateTimeOffset? CompletedAt { get; set; }
+
+    /// <summary>
+    /// 跳过发生在什么时候。
+    ///
+    /// 【为什么必须记这个时刻，光有 Skipped 状态不够】
+    /// "跳过"只对那一天有效：今天跳过，明天它应该照常回来。
+    /// 但数据库里状态就只有一个值，第二天打开软件时无从判断
+    /// 这条是"被跳过了"还是"该重新出现了"。
+    /// 记下时刻之后，判定规则就成立了（见 ItemRepository.GetDayListAsync）：
+    ///   跳过时刻 ≥ 这一天的零点  → 这一天它被跳过，不显示
+    ///   跳过时刻 < 这一天的零点  → 那是以前的事了，今天照常显示
+    /// 这样"明天自动回来"是查出来的，不是靠每天跑一个任务把状态改回来——
+    /// 少一个后台任务，就少一类"它没跑起来"的故障。
+    /// </summary>
+    public DateTimeOffset? SkippedAt { get; set; }
+
+    /// <summary>
+    /// 跳过的原因（一句话，可空）：生病 / 有事 / 被别的事占了。
+    ///
+    /// 【为什么要让用户能写一句】
+    /// 同样是"没做"，"今天被临时会议占了"和"就是不想动"是完全不同的信号。
+    /// 前者是外部环境，后者才是需要 AI 出面谈的。
+    /// 没有这句话，AI 只能看到冷冰冰的"跳过 3 次"，无从区分该安慰还是该追问。
+    /// 也给用户自己留个台阶——写下来的那一刻，就不是"我又没做"，而是"我今天有理由"。
+    /// </summary>
+    public string? SkipReason { get; set; }
+
+    /// <summary>
+    /// 累计被跳过了几次。
+    ///
+    /// 【为什么要单独计数，而不是去数 SkippedAt】
+    /// SkippedAt 只保留最近一次的时刻（它要用来判断"现在是不是跳过态"），
+    /// 会被下一次跳过覆盖。而"这条被跳过太多次"是一个重要的信号：
+    /// 它通常不是拖延，是**这件事本身就不该做**——
+    /// 每次看到它都决定跳过，却每天把它搬回来，那是软件在帮忙自欺。
+    /// AI 要靠这个数字主动提出来谈一次，而不是默默让它一直滚回来。
+    /// </summary>
+    public int SkipCount { get; set; }
+
 
     // ---------- 估算与实际：AI 排程的校准依据 ----------
 
@@ -110,6 +162,7 @@ public class Item : SyncEntityBase
     /// 而不是像普通提醒那样只在旁边喊你去做。
     /// </summary>
     public string? MinimalStep { get; set; }
+
 
     // ---------- 重复日程 ----------
 
@@ -152,6 +205,7 @@ public class Item : SyncEntityBase
     /// </summary>
     public DateTimeOffset? OriginalStart { get; set; }
 
+
     // ---------- 两级结构 ----------
 
     /// <summary>所属项目。可空，允许存在不挂在任何项目下的零散任务。</summary>
@@ -164,6 +218,7 @@ public class Item : SyncEntityBase
 
     /// <summary>所属项目（导航属性，便于查询时一次性带出项目信息）。</summary>
     public Project? Project { get; set; }
+
 
     // ---------- 组织方式 ----------
 

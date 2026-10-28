@@ -30,30 +30,81 @@
         第 3 行 Auto  快速添加区      —— 固定在底部
       "*" 表示"把剩余高度全给我"，所以列表会自动撑满中间。
     -->
-    <Grid RowDefinitions="Auto,Auto,*,Auto"
+    <!--
+      空着的时候不说"没有任务"，而说"加一条，哪怕只是先看两分钟"——
+      这一句是给正在逃避的人留的最低门槛。
+    -->
+    <Grid RowDefinitions="Auto,Auto,*,Auto,Auto"
           Padding="18"
-          RowSpacing="14">
+          RowSpacing="12">
 
-        <!-- ================= 第 0 行：日期标题 ================= -->
-        <VerticalStackLayout Grid.Row="0" Spacing="2">
-            <Label Text="今天"
-                   FontSize="30"
-                   FontAttributes="Bold" />
-            <Label Text="{Binding DateText}"
-                   FontSize="13"
-                   TextColor="Gray" />
-        </VerticalStackLayout>
+        <!-- ================= 第 0 行：可以翻的日期 =================
+
+             【为什么左上角不再是固定的"今天"两个字】
+             只能看今天的话，提前排到后天的事在那之前是"隐形"的：
+             写进去了，但没有任何地方能确认它在不在。
+             所以要能翻——往前往后，或者直接从日历里挑一天。
+
+             【为什么中间放 DatePicker 而不是一个 Label + 按钮】
+             DatePicker 本身就是"显示日期 + 点开挑日期"两件事合一的控件，
+             用它等于一个控件给全了两种用法，不用再发明一个展开/收起的开关。
+             旁边那三个小字（今天/明天/3 天后）是给人看的换算结果，
+             省掉"还得自己数一下差几天"这一步。
+
+             【为什么翻页按钮上写的是最普通的 &lt; 和 &gt;，而不是 ‹ › 那种更漂亮的符号】
+             上一版写的是 ‹ ›（U+2039/U+203A），结果两个按钮都是空的——
+             系统字体里没有这两个字形，MAUI 又不会像浏览器那样自动找替代字体，
+             于是静默地什么都不显示。箭头类符号、数学符号、制表符都可能有这个下场。
+             结论：界面上的符号只用"每个字体都一定有"的那些
+             （ASCII 的 &lt; &gt;、以及 ✓ 这类已经验证过能显示的）。
+             漂亮的符号留到确定字体的那天再用。 -->
+        <Grid Grid.Row="0"
+              ColumnDefinitions="Auto,Auto,Auto,Auto,*,Auto"
+              ColumnSpacing="4">
+            <Button Grid.Column="0"
+                    Text="&lt;"
+                    Style="{StaticResource RoundIconButton}"
+                    FontAttributes="Bold"
+                    Command="{Binding PreviousDayCommand}" />
+            <DatePicker Grid.Column="1"
+                        Date="{Binding SelectedDate}"
+                        MinimumDate="{Binding EarliestDate}"
+                        Format="M月d日 dddd"
+                        FontSize="17"
+                        FontAttributes="Bold"
+                        WidthRequest="200"
+                        VerticalOptions="Center" />
+            <Label Grid.Column="2"
+                   Text="{Binding RelativeDayText}"
+                   Style="{StaticResource Caption}"
+                   FontSize="12"
+                   VerticalOptions="Center"
+                   Padding="4,0,0,0" />
+            <Button Grid.Column="3"
+                    Text="&gt;"
+                    Style="{StaticResource RoundIconButton}"
+                    FontAttributes="Bold"
+                    Command="{Binding NextDayCommand}" />
+
+            <!-- 只有翻走了才出现，今天它在页面上没有意义 -->
+            <Button Grid.Column="5"
+                    Text="回到今天"
+                    Style="{StaticResource ChipButton}"
+                    Command="{Binding GoTodayCommand}"
+                    IsVisible="{Binding IsNotViewingToday}"
+                    HorizontalOptions="End" />
+        </Grid>
 
         <!-- ================= 第 1 行：完成统计 =================
              这里也体现了产品原则：先给正反馈。
              显示的是"已完成几件"，而不是"还剩几件"。 -->
-        <VerticalStackLayout Grid.Row="1" Spacing="6">
+        <VerticalStackLayout Grid.Row="1" Spacing="4">
             <Label Text="{Binding SummaryText}"
-                   FontSize="15"
+                   FontSize="14"
                    FontAttributes="Bold" />
             <ProgressBar Progress="{Binding CompletionRatio}"
                          HeightRequest="6"
-                         ProgressColor="#2E7D5B" />
+                         ProgressColor="{StaticResource DoneGreen}" />
         </VerticalStackLayout>
 
         <!-- ================= 第 2 行：今日清单 =================
@@ -66,12 +117,14 @@
 
             <CollectionView.EmptyView>
                 <!-- EmptyView：列表为空时显示的内容。
-                     文案刻意写成鼓励而非催促，避免一打开就有压力。 -->
-                <Label Text="今天还没有安排。&#10;在下面加一条，哪怕只是「先看两分钟」。"
+                     文案刻意写成鼓励而非催促，避免一打开就有压力。
+                     在别的日子里它会换成"可以提前放进来"的说法（见 EmptyHint）。 -->
+                <Label Text="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=EmptyHint}"
+                       Style="{StaticResource Caption}"
+                       FontSize="13"
                        HorizontalTextAlignment="Center"
                        VerticalTextAlignment="Center"
-                       Margin="0,40,0,0"
-                       TextColor="Gray" />
+                       Margin="0,40,0,0" />
             </CollectionView.EmptyView>
 
             <CollectionView.ItemTemplate>
@@ -79,10 +132,15 @@
                      它的 BindingContext 是集合里的单个元素，也就是一个 ItemViewModel，
                      所以下面的 {Binding Title} 取的是某一行的标题。 -->
                 <DataTemplate x:DataType="vm:ItemViewModel">
+                    <!--
+                      行高：Padding 从 "2,6" → "4,8" → 现在 "6,10"。
+                      一开始一行连内容带间距只有 40 出头，七八条就挤成一团，
+                      扫视时相邻两条的说明文字容易看成同一条的。
+                      这个软件的清单是要"扫一眼就知道还剩什么"的，行距是功能不是装饰。
+                    -->
                     <Grid ColumnDefinitions="Auto,*,Auto"
                           ColumnSpacing="10"
-                          Padding="2,6">
-
+                          Padding="6,10">
                         <!-- 左边的打勾按钮。
                              Command 需要绑到"页面级"的命令（ToggleCompleteCommand
                              属于 MainViewModel，不属于每一行的 ItemViewModel），
@@ -92,39 +150,66 @@
                              这样命令才知道用户点的是哪一条。 -->
                         <Button Grid.Column="0"
                                 Text="&#10003;"
-                                FontSize="17"
-                                WidthRequest="38"
-                                HeightRequest="38"
-                                Padding="0"
-                                CornerRadius="19"
-                                BorderWidth="1"
-                                BorderColor="Gray"
-                                BackgroundColor="Transparent"
+                                Style="{StaticResource RoundIconButton}"
                                 TextColor="{Binding CheckColor}"
                                 Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=ToggleCompleteCommand}"
                                 CommandParameter="{Binding .}" />
 
-                        <!-- 中间：标题 + 一行说明（时间/逾期/已进行时长） -->
+                        <!-- 中间：标题 + 状态徽章 + 一行说明（时间/逾期/已进行时长） -->
                         <VerticalStackLayout Grid.Column="1"
                                              Spacing="2"
                                              VerticalOptions="Center">
-                            <Label Text="{Binding Title}"
-                                   TextColor="{Binding TitleColor}"
-                                   FontSize="15"
-                                   LineBreakMode="TailTruncation" />
+
+                            <!--
+                              标题和状态徽章并排。
+                              【为什么徽章要单独占一个位置，而不是并进下面那行说明】
+                              下面那行是"什么时候做"（时间/估时/逾期），
+                              徽章是"这件事现在是什么状态"——两类信息混在一行里会读成一句，
+                              比如"进行中 · 已进行 25 分钟"，扫视时容易看漏前半。
+                              跟标题同行则不同：它紧挨着"是什么事"，
+                              正是人判断"这条我要不要管"时先看的地方。
+                            -->
+                            <HorizontalStackLayout Spacing="6">
+                                <Label Text="{Binding Title}"
+                                       TextColor="{Binding TitleColor}"
+                                       TextDecorations="{Binding TitleDecorations}"
+                                       FontSize="15"
+                                       LineBreakMode="TailTruncation"
+                                       VerticalOptions="Center" />
+
+                                <Border Padding="5,1"
+                                        Stroke="{Binding StatusBrush}"
+                                        StrokeThickness="1"
+                                        VerticalOptions="Center"
+                                        IsVisible="{Binding HasStatusBadge}">
+                                    <Border.StrokeShape>
+                                        <RoundRectangle CornerRadius="4" />
+                                    </Border.StrokeShape>
+                                    <Label Text="{Binding StatusText}"
+                                           TextColor="{Binding StatusColor}"
+                                           FontSize="10" />
+                                </Border>
+                            </HorizontalStackLayout>
+
                             <Label Text="{Binding Subtitle}"
-                                   TextColor="Gray"
-                                   FontSize="11" />
+                                   Style="{StaticResource Caption}" />
                         </VerticalStackLayout>
 
-                        <!-- 右边：⋯ 菜单，收着不常用的操作 -->
+                        <!-- 右边：更多操作（重命名 / 删除 / 改状态在里面的菜单里）
+
+                             【为什么这里写"更多"两个字，而不是 ⋯ / ⋮ 这种图标】
+                             上一版是一个 ⋮ 号的图标按钮，结果有两个问题：
+                               1. 同样是字形问题——有些系统字体里它就是三个点，
+                                  小到看不清，甚至干脆是空的，看着像"这里什么都没有"；
+                               2. 更关键的：就算图标显示出来了，它也没说自己是"能点的菜单"，
+                                  于是用户根本不知道删除藏在里面。
+                             写成"更多"两个字，不依赖任何字形，而且字面上就说明
+                             "点开还有东西"。两个字的宽度换掉了"找不到删除在哪"这个问题，划算。 -->
                         <Button Grid.Column="2"
-                                Text="&#8942;"
-                                FontSize="18"
-                                WidthRequest="34"
-                                HeightRequest="34"
-                                Padding="0"
-                                BackgroundColor="Transparent"
+                                Text="更多"
+                                Style="{StaticResource ChipButton}"
+                                WidthRequest="46"
+                                ToolTipProperties.Text="重命名 / 删除 / 改状态"
                                 Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=ShowActionsCommand}"
                                 CommandParameter="{Binding .}" />
 
@@ -133,37 +218,51 @@
             </CollectionView.ItemTemplate>
         </CollectionView>
 
-        <!-- ================= 第 3 行：快速添加 ================= -->
-        <VerticalStackLayout Grid.Row="3" Spacing="8">
+        <!-- ================= 第 3 行：快速添加 =================
+             输入框和按钮并排，省掉一整行的高度。
 
-            <Entry Text="{Binding NewTitle}"
-                   Placeholder="想做点什么？"
+             【为什么时间选项缩成一个方框，点开才出现时间选择器】
+             上一版是「输入框 / 勾选框+时间选择器 / 按钮」三行，
+             底部占掉三分之一屏，清单反而被挤得很短。
+             而"指定开始时间"是个低频操作——大多数随手加的待办不需要几点几分。
+             所以把它收进一个勾选框，勾了才展开时间选择器。 -->
+        <Grid Grid.Row="3"
+              ColumnDefinitions="Auto,Auto,*,Auto"
+              ColumnSpacing="4">
+            <CheckBox Grid.Column="0"
+                      IsChecked="{Binding UseSpecificTime}"
+                      MinimumWidthRequest="0"
+                      Scale="0.8"
+                      VerticalOptions="Center" />
+            <Label Grid.Column="1"
+                   Text="定时"
+                   Style="{StaticResource Caption}"
+                   FontSize="10"
+                   VerticalOptions="Center" />
+            <Entry Grid.Column="2"
+                   Text="{Binding NewTitle}"
+                   Placeholder="{Binding AddPlaceholder}"
                    ReturnType="Done"
                    ReturnCommand="{Binding AddItemCommand}"
-                   FontSize="15" />
-
-            <!-- 一个开关 + 时间选择器，用来决定这条有没有具体开始时间。
-                 TimePicker 的 IsVisible 直接绑到开关的同一个布尔值，
-                 于是勾选后时间选择器才出现——这是最常见的"条件显示"写法。 -->
-            <HorizontalStackLayout Spacing="6">
-                <CheckBox IsChecked="{Binding UseSpecificTime}"
-                          MinimumWidthRequest="0"
-                          Scale="0.85" />
-                <Label Text="指定开始时间"
-                       VerticalOptions="Center"
-                       FontSize="13" />
-                <TimePicker Time="{Binding NewTime}"
-                            IsVisible="{Binding UseSpecificTime}"
-                            Format="HH:mm"
-                            VerticalOptions="Center" />
-            </HorizontalStackLayout>
-
-            <Button Text="加入今天"
+                   FontSize="14" />
+            <Button Grid.Column="3"
+                    Text="加入"
                     Command="{Binding AddItemCommand}"
+                    WidthRequest="60"
+                    HeightRequest="40"
                     CornerRadius="8"
-                    HeightRequest="44" />
+                    Padding="0"
+                    FontSize="13" />
+        </Grid>
 
-        </VerticalStackLayout>
+        <!-- 只有勾了上面的框才会出现，不占平时的空间 -->
+        <TimePicker Grid.Row="4"
+                    Time="{Binding NewTime}"
+                    IsVisible="{Binding UseSpecificTime}"
+                    IsEnabled="{Binding UseSpecificTime}"
+                    Format="HH:mm"
+                    FontSize="13"
+                    HorizontalOptions="Start" />
 
     </Grid>
 

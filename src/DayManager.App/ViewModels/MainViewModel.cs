@@ -2,7 +2,11 @@
 using System.Globalization;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using CommunityToolkit.Mvvm.Messaging;
+using DayManager.App.Messages;
+using DayManager.App.Services;
 using DayManager.Core.Enums;
+using DayManager.Core.Planning;
 using DayManager.Data.Repositories;
 
 namespace DayManager.App.ViewModels;
@@ -21,10 +25,36 @@ public partial class MainViewModel : ObservableObject
 {
     private readonly ItemRepository _itemRepository;
 
-    public MainViewModel(ItemRepository itemRepository)
+    /// <summary>
+    /// "更多"菜单的实现。
+    ///
+    /// 【为什么不写在这个类里】
+    /// 大任务详情页要对子任务用同一套菜单，写在这就得复制一份。
+    /// 抽出去之后两边共用，加一个菜单项只改一处。见 ItemActionService 的说明。
+    /// </summary>
+    private readonly ItemActionService _actions;
+
+    public MainViewModel(ItemRepository itemRepository, ItemActionService actions)
     {
         _itemRepository = itemRepository;
-        DateText = DateTime.Now.ToString("M月d日 dddd", new CultureInfo("zh-CN"));
+        _actions = actions;
+
+        //
+        // 订阅"日程变了"这个消息：拆解页写入完成之后会发一条过来。
+        //
+        // 【为什么要订阅，光靠 OnAppearing 不够吗】
+        // 不够。MAUI 的 Shell 在底部 Tab 之间切换时，ContentPage 的 OnAppearing
+        // 并不保证触发，结果就是：拆解页明明写了 10 条任务，切回「今天」还是空的。
+        // 这条消息把"什么时候该刷新"的决定权交给改数据的那一方——
+        // 谁改的谁知道要刷，比让读的人去猜可靠。
+        //
+        // 【为什么在构造函数里注册，而不是页面 OnAppearing 里】
+        // 消息可能在页面还没显示时就到了（拆解页就在隔壁 Tab），
+        // 注册晚了这条消息就丢了。构造时就挂上，任何时候到达都能收到。
+        //
+        WeakReferenceMessenger.Default.Register<ItemsChangedMessage>(
+            this,
+            (_, _) => _ = LoadCommand.ExecuteAsync(null));
     }
 
     /// <summary>
@@ -37,8 +67,82 @@ public partial class MainViewModel : ObservableObject
     /// </summary>
     public ObservableCollection<ItemViewModel> TodayItems { get; } = new();
 
+    // ================= 当前查看的那一天 =================
+
+    /// <summary>
+    /// 当前正在看哪一天。
+    ///
+    /// 【为什么要能翻到其他日子，而不是只给"今天"】
+    /// 只显示今天有两个实际后果：
+    ///   1. 提前往某天放一件事后，在那一天到来之前根本找不到它，
+    ///      等于"排好的计划在系统里是隐形的"；
+    ///   2. 想回头看看昨晚做完什么，也没有地方可看——
+    ///      而这个软件的正反馈恰恰建立在"看见自己做到过"这件事上。
+    /// 所以翻日期不是锦上添花，是让"计划"这个词真正成立的前提。
+    ///
+    /// 【为什么默认是今天，而不是"上次看到的那天"】
+    /// 记着上次的日子会导致某天打开软件看到的是三天前，
+    /// 第一反应是"我的今天怎么空的"。这个软件的入口必须是"此刻"。
+    /// </summary>
     [ObservableProperty]
-    public partial string DateText { get; set; } = string.Empty;
+    [NotifyPropertyChangedFor(nameof(DayLabelText))]
+    [NotifyPropertyChangedFor(nameof(RelativeDayText))]
+    [NotifyPropertyChangedFor(nameof(IsViewingToday))]
+    [NotifyPropertyChangedFor(nameof(IsNotViewingToday))]
+    [NotifyPropertyChangedFor(nameof(EmptyHint))]
+    [NotifyPropertyChangedFor(nameof(AddPlaceholder))]
+    public partial DateTime SelectedDate { get; set; } = DateTime.Today;
+
+    /// <summary>日期选择器能用上的最早日期（防止误点到 1900 年那种无意义的位置）。</summary>
+    public DateTime EarliestDate => new(2020, 1, 1);
+
+    private DateOnly SelectedDay => DateOnly.FromDateTime(SelectedDate);
+
+    /// <summary>中间那行大字："10月26日 星期一"。</summary>
+    public string DayLabelText => SelectedDay.ToString("M月d日 dddd", new CultureInfo("zh-CN"));
+
+    /// <summary>
+    /// 紧跟着的相对说法：今天 / 明天 / 昨天 / 3 天后。
+    ///
+    /// 【为什么非要写这一句】
+    /// 用户看日期时要自己在心里换算"11月2日离今天还有几天"，
+    /// 多一次心算就多一点摩擦。而且这种换算很容易出错，
+    /// 出错了就变成"我以为还有很久"——正是要防治的错觉。
+    /// </summary>
+    public string RelativeDayText
+    {
+        get
+        {
+            var offset = SelectedDay.DayNumber - DateOnly.FromDateTime(DateTime.Today).DayNumber;
+            return offset switch
+            {
+                0 => "今天",
+                1 => "明天",
+                2 => "后天",
+                -1 => "昨天",
+                > 0 => $"{offset} 天后",
+                _ => $"{-offset} 天前"
+            };
+        }
+    }
+
+    public bool IsViewingToday => SelectedDay == DateOnly.FromDateTime(DateTime.Today);
+
+    public bool IsNotViewingToday => !IsViewingToday;
+
+    /// <summary>列表为空时说的话，在看别的日子时会跟着变。</summary>
+    public string EmptyHint => IsViewingToday
+        ? "今天还没有安排。&#10;在下面加一条，哪怕只是「先看两分钟」。"
+        : "这一天还没有安排。&#10;可以提前把想做的事放进来，那天就自动出现。";
+
+    /// <summary>
+    /// 底部输入框的提示语也跟着日期变。
+    /// 在翻到后天的时候看到"想做点什么？"会让人犹豫（是加到今天还是后天？），
+    /// 写清楚"加到 10月28日"就不用猜。
+    /// </summary>
+    public string AddPlaceholder => IsViewingToday
+        ? "想做点什么？"
+        : $"加到 {SelectedDay:M月d日}……";
 
     [ObservableProperty]
     public partial string SummaryText { get; set; } = "今天还没有安排";
@@ -58,6 +162,9 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     public partial bool IsBusy { get; set; }
 
+    /// <summary>加载过程中又来了一次加载请求（见 LoadAsync 里的说明）。</summary>
+    private bool _reloadPending;
+
     // ================= 命令 =================
 
     /// <summary>
@@ -68,15 +175,42 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task LoadAsync()
     {
+        //
+        // 【忙的时候为什么不排队，而是记一下"待会儿再来一遍"】
+        // 直接 return 会丢掉这次请求：用户连点了两下翻页，
+        // 第二次很可能是在第一次加载还没结束时发生的，
+        // 被丢掉之后界面显示的就是上一个日期的内容——日期变了、清单没变，
+        // 用户会以为数据错了。
+        // 记一个标记，等手头这轮跑完再补一次，最后一次的结果总能落到界面上。
+        //
         if (IsBusy)
         {
+            _reloadPending = true;
             return;
         }
 
         IsBusy = true;
         try
         {
-            var items = await _itemRepository.GetTodayListAsync();
+            do
+            {
+                _reloadPending = false;
+                await LoadForSelectedDayAsync();
+            }
+            while (_reloadPending);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>按当前选中的那一天读数据。</summary>
+    private async Task LoadForSelectedDayAsync()
+    {
+        try
+        {
+            var items = await _itemRepository.GetDayListAsync(SelectedDay);
 
             TodayItems.Clear();
             foreach (var item in items)
@@ -90,10 +224,30 @@ public partial class MainViewModel : ObservableObject
         {
             await ReportErrorAsync(ex);
         }
-        finally
-        {
-            IsBusy = false;
-        }
+    }
+
+    // ================= 翻页 =================
+
+    [RelayCommand]
+    private async Task PreviousDayAsync()
+    {
+        SelectedDate = SelectedDate.AddDays(-1);
+        await LoadAsync();
+    }
+
+    [RelayCommand]
+    private async Task NextDayAsync()
+    {
+        SelectedDate = SelectedDate.AddDays(1);
+        await LoadAsync();
+    }
+
+    /// <summary>一步回到今天。</summary>
+    [RelayCommand]
+    private async Task GoTodayAsync()
+    {
+        SelectedDate = DateTime.Today;
+        await LoadAsync();
     }
 
     [RelayCommand]
@@ -108,12 +262,14 @@ public partial class MainViewModel : ObservableObject
 
         try
         {
-            // 显式写成 DateTimeOffset? 而不是用 var，
-            // 是因为三元表达式里一个是 DateTimeOffset、一个是 null，编译器推断不出统一类型。
-            // 加上 (DateTimeOffset?) 这个强制转换，编译器就知道两边都按可空类型处理了。
-            DateTimeOffset? startAt = UseSpecificTime ? CombineToday(NewTime) : null;
-
-            await _itemRepository.AddAsync(NewTitle.Trim(), startAt);
+            // 【在别的日子里加东西时，时间必须挂到那一天】
+            // 如果不管翻到哪天都按今天记，翻页就变成"只能看、不能写"，
+            // 而且用户完全察觉不到记错了——因为他写完之后，这条当场显示在看着的那天。
+            // 等真正到了那一天才发现它不见了，那时已经很难回溯当时发生了什么。
+            await _itemRepository.AddToDayAsync(
+                NewTitle.Trim(),
+                SelectedDay,
+                UseSpecificTime ? NewTime : null);
 
             // 清空输入框并关掉时间开关，让用户可以直接接着输入下一条。
             // 这种"添加后可以连续录入"的手感，决定了你会不会真的每天用它记录。
@@ -158,83 +314,18 @@ public partial class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 右侧 ⋯ 菜单：把不常用的操作收在这里，保持主界面干净。
+    /// 右侧「更多」菜单：重命名 / 删除 / 改状态。
+    ///
+    /// 【为什么实现不在本类里】
+    /// 大任务详情页的子任务要用同一套菜单，写在这就得整段复制。
+    /// 现在两边共用 ItemActionService，加一个菜单项只改一处。
+    /// 传 LoadAsync 进去是因为改完之后要按当前日期重查——
+    /// 服务不知道这一页是按天组织的，刷新的方式只能由调用方给。
     /// </summary>
     [RelayCommand]
     private async Task ShowActionsAsync(ItemViewModel item)
     {
-        var page = CurrentPage;
-        if (page is null)
-        {
-            return;
-        }
-
-        // 菜单项按当前状态动态生成：已经完成的条目不该再显示"标记完成"。
-        var choices = new List<string>();
-        if (item.Item.Status != ItemStatus.InProgress && item.Item.Status != ItemStatus.Done)
-        {
-            choices.Add("标记为进行中");
-        }
-
-        if (item.Item.Status != ItemStatus.Done)
-        {
-            choices.Add("标记完成");
-        }
-        else
-        {
-            choices.Add("改回待办");
-        }
-
-        choices.Add("重命名");
-        choices.Add("删除");
-
-        var action = await page.DisplayActionSheetAsync(item.Title, "取消", null, choices.ToArray());
-
-        try
-        {
-            switch (action)
-            {
-                case "标记为进行中":
-                    await ChangeStatusAsync(item, ItemStatus.InProgress);
-                    break;
-
-                case "标记完成":
-                    await ChangeStatusAsync(item, ItemStatus.Done);
-                    break;
-
-                case "改回待办":
-                    await ChangeStatusAsync(item, ItemStatus.Pending);
-                    break;
-
-                case "重命名":
-                    var newName = await page.DisplayPromptAsync("重命名", "改成：", initialValue: item.Title);
-                    if (!string.IsNullOrWhiteSpace(newName))
-                    {
-                        await _itemRepository.RenameAsync(item.Id, newName);
-                        await LoadAsync();
-                    }
-
-                    break;
-
-                case "删除":
-                    // 删除是唯一不可逆的选项，所以多问一句。
-                    // 而且这里问的是"确定删掉「标题」"，带上具体内容，
-                    // 比干巴巴的"确定删除吗"更能防止误操作。
-                    var confirmed = await page.DisplayAlertAsync(
-                        "删除", $"确定删掉「{item.Title}」？", "删除", "取消");
-                    if (confirmed)
-                    {
-                        await _itemRepository.SoftDeleteAsync(item.Id);
-                        await LoadAsync();
-                    }
-
-                    break;
-            }
-        }
-        catch (Exception ex)
-        {
-            await ReportErrorAsync(ex);
-        }
+        await _actions.ShowMenuAsync(item, LoadAsync);
     }
 
     private async Task ChangeStatusAsync(ItemViewModel item, ItemStatus status)
@@ -265,19 +356,18 @@ public partial class MainViewModel : ObservableObject
         CompletionRatio = total == 0 ? 0 : (double)done / total;
 
         SummaryText = total == 0
-            ? "今天还没有安排"
-            : $"已完成 {done} / {total} 件";
+            ? (IsViewingToday ? "今天还没有安排" : "这一天还没有安排")
+            : $"已完成 {done} / {total} 件"
+              // 把"这一天总共要花多久"一并说出来：这是决定"今天能不能开始"的第一信息，
+              // 而它原本要用户自己在心里把每行的估时加起来。
+              + TotalEstimateText();
     }
 
-    /// <summary>
-    /// 把一个"几点几分"拼成今天的具体时刻。
-    /// 用户勾选了"指定开始时间"时才会用到。
-    /// </summary>
-    private static DateTimeOffset CombineToday(TimeSpan time)
+    /// <summary>清单里所有任务估时的合计。没有估过时的任务不参与，所以可能为空串。</summary>
+    private string TotalEstimateText()
     {
-        var todayPart = DateOnly.FromDateTime(DateTime.Now).ToDateTime(TimeOnly.FromTimeSpan(time));
-        var offset = TimeZoneInfo.Local.GetUtcOffset(todayPart);
-        return new DateTimeOffset(todayPart, offset);
+        var minutes = TodayItems.Sum(x => x.Item.EstimateMinutes ?? 0);
+        return minutes > 0 ? $"，合计 {DurationText.Format(minutes)}" : string.Empty;
     }
 
     /// <summary>

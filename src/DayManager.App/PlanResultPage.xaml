@@ -1,0 +1,267 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:vm="clr-namespace:DayManager.App.ViewModels"
+             x:Class="DayManager.App.PlanResultPage"
+             x:DataType="vm:PlanViewModel"
+             Title="拆解结果"
+             Shell.NavBarIsVisible="False"
+             Shell.TabBarIsVisible="False">
+
+    <!--
+      ============================================================
+      结果的专属页面。它是从「拆解」页弹出来的，看完按「写进日程」或「返回」就回到上一级。
+
+      【为什么要单独占一整页】
+      结果本身很长：AI 的理解、它缺的信息、每天的安排、每条的估时。
+      这些内容以前挤在输入框下面，两者互相压缩，谁都看不全。
+      独占一页之后它能完整铺开，而且"看完只做两个选择"这件事变得很清楚：
+      要么接受这份安排，要么返回去改。
+
+      【为什么 bottoms 两个按钮要并排，而不是上下叠】
+      这两个是同级的选择（接受 / 不接受），不是"主操作 + 次要"。
+      上下叠的话视觉上会暗示上面那个更重要，
+      而这个软件的原则是：任何时候用户都可以说"算了"，这不比"照做"低一等。
+
+      【为什么顶部自己画了一条标题栏，而不用系统导航栏】
+      它是弹出来的页面，不在底部 Tab 的导航栈里，系统不会自动给返回按钮。
+      与其指望平台的返回手势（Windows 上没有），不如自己给一个明确的出口。
+      ============================================================
+    -->
+    <Grid RowDefinitions="Auto,Auto,*,Auto"
+          Padding="14"
+          RowSpacing="10">
+
+        <!-- ================= 第 0 行：自己画的标题栏 ================= -->
+        <Grid Grid.Row="0" ColumnDefinitions="*,Auto">
+            <Label Grid.Column="0"
+                   Text="拆解结果"
+                   FontSize="22"
+                   FontAttributes="Bold"
+                   VerticalOptions="Center" />
+            <!-- 同样不用 ✕ 这类符号（有些字体里它是空的），直接写"关闭"两个字 -->
+            <Button Grid.Column="1"
+                    Text="关闭"
+                    FontSize="11"
+                    Command="{Binding CloseResultCommand}"
+                    WidthRequest="52"
+                    HeightRequest="32"
+                    Padding="0"
+                    CornerRadius="6"
+                    BackgroundColor="Transparent"
+                    BorderWidth="1"
+                    BorderColor="Gray" />
+        </Grid>
+
+        <!-- ================= 第 1 行：一句话说明 =================
+             比如"12 条排在 10月27日 到 11月2日之间"，让用户先知道规模再看细节。 -->
+        <Label Grid.Row="1"
+               Text="{Binding StatusText}"
+               FontSize="11"
+               TextColor="Gray"
+               MaxLines="3"
+               LineBreakMode="WordWrap" />
+
+        <!-- ================= 第 2 行：结果主体 ================= -->
+        <ScrollView Grid.Row="2">
+            <VerticalStackLayout Spacing="10" Padding="0,0,0,8">
+
+                <!-- AI 对任务的理解。放在最上面，让用户两秒内判断理解对了没有。
+                     理解错了就没必要往下看，直接返回改输入。 -->
+                <Border StrokeThickness="1"
+                       Stroke="#3A4A5A"
+                       StrokeShape="RoundRectangle 8"
+                       Padding="10"
+                       IsVisible="{Binding HasUnderstanding}">
+                    <VerticalStackLayout Spacing="2">
+                        <Label Text="我是这么理解的"
+                               FontSize="10"
+                               TextColor="Gray" />
+                        <Label Text="{Binding Understanding}"
+                               FontSize="13" />
+                    </VerticalStackLayout>
+                </Border>
+
+                <!-- 待补充的关键信息。
+                     每个输入框已经预填了 AI 的猜测——
+                     让人"改一句话"比让人"想一句话"容易得多，
+                     这一点对这个软件的场景是决定性的。
+                     改完可以直接在这页重拆一次，不用退回上一页。 -->
+                <Border StrokeThickness="1"
+                       Stroke="#8A6D3B"
+                       StrokeShape="RoundRectangle 8"
+                       Padding="10"
+                       IsVisible="{Binding HasQuestions}">
+                    <VerticalStackLayout Spacing="6">
+                        <Label Text="AI 缺几条信息，框里是它的猜测，改一下会更准"
+                               FontSize="10"
+                               TextColor="Gray" />
+                        <VerticalStackLayout Spacing="6"
+                                             BindableLayout.ItemsSource="{Binding Questions}">
+                            <BindableLayout.ItemTemplate>
+                                <DataTemplate x:DataType="vm:QuestionViewModel">
+                                    <VerticalStackLayout Spacing="1">
+                                        <Label Text="{Binding Prompt}"
+                                               FontSize="12" />
+                                        <Entry Text="{Binding Answer}"
+                                               FontSize="12" />
+                                    </VerticalStackLayout>
+                                </DataTemplate>
+                            </BindableLayout.ItemTemplate>
+                        </VerticalStackLayout>
+                        <Button Text="带着补充的信息再拆一次"
+                                Command="{Binding RedecomposeCommand}"
+                                IsEnabled="{Binding IsNotBusy}"
+                                FontSize="12"
+                                HeightRequest="34"
+                                CornerRadius="6"
+                                Padding="6,0" />
+                    </VerticalStackLayout>
+                </Border>
+
+                <!-- AI 的提醒 / 异议。
+                     刻意允许它说"你可能安排太多了"，但只是提醒，不阻断——
+                     决定权始终在人手里。 -->
+                <VerticalStackLayout Spacing="4"
+                                     BindableLayout.ItemsSource="{Binding Warnings}">
+                    <BindableLayout.ItemTemplate>
+                        <DataTemplate x:DataType="x:String">
+                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+                                <Label Grid.Column="0" Text="!" FontSize="12" TextColor="#C08A2E" />
+                                <Label Grid.Column="1" Text="{Binding .}" FontSize="11" TextColor="#C08A2E" />
+                            </Grid>
+                        </DataTemplate>
+                    </BindableLayout.ItemTemplate>
+                </VerticalStackLayout>
+
+                <!-- 超出预算时把"怎么补救"摆出来，而不只是在上面挂一句话。
+                     原因是这件事有明确的下一步动作（让 AI 砍），
+                     而提醒不带按钮时，用户通常的反应是关掉页面重来一遍。 -->
+                <Border StrokeThickness="1"
+                       Stroke="#C0392B"
+                       StrokeShape="RoundRectangle 8"
+                       Padding="10"
+                       IsVisible="{Binding IsOverBudget}">
+                    <VerticalStackLayout Spacing="6">
+                        <Label Text="这份计划超出了你设的时间预算（每天额度 × 天数）"
+                               FontSize="11"
+                               TextColor="#C0392B" />
+                        <Button Text="让 AI 砍到预算内"
+                                Command="{Binding TrimToBudgetCommand}"
+                                IsEnabled="{Binding IsNotBusy}"
+                                FontSize="12"
+                                HeightRequest="34"
+                                CornerRadius="6"
+                                Padding="6,0" />
+                    </VerticalStackLayout>
+                </Border>
+
+                <!-- 按天排好的任务。
+                     外层用 BindableLayout 铺"每一天"，内层再用一个 BindableLayout 铺"这天几条"。
+
+                     【为什么不用 CollectionView 套 CollectionView】
+                     内层 CollectionView 算不出自己该多高，
+                     表现是只显示第一条或者干脆空白——MAUI 里很常见的坑。
+                     BindableLayout 只是把数据铺进普通布局容器，
+                     容器高度随内容自动撑开，没有这个问题。
+                     天数最多十几天，也不需要 CollectionView 的虚拟化。 -->
+                <VerticalStackLayout Spacing="12"
+                                     BindableLayout.ItemsSource="{Binding Days}">
+                    <BindableLayout.ItemTemplate>
+                        <DataTemplate x:DataType="vm:PlanDayViewModel">
+                            <VerticalStackLayout Spacing="4">
+
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                    <Label Grid.Column="0"
+                                           Text="{Binding DateText}"
+                                           FontSize="13"
+                                           FontAttributes="Bold" />
+                                    <!-- 超预算的那天数字会变红，并在后面写明超了多少 -->
+                                    <Label Grid.Column="1"
+                                           Text="{Binding TotalText}"
+                                           TextColor="{Binding TotalColor}"
+                                           FontSize="11"
+                                           VerticalOptions="Center" />
+                                </Grid>
+
+                                <VerticalStackLayout Spacing="5"
+                                                     Padding="8,0,0,0"
+                                                     BindableLayout.ItemsSource="{Binding Tasks}">
+                                    <BindableLayout.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:PlannedTaskViewModel">
+                                            <Grid ColumnDefinitions="Auto,Auto,*,Auto"
+                                                  ColumnSpacing="6">
+
+                                                <Label Grid.Column="0"
+                                                       Text="{Binding Order}"
+                                                       FontSize="11"
+                                                       TextColor="Gray"
+                                                       WidthRequest="16"
+                                                       VerticalOptions="Start" />
+
+                                                <Border Grid.Column="1"
+                                                        StrokeThickness="0"
+                                                        BackgroundColor="{Binding KindColor}"
+                                                        StrokeShape="RoundRectangle 4"
+                                                        Padding="3,0"
+                                                        VerticalOptions="Start">
+                                                    <Label Text="{Binding KindText}"
+                                                           FontSize="9"
+                                                           TextColor="White" />
+                                                </Border>
+
+                                                <VerticalStackLayout Grid.Column="2" Spacing="0">
+                                                    <Label Text="{Binding Title}"
+                                                           FontSize="13" />
+
+                                                    <!-- 最小启动步骤是这一页最有价值的信息：
+                                                         它把"开始"这件事的心理成本压到最低。 -->
+                                                    <Label Text="{Binding MinimalStep}"
+                                                           FontSize="10"
+                                                           TextColor="Gray"
+                                                           LineBreakMode="WordWrap"
+                                                           IsVisible="{Binding HasMinimalStep}" />
+                                                </VerticalStackLayout>
+
+                                                <!-- 这一条的预计耗时。右侧对齐成一列，
+                                                     眼睛顺着往下扫就能看出哪天最重。 -->
+                                                <Label Grid.Column="3"
+                                                       Text="{Binding EstimateText}"
+                                                       FontSize="11"
+                                                       TextColor="Gray"
+                                                       VerticalOptions="Start"
+                                                       HorizontalTextAlignment="End" />
+
+                                            </Grid>
+                                        </DataTemplate>
+                                    </BindableLayout.ItemTemplate>
+                                </VerticalStackLayout>
+
+                            </VerticalStackLayout>
+                        </DataTemplate>
+                    </BindableLayout.ItemTemplate>
+                </VerticalStackLayout>
+
+            </VerticalStackLayout>
+        </ScrollView>
+
+        <!-- ================= 第 3 行：两个同级的出口 ================= -->
+        <Grid Grid.Row="3" ColumnDefinitions="*,*" ColumnSpacing="8">
+            <Button Grid.Column="0"
+                    Text="返回，先不写"
+                    Command="{Binding CloseResultCommand}"
+                    BackgroundColor="Transparent"
+                    BorderWidth="1"
+                    BorderColor="Gray"
+                    CornerRadius="8"
+                    HeightRequest="42" />
+            <Button Grid.Column="1"
+                    Text="就照这个来，写进日程"
+                    Command="{Binding ConfirmCommand}"
+                    CornerRadius="8"
+                    HeightRequest="42" />
+        </Grid>
+
+    </Grid>
+
+</ContentPage>

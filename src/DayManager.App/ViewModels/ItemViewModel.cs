@@ -1,6 +1,7 @@
 ﻿using CommunityToolkit.Mvvm.ComponentModel;
 using DayManager.Core.Entities;
 using DayManager.Core.Enums;
+using DayManager.Core.Planning;
 
 namespace DayManager.App.ViewModels;
 
@@ -68,6 +69,61 @@ public partial class ItemViewModel : ObservableObject
     public partial Color CheckColor { get; set; } = Colors.Gray;
 
     /// <summary>
+    /// 状态徽章要不要显示。待办时不显示——
+    /// 每一条都挂个"待办"标签是纯噪音，徽章的价值在于标出**例外**。
+    /// </summary>
+    [ObservableProperty]
+    public partial bool HasStatusBadge { get; set; }
+
+    /// <summary>
+    /// 状态徽章的颜色。
+    ///
+    /// 【为什么这里写死色值，而不是去 XAML 里取资源】
+    /// 这个文件里 TitleColor / CheckColor 一直都是直接给 Color 对象，
+    /// 保持一致比追求"单一来源"重要。代价是改配色时要改两处，
+    /// 所以每个值都注明它对应 Colors.xaml 里的哪个语义色。
+    /// </summary>
+    [ObservableProperty]
+    public partial Color StatusColor { get; set; } = Colors.Gray;
+
+    /// <summary>
+    /// 徽章描边用的画刷。
+    ///
+    /// 【为什么不直接把 StatusColor 绑到 Border.Stroke 上】
+    /// Stroke 是 Brush（画刷），不是 Color（颜色）。实测 MAUI 会在赋值时
+    /// 帮你把 Color 转成 Brush，所以直接绑也能显示——
+    /// 但那是靠框架的一次隐式转换，换版本、换平台都可能变。
+    /// 这里在颜色变化时顺手生成同类型的画刷，绑定两端类型严丝合缝，
+    /// 不依赖框架的隐式行为。
+    /// </summary>
+    [ObservableProperty]
+    public partial Brush StatusBrush { get; set; } = new SolidColorBrush(Colors.Gray);
+
+    partial void OnStatusColorChanged(Color value) => StatusBrush = new SolidColorBrush(value);
+
+    /// <summary>
+    /// 标题的删除线。
+    ///
+    /// 【为什么完成和放弃都要划掉，而只靠变灰不够】
+    /// 变灰是一个弱信号：在深色模式下灰字和次要说明文字的灰几乎一样，
+    /// 扫一眼分不清"这条做完了"还是"这条是注释"。
+    /// 删除线是唯一一个不需要读字就能看出来的"此事已了结"标记。
+    ///
+    /// 【为什么必须在每次 Refresh 开头先清成"无"】
+    /// 它原先只在"完成"和"不做了"两个分支里赋值，其余分支根本不碰。
+    /// 后果是具体的一幕：勾上完成 → 划掉；再点一下取消勾选 → **删除线还在**。
+    /// （从「更多」菜单里改状态看不出这个毛病，因为那条路会整页重查、
+    /// 重新 new 一行 ViewModel，属性回到默认值——同一个 bug 换个入口就藏起来了。）
+    ///
+    /// 这类 bug 的形态是固定的：**某个属性只在部分分支里被设置**，
+    /// 一旦走进另一个分支，它就留在上一次的值上，不报错、也不容易被发现。
+    /// 所以凡是"只有少数状态要显示、其余状态不该显示"的显示属性，
+    /// 一律先清到默认值，再按需设——不要指望别的分支替你清。
+    /// </summary>
+    [ObservableProperty]
+    public partial TextDecorations TitleDecorations { get; set; }
+
+    /// <summary>
     /// 用新的数据替换内部实体，并重算所有展示用的属性。
     /// 状态改变后调用它，界面上对应的那一行就会自动更新。
     /// </summary>
@@ -90,33 +146,78 @@ public partial class ItemViewModel : ObservableObject
 
     private void Refresh()
     {
+        // 每个显示属性在每一轮都要有一个确定的值：
+        // 尤其是"只有部分状态才显示"的那些（删除线、徽章），先清干净，
+        // 否则上一次的残留会留到下一次——详见 TitleDecorations 的注释。
+        TitleDecorations = TextDecorations.None;
+        HasStatusBadge = false;
+
         Title = _item.Title;
         IsDone = _item.Status == ItemStatus.Done;
 
+        // 下面每个分支还要把徽章的两个属性（显示与否 / 颜色）一起设：
+        // 漏掉 HasStatusBadge 的表现是"颜色对了但看不见"，
+        // 漏掉 StatusColor 的表现是"看见了但是灰色"，两种都不会报错。
         switch (_item.Status)
         {
             case ItemStatus.Pending:
                 StatusText = "待办";
+                HasStatusBadge = false;
                 TitleColor = PrimaryTextColor;
                 CheckColor = Colors.Gray;
                 break;
 
             case ItemStatus.InProgress:
                 StatusText = "进行中";
+                HasStatusBadge = true;
+                StatusColor = Color.FromArgb("#C07820"); // Colors.xaml: ProgressOrange
                 TitleColor = PrimaryTextColor;
                 CheckColor = Colors.DarkOrange;
                 break;
 
             case ItemStatus.Done:
                 StatusText = "完成";
+                HasStatusBadge = true;
+                StatusColor = Color.FromArgb("#2E7D5B"); // Colors.xaml: DoneGreen
                 // 完成的事项降低视觉权重，让视线自然落到还剩下的事情上
                 TitleColor = Colors.Gray;
                 CheckColor = Colors.ForestGreen;
+                TitleDecorations = TextDecorations.Strikethrough;
                 break;
 
-            case ItemStatus.Cancelled:
-                StatusText = "已取消";
+            case ItemStatus.Abandoned:
+                StatusText = "不做了";
+                HasStatusBadge = true;
+                StatusColor = Color.FromArgb("#8A8A8A"); // Colors.xaml: MutedText
                 TitleColor = Colors.Gray;
+                CheckColor = Colors.Gray;
+                TitleDecorations = TextDecorations.Strikethrough;
+                break;
+
+            case ItemStatus.Skipped:
+                // 【为什么走到这里它就不是"跳过"，而是正常待办】
+                // "跳过"只对跳过发生的那一天有效，这是个查询层面的保证：
+                // 当天跳过的记录根本不会出现在这一天的清单里（见 ItemRepository.IsHiddenOn）。
+                // 所以凡是能出现在清单上的 Skipped，都是**已经回来**的——
+                // 昨天说"今天再做"，今天打开就看见它，那它就是今天该做的事。
+                // 要是这时还顶着"已跳过"的灰色标记，用户会以为自己昨天已经处理过它了，
+                // 于是一个本来要做的东西被安静地晾在那儿。
+                //
+                // 跳过次数不是用来责备人的，是给"这事是不是根本不该做"留线索：
+                // 反复跳过 = 启动成本可能远高于预估，交给 AI 主动提出来谈。
+                //
+                // 【跳过次数为什么要显示出来】
+                // 它同时是两个信号：
+                //   对用户——"这件事我已经推了三次了"，是个不带指责的提醒；
+                //   对 AI——反复跳过是"启动成本远高于预估"的最强线索，
+                //          后面要靠它来主动提出"是不是该拆小一点"。
+                // 隐藏它的代价是：这个线索只有数据库知道，界面和 AI 都不知道。
+                HasStatusBadge = _item.SkipCount > 1;
+                StatusColor = Color.FromArgb("#8A8A8A"); // Colors.xaml: MutedText
+                StatusText = _item.SkipCount > 1
+                    ? $"跳过过 {_item.SkipCount} 次"
+                    : "待办";
+                TitleColor = PrimaryTextColor;
                 CheckColor = Colors.Gray;
                 break;
         }
@@ -136,6 +237,18 @@ public partial class ItemViewModel : ObservableObject
     private string BuildSubtitle()
     {
         var parts = new List<string>();
+
+        // 预计耗时放在最前面：它是判断"这一条值不值得现在做"的第一信息，
+        // 比几点截止更影响当下的决策。
+        //
+        // 【为什么这一版要把它加上】
+        // AI 拆解时给每条都估了时，也确实写进了数据库，但界面上一个字没显示。
+        // 结果是用户在今日清单里只看到一串标题，
+        // 完全不知道今天 collectively 要花多久——而"今天要做多久"恰恰是他决定要不要开始的关键。
+        if (_item.EstimateMinutes is > 0)
+        {
+            parts.Add(DurationText.Format(_item.EstimateMinutes.Value));
+        }
 
         // 【显示时间前一定要 ToLocalTime()】
         // 数据库里存的是 UTC 毫秒，读出来的 DateTimeOffset 偏移量是 0。

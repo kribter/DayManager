@@ -4,11 +4,77 @@
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
     xmlns:local="clr-namespace:DayManager.App"
-    Title="DayManager.App">
+    Title="DayManager">
 
-    <ShellContent
-        Title="Home"
-        ContentTemplate="{DataTemplate local:MainPage}"
-        Route="MainPage" />
+    <!--
+      ============================================================
+      TabBar 就是底部的那排标签页。
+
+      【为什么用 TabBar 而不是一个页面加按钮切换】
+      MAUI 的 Shell 会自动处理 TabBar 的一整套行为：
+      页面切换时的生命周期（OnAppearing / OnDisappearing）、
+      返回键逻辑、每个 tab 各自的导航栈。
+      自己用按钮切换页面，这些都得手写一遍，而且容易和系统的返回键打架。
+
+      【为什么「对话」排在第一位，并且默认落在它上面】
+      产品形态定稿（需求第二节）：对话是核心，日程 / 大任务 / 时间是它的手和眼睛。
+      Tab 的顺序就是优先级的表达——把对话放第一，
+      表达的是"这个软件是拿来聊的，不是拿来填表的"。
+      用户 2026-10-26 定了默认落在对话（决策 D12），并且这个值以后可由用户改。
+
+      【为什么「拆解」这个 Tab 没有了】
+      它当初是验证 AI 能力搭的脚手架，副作用是把 AI 关进了"只能拆任务"的格子。
+      现在拆解在对话里自然发生：你说"两周内把开题报告弄出来"，
+      AI 直接给出摊到各天的安排并写进日程。
+      少一个 Tab 也少一个"什么时候该用哪个"的困惑。
+      ============================================================
+    -->
+    <!--
+      【为什么把顶部标题栏关掉】
+      TabBar 上已经写着「对话」「日程」，标题栏再写一遍"DayManager"
+      是纯粹重复——它占掉的那一条横条高度，换成清单能多显示一整行。
+      内容型界面的每一像素都应该给内容。
+    -->
+    <TabBar>
+        <ShellContent
+            Title="对话"
+            Shell.NavBarIsVisible="False"
+            ContentTemplate="{DataTemplate local:ChatPage}"
+            Route="ChatPage" />
+
+        <ShellContent
+            Title="日程"
+            Shell.NavBarIsVisible="False"
+            ContentTemplate="{DataTemplate local:MainPage}"
+            Route="MainPage" />
+
+        <ShellContent
+            Title="大任务"
+            Shell.NavBarIsVisible="False"
+            ContentTemplate="{DataTemplate local:ProjectsPage}"
+            Route="ProjectsPage" />
+
+        <!--
+          【为什么「时间」排在最后】
+          它是回头看的，不是往前走的。放第一位会让人一打开就被"今天用了多久"盯着，
+          而那正是要避免的焦虑源：这个软件的重点始终是"接下来做什么"。
+          但也不能没有——它同时是干预引擎和 AI 排期的输入，
+          没有这一页，用户永远不知道软件凭什么判断"你今天该休息了"。
+        -->
+        <ShellContent
+            Title="时间"
+            Shell.NavBarIsVisible="False"
+            ContentTemplate="{DataTemplate local:TimePage}"
+            Route="TimePage" />
+    </TabBar>
+
+    <!--
+      详情页不写在这里。
+      它曾经是这里的一个 ShellContent，结果点了卡片进去就出不来：
+      Shell 元素只能用 /// 导航，而 /// 是"替换整个 Shell 内容"——
+      Tab 栏被换掉了，返回按钮也没有，等于把自己锁在一个房间里。
+      现在它在 AppShell.xaml.cs 里用 Routing.RegisterRoute 注册成普通页面，
+      导航时压进当前 Tab 的栈里，系统的返回箭头和底部 Tab 都还在。
+    -->
 
 </Shell>

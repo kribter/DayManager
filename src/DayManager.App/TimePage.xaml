@@ -1,0 +1,261 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:vm="clr-namespace:DayManager.App.ViewModels"
+             x:Class="DayManager.App.TimePage"
+             x:DataType="vm:TimeViewModel"
+             Shell.NavBarIsVisible="False"
+             Title="时间">
+
+    <!--
+      ============================================================
+      时间页（第四个 Tab，也是四个界面里的最后一块）。
+
+      【这一页要回答的问题】
+      "我的时间到底去哪了" —— 以及顺带回答"我几点最在状态"。
+      后者不是一个统计问题：排程、干预时机、AI 建议的时间点都靠它。
+
+      【为什么日/周/月/年做成四个并排的小按钮，而不是下拉框或左右滑】
+      下拉框要先点开才知道有哪几个选项，而"我能不能看这一年"是个要先看见才想得起问的问题；
+      左右滑没有任何视觉提示，等于藏起来了一个功能。
+      四个按钮摆在那里，用户一眼就知道这一页能看到多远。
+
+      【为什么娱乐时长默认收起来】
+      回顾界面的第一原则是正反馈优先（需求 2.9）。
+      一进来就把"你今天刷了两小时"摆在最显眼的地方，
+      结果是人不敢打开这一页 —— 而不看的统计等于没做。
+      收起不是隐藏：按钮就在摘要卡片里，想看的人一次点击就到。
+      ============================================================
+    -->
+
+    <Grid RowDefinitions="Auto,Auto,*"
+          Padding="18,14,18,0"
+          RowSpacing="12">
+
+        <!-- ================= 第 0 行：四个跨度 =================
+             注意符号只用 ASCII 的 < 和 >。
+             上一版在日程页用过 ‹ ›（U+2039/U+203A），系统字体里没有这两个字形，
+             按钮直接显示成空白，且不报错。 -->
+        <HorizontalStackLayout Grid.Row="0" Spacing="8">
+            <Button Text="日"
+                    Style="{StaticResource ChipButton}"
+                    WidthRequest="56"
+                    Command="{Binding SetSpanCommand}"
+                    CommandParameter="Day">
+                <Button.Triggers>
+                    <DataTrigger TargetType="Button" Binding="{Binding IsDay}" Value="True">
+                        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                        <Setter Property="BorderColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource White}, Dark={StaticResource PrimaryDarkText}}" />
+                    </DataTrigger>
+                </Button.Triggers>
+            </Button>
+
+            <Button Text="周"
+                    Style="{StaticResource ChipButton}"
+                    WidthRequest="56"
+                    Command="{Binding SetSpanCommand}"
+                    CommandParameter="Week">
+                <Button.Triggers>
+                    <DataTrigger TargetType="Button" Binding="{Binding IsWeek}" Value="True">
+                        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                        <Setter Property="BorderColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource White}, Dark={StaticResource PrimaryDarkText}}" />
+                    </DataTrigger>
+                </Button.Triggers>
+            </Button>
+
+            <Button Text="月"
+                    Style="{StaticResource ChipButton}"
+                    WidthRequest="56"
+                    Command="{Binding SetSpanCommand}"
+                    CommandParameter="Month">
+                <Button.Triggers>
+                    <DataTrigger TargetType="Button" Binding="{Binding IsMonth}" Value="True">
+                        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                        <Setter Property="BorderColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource White}, Dark={StaticResource PrimaryDarkText}}" />
+                    </DataTrigger>
+                </Button.Triggers>
+            </Button>
+
+            <Button Text="年"
+                    Style="{StaticResource ChipButton}"
+                    WidthRequest="56"
+                    Command="{Binding SetSpanCommand}"
+                    CommandParameter="Year">
+                <Button.Triggers>
+                    <DataTrigger TargetType="Button" Binding="{Binding IsYear}" Value="True">
+                        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                        <Setter Property="BorderColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource White}, Dark={StaticResource PrimaryDarkText}}" />
+                    </DataTrigger>
+                </Button.Triggers>
+            </Button>
+        </HorizontalStackLayout>
+
+        <!-- ================= 第 1 行：翻日期 ================= -->
+        <Grid Grid.Row="1"
+              ColumnDefinitions="Auto,*,Auto"
+              ColumnSpacing="8">
+            <Button Grid.Column="0"
+                    Text="&lt;"
+                    Style="{StaticResource ChipButton}"
+                    WidthRequest="36"
+                    Command="{Binding PrevCommand}" />
+
+            <!-- 标题随跨度变：10月27日 周二 / 10月26日 – 11月1日 / 2026年10月 / 2026年。
+                 切换跨度不改"看的是哪一天"，所以从 27 号切到「周」落在本周，而不是跳回今天。 -->
+            <Label Grid.Column="1"
+                   Text="{Binding RangeTitle}"
+                   FontSize="15"
+                   FontAttributes="Bold"
+                   HorizontalTextAlignment="Center"
+                   VerticalTextAlignment="Center" />
+
+            <!-- 未来的时间是 0，翻过去只有一片空白和"你什么都没做"的错觉，
+                 所以能翻到未来时按钮直接不可用，而不是翻过去再显示空。 -->
+            <Button Grid.Column="2"
+                    Text="&gt;"
+                    Style="{StaticResource ChipButton}"
+                    WidthRequest="36"
+                    IsEnabled="{Binding CanGoNext}"
+                    Command="{Binding NextCommand}" />
+        </Grid>
+
+        <!-- ================= 第 2 行：内容 ================= -->
+        <ScrollView Grid.Row="2">
+            <VerticalStackLayout Spacing="16" Padding="0,0,0,24">
+
+                <!-- 摘要卡片：先给总量，再给细节。
+                     人打开这一页第一个想问的是"我今天用了多久"，不是"哪个应用第一"。 -->
+                <Border Style="{StaticResource CardStyle}"
+                        Padding="16,14">
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="12" />
+                    </Border.StrokeShape>
+
+                    <VerticalStackLayout Spacing="6">
+                        <!--
+                          行高写死。
+                          【为什么】这一页每 20 秒自动刷新一次，数字会变（"2 小时 58 分"→"3 小时 1 分"）。
+                          行高不固定的话，字一换行整块会往下顶一下，页面看着像在抖。
+                          写死行高之后，变的只有字，位置不动。
+                        -->
+                        <Label Text="{Binding TotalText}"
+                               FontSize="30"
+                               FontAttributes="Bold"
+                               LineHeight="1.15" />
+
+                        <Label Text="{Binding NoteText}"
+                               Style="{StaticResource Caption}" />
+
+                        <Button Text="{Binding EntertainmentToggleText}"
+                                Style="{StaticResource ChipButton}"
+                                HorizontalOptions="Start"
+                                Margin="0,4,0,0"
+                                Command="{Binding ToggleEntertainmentCommand}"
+                                IsVisible="{Binding IsEmpty, Converter={StaticResource Not}}" />
+
+                        <Label Text="{Binding EntertainmentText}"
+                               Style="{StaticResource Caption}"
+                               IsVisible="{Binding IsEntertainmentShown}" />
+                    </VerticalStackLayout>
+                </Border>
+
+                <!-- 柱状图：日看 24 小时，周/月看每天，年看每月。 -->
+                <Border Style="{StaticResource CardStyle}"
+                        Padding="16,12">
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="12" />
+                    </Border.StrokeShape>
+
+                    <VerticalStackLayout Spacing="6">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <Label Text="什么时候在用"
+                                   Style="{StaticResource CardTitle}"
+                                   VerticalOptions="Center" />
+                            <Label Grid.Column="1"
+                                   Text="{Binding ChartCaption}"
+                                   Style="{StaticResource Caption}"
+                                   VerticalOptions="Center" />
+                        </Grid>
+
+                        <GraphicsView x:Name="Chart" HeightRequest="140" />
+                    </VerticalStackLayout>
+                </Border>
+
+                <!--
+                  应用排行。
+                  【为什么这一块也要进卡片】
+                  上一版它是裸在页面上的：上面两块有框、它没框，
+                  三段内容看着像两个页面拼起来的。装进同款卡片之后，
+                  这一页才是"三块结构一致的内容"。
+                -->
+                <Border Style="{StaticResource CardStyle}"
+                        Padding="16,14"
+                        IsVisible="{Binding HasApps}">
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="12" />
+                    </Border.StrokeShape>
+
+                    <VerticalStackLayout Spacing="12">
+                        <Label Text="用在哪"
+                               Style="{StaticResource CardTitle}" />
+
+                        <!-- 用 BindableLayout 而不是 CollectionView：这一页整体在 ScrollView 里，
+                             再嵌一个会自己滚的列表，滚动手势会打架（滚到列表上就滚不动页面了）。
+                             条目最多九行（前八 + 其余），一次全渲染没有任何性能问题。 -->
+                        <VerticalStackLayout Spacing="12"
+                                             BindableLayout.ItemsSource="{Binding Apps}">
+                            <BindableLayout.ItemTemplate>
+                                <DataTemplate x:DataType="vm:AppUsageRow">
+                                    <VerticalStackLayout Spacing="5">
+                                        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+                                            <Label Text="{Binding Name}"
+                                                   FontSize="13"
+                                                   LineBreakMode="TailTruncation"
+                                                   VerticalOptions="Center" />
+
+                                            <Label Grid.Column="1"
+                                                   Text="{Binding BadgeText}"
+                                                   FontSize="10"
+                                                   TextColor="{StaticResource WarnOrange}"
+                                                   IsVisible="{Binding HasBadge}"
+                                                   VerticalOptions="Center" />
+
+                                            <Label Grid.Column="2"
+                                                   Text="{Binding DurationText}"
+                                                   Style="{StaticResource Caption}"
+                                                   VerticalOptions="Center" />
+                                        </Grid>
+
+                                        <!-- 条形长度按第一名归一，用来扫"谁占大头"；
+                                             按总时长归一的话，所有条都会被压得很短，看不出差别。 -->
+                                        <ProgressBar Progress="{Binding Ratio}"
+                                                     HeightRequest="6"
+                                                     ProgressColor="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+                                    </VerticalStackLayout>
+                                </DataTemplate>
+                            </BindableLayout.ItemTemplate>
+                        </VerticalStackLayout>
+                    </VerticalStackLayout>
+                </Border>
+
+                <!-- 空状态里必须说清楚"为什么没有"。
+                     只说"还没有数据"，用户会以为是这一页坏了——
+                     而实际原因可能是程序刚开、或者人不在。 -->
+                <VerticalStackLayout Spacing="6"
+                                     Margin="0,24,0,0"
+                                     IsVisible="{Binding IsEmpty}">
+                    <Label Text="这段时间还没有记录。"
+                           FontSize="13"
+                           HorizontalTextAlignment="Center" />
+                    <Label Text="程序开着就会自动记，用一会儿再回来看。"
+                           Style="{StaticResource Caption}"
+                           HorizontalTextAlignment="Center" />
+                </VerticalStackLayout>
+            </VerticalStackLayout>
+        </ScrollView>
+    </Grid>
+</ContentPage>

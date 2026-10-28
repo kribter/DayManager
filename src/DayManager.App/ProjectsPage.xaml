@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:vm="clr-namespace:DayManager.App.ViewModels"
+             x:Class="DayManager.App.ProjectsPage"
+             x:DataType="vm:ProjectsViewModel"
+             Shell.NavBarIsVisible="False"
+             Title="大任务">
+
+    <!--
+      ============================================================
+      大任务列表。
+
+      【这一页要回答的唯一问题】
+      不是"我有哪些项目"，而是"那件大事推进到哪了"。
+      所以每张卡片上最重要的两个数字是：还剩几天、完成几件。
+      项目名反而是最不需要强调的——你自己知道它叫什么。
+
+      【为什么进度条放在卡片里，而不是做成列表右侧的一个数字】
+      数字要读，色块能扫。一屏有三四个项目时，
+      进度条能让人一眼看出哪个推进得最慢，数字做不到。
+
+      【为什么点卡片就进详情，而不是就地展开子任务】
+      就地展开会把列表撑得很长，找另一个项目要滚很久；
+      而且展开/收起是又一个要用户自己管的界面状态。
+      单独一页更省心，返回键是系统给的，不用学。
+      ============================================================
+    -->
+
+    <Grid RowDefinitions="*,Auto"
+          Padding="18"
+          RowSpacing="14">
+
+        <CollectionView Grid.Row="0"
+                        ItemsSource="{Binding Projects}"
+                        SelectionMode="None">
+
+            <CollectionView.EmptyView>
+                <VerticalStackLayout Spacing="6"
+                                     HorizontalOptions="Center"
+                                     VerticalOptions="Center"
+                                     Margin="0,40,0,0">
+                    <Label Text="还没有大任务。"
+                           Style="{StaticResource Caption}"
+                           FontSize="13"
+                           HorizontalTextAlignment="Center" />
+                    <!--
+                      空状态里必须写明"去哪儿建"。
+                      只说"还没有"，用户要么不知道下一步干嘛，
+                      要么跑去日程页一条条加，那这个项目层就白设计了。
+                    -->
+                    <Label Text="在对话里说「两周内把开题报告弄出来」，&#10;它会自动变成这里的一个大任务。"
+                           Style="{StaticResource Caption}"
+                           HorizontalTextAlignment="Center" />
+                </VerticalStackLayout>
+            </CollectionView.EmptyView>
+
+            <CollectionView.ItemTemplate>
+                <DataTemplate x:DataType="vm:ProjectCardViewModel">
+                    <Border Style="{StaticResource CardStyle}"
+                            Padding="16,14"
+                            Margin="0,5">
+                        <Border.StrokeShape>
+                            <RoundRectangle CornerRadius="12" />
+                        </Border.StrokeShape>
+
+                        <!-- 点整张卡片进详情。 -->
+                        <Border.GestureRecognizers>
+                            <TapGestureRecognizer
+                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ProjectsViewModel}}, Path=OpenCommand}"
+                                CommandParameter="{Binding .}" />
+                        </Border.GestureRecognizers>
+
+                        <VerticalStackLayout Spacing="7">
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                <Label Grid.Column="0"
+                                       Text="{Binding Name}"
+                                       FontSize="16"
+                                       FontAttributes="Bold"
+                                       LineBreakMode="TailTruncation"
+                                       VerticalOptions="Center" />
+
+                                <Button Grid.Column="1"
+                                        Text="更多"
+                                        Style="{StaticResource ChipButton}"
+                                        WidthRequest="46"
+                                        ToolTipProperties.Text="重命名 / 改日期 / 归档"
+                                        Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ProjectsViewModel}}, Path=ShowActionsCommand}"
+                                        CommandParameter="{Binding .}" />
+                            </Grid>
+
+                            <ProgressBar Progress="{Binding ProgressRatio}"
+                                         HeightRequest="6"
+                                         ProgressColor="{StaticResource DoneGreen}"
+                                         IsVisible="{Binding HasProgress}" />
+
+                            <HorizontalStackLayout Spacing="10">
+                                <Label Text="{Binding TargetText}"
+                                       TextColor="{Binding TargetColor}"
+                                       Style="{StaticResource Caption}" />
+                                <Label Text="{Binding ProgressText}"
+                                       Style="{StaticResource Caption}" />
+                            </HorizontalStackLayout>
+
+                            <Label Text="{Binding NextText}"
+                                   Style="{StaticResource Caption}" />
+                        </VerticalStackLayout>
+                    </Border>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+        </CollectionView>
+
+        <Button Grid.Row="1"
+                Text="新建大任务"
+                Command="{Binding CreateCommand}" />
+
+        <!-- ================= 浮在上层的日历 =================
+
+             【为什么它浮在页面上而不是单独一页】
+             点了「改目标日期」之后要看的是"现在还剩几天"，
+             那张卡片就在这一层底下。跳走再回来，中间要多一次导航，
+             还要回想刚才改的是哪一个。
+
+             【为什么外面要有这层半透明遮罩】
+             浮出来的面板得让人看出"现在只能先处理这一件事"，
+             而点空白处收起是最不用学的取消方式。
+
+             【为什么遮罩和卡片是平级的两个元素，而不是卡片叠在带手势的 Grid 上】
+             手势会沿着"子 → 父"这条链往上传递：如果把 Tap 手势挂在最外层 Grid 上，
+             点在卡片里也一样会触发它——结果就是点「就这天」的同时面板被关掉，
+             能不能改成功全看两者执行顺序，那是典型的碰运气。
+             平铺之后，点在卡片上命中的就是卡片，下面的遮罩收不到这次点击。
+             这一个元素位置的差别，换来的是"点哪里生效"确定无疑。 -->
+        <Grid Grid.RowSpan="2"
+              IsVisible="{Binding IsDatePanelVisible}">
+
+            <!-- 遮罩本身：铺满整格，点它就是取消。 -->
+            <BoxView Color="#66000000">
+                <BoxView.GestureRecognizers>
+                    <TapGestureRecognizer Command="{Binding CancelDateCommand}" />
+                </BoxView.GestureRecognizers>
+            </BoxView>
+
+            <!-- 声明在后面 = 画在遮罩上面，于是这块区域归它接管。 -->
+            <Border Style="{StaticResource CardStyle}"
+                    Padding="16,14"
+                    Margin="24"
+                    HorizontalOptions="Center"
+                    VerticalOptions="Center"
+                    WidthRequest="340">
+                <Border.StrokeShape>
+                    <RoundRectangle CornerRadius="14" />
+                </Border.StrokeShape>
+
+                <VerticalStackLayout Spacing="10">
+                    <Label Text="{Binding EditingProjectName}"
+                           Style="{StaticResource CardTitle}"
+                           LineBreakMode="TailTruncation" />
+                    <Label Text="打算什么时候做完？"
+                           Style="{StaticResource Caption}" />
+
+                    <DatePicker Date="{Binding EditingDate, Mode=TwoWay}"
+                                MinimumDate="{Binding EarliestDate}"
+                                Format="yyyy年M月d日 dddd"
+                                FontSize="15"
+                                HorizontalOptions="Fill" />
+
+                    <!-- 最常用的几个答案放在第一屏：
+                         翻日历找"两周后那天"要点四五次还要数格子，
+                         而"两周内做完"是最常见的说法。 -->
+                    <FlexLayout Wrap="Wrap"
+                                JustifyContent="Start"
+                                AlignItems="Start">
+                        <Button Text="3 天后"
+                                Style="{StaticResource ChipButton}"
+                                Margin="0,0,6,6"
+                                Command="{Binding PickQuickDateCommand}"
+                                CommandParameter="3d" />
+                        <Button Text="一周后"
+                                Style="{StaticResource ChipButton}"
+                                Margin="0,0,6,6"
+                                Command="{Binding PickQuickDateCommand}"
+                                CommandParameter="1w" />
+                        <Button Text="两周后"
+                                Style="{StaticResource ChipButton}"
+                                Margin="0,0,6,6"
+                                Command="{Binding PickQuickDateCommand}"
+                                CommandParameter="2w" />
+                        <Button Text="一个月后"
+                                Style="{StaticResource ChipButton}"
+                                Margin="0,0,6,6"
+                                Command="{Binding PickQuickDateCommand}"
+                                CommandParameter="1m" />
+                    </FlexLayout>
+
+                    <HorizontalStackLayout Spacing="8" HorizontalOptions="End">
+                        <Button Text="还没定"
+                                Style="{StaticResource ChipButton}"
+                                ToolTipProperties.Text="清掉目标日期"
+                                Command="{Binding ClearDateCommand}" />
+                        <Button Text="取消"
+                                Style="{StaticResource ChipButton}"
+                                Command="{Binding CancelDateCommand}" />
+                        <Button Text="就这天"
+                                CornerRadius="8"
+                                Padding="14,6"
+                                FontSize="13"
+                                Command="{Binding ConfirmDateCommand}" />
+                    </HorizontalStackLayout>
+                </VerticalStackLayout>
+            </Border>
+        </Grid>
+    </Grid>
+</ContentPage>

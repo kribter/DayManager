@@ -5,18 +5,74 @@
 
     <!-- Note: For Android please see also Platforms\Android\Resources\values\colors.xml -->
 
-    <Color x:Key="Primary">#512BD4</Color>
-    <Color x:Key="PrimaryDark">#ac99ea</Color>
-    <Color x:Key="PrimaryDarkText">#242424</Color>
-    <Color x:Key="Secondary">#DFD8F7</Color>
-    <Color x:Key="SecondaryDarkText">#9880e5</Color>
-    <Color x:Key="Tertiary">#2B0B98</Color>
+    <!--
+      ============================================================
+      主色换成低饱和的钢蓝。
+
+      【为什么不能用模板自带的紫色 #512BD4】
+      那是 MAUI 新建项目时的默认色，跟这个软件要解决的问题没有关系。
+      这个软件是拿来对抗"打开电脑就逃避"的，界面本身必须是低刺激的：
+      高饱和紫色在深色背景上很跳，长时间盯着的疲劳感明显，
+      而一个让人想关掉窗口的界面，对"降低启动摩擦力"这个目标是反作用。
+      钢蓝偏冷、饱和度低，和"冷静地看一眼今天要做什么"的语气一致。
+
+      【为什么 PrimaryDarkText 是深色而不是浅色】
+      深色模式下按钮底色是 PrimaryDark（浅蓝），此时按钮文字必须是深的，
+      否则浅底浅字看不见。这一对值必须一起改。
+      ============================================================
+    -->
+    <Color x:Key="Primary">#3F6FB5</Color>
+    <Color x:Key="PrimaryDark">#9DB8DE</Color>
+    <Color x:Key="PrimaryDarkText">#1B2B3D</Color>
+    <Color x:Key="Secondary">#D8E4F2</Color>
+    <Color x:Key="SecondaryDarkText">#7FA5D4</Color>
+    <Color x:Key="Tertiary">#24507F</Color>
+
+    <!--
+      产品的语义色。
+      【为什么要有"语义色"这一层，而不是每个控件各写一个颜色值】
+      写散了之后要改就得全局搜；更麻烦的是同一件事会有两种绿——
+      进度条用 #2E7D5B、打勾用 ForestGreen、别处又用 MediumSeaGreen，
+      三个地方深浅不一，界面看着就不像同一个软件做的。
+      语义色把"这是什么含义"和"具体是哪个值"分开，改值时只改一处。
+    -->
+    <Color x:Key="DoneGreen">#2E7D5B</Color>
+    <Color x:Key="ProgressOrange">#C07820</Color>
+    <Color x:Key="WarnOrange">#CC7000</Color>
+    <Color x:Key="MutedText">#8A8A8A</Color>
+
+    <!-- 气泡底色刻意不跟主题走：见 ChatViewModel 里 BubbleColor 的说明。 -->
+    <Color x:Key="BubbleSelf">#DCEEFB</Color>
+    <Color x:Key="BubbleAi">#F2F2F2</Color>
 
     <Color x:Key="White">White</Color>
     <Color x:Key="Black">Black</Color>
     <Color x:Key="Magenta">#D600AA</Color>
     <Color x:Key="MidnightBlue">#190649</Color>
     <Color x:Key="OffBlack">#1f1f1f</Color>
+
+    <!--
+      卡片底色。
+
+      【为什么卡片必须有底色】
+      之前所有卡片都只画了一圈 1px 的边框、没有底色，和页面完全同色
+      （页面是 White / OffBlack）。结果整个界面是一堆描边框平铺，
+      层级全靠那根细灰线撑着——看着像没上完的稿子。
+      底色只需要比页面深一点点（深色主题里是浅一点点），层次立刻就出来了。
+
+      【为什么是"差一点点"而不是明显更深】
+      用明显的灰块会让页面变成一堆色块拼接，视觉噪音反而更大。
+      卡片的作用是"把相关内容圈在一起"，不是"强调这里有个框"，
+      所以对比度够分辨就行，不必抢戏。
+
+      【为什么带一点蓝】
+      主色是钢蓝，卡片底色跟着偏一点点冷，整体才像同一个软件做的；
+      用纯中性灰的话，浅色主题下会显得发脏。
+    -->
+    <Color x:Key="CardBgLight">#F6F8FA</Color>
+    <Color x:Key="CardBgDark">#262626</Color>
+    <Color x:Key="CardBorderLight">#E4E8EE</Color>
+    <Color x:Key="CardBorderDark">#303030</Color>
 
     <Color x:Key="Gray100">#E1E1E1</Color>
     <Color x:Key="Gray200">#C8C8C8</Color>

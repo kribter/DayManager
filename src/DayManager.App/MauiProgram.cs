@@ -1,16 +1,34 @@
-﻿using DayManager.App.ViewModels;
+﻿using DayManager.App.Services;
+using DayManager.App.ViewModels;
 using DayManager.Data;
 using DayManager.Data.Repositories;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
+#if WINDOWS
+using DayManager.App.Platforms.Windows;
+#endif
+
 namespace DayManager.App;
 
 public static class MauiProgram
 {
+	/// <summary>
+	/// 程序的服务容器。
+	///
+	/// 【为什么需要它】
+	/// 生命周期回调（窗口关闭）里拿不到依赖注入，只能从容器里手工取。
+	/// 目前只有"退出时停掉使用时长采集"这一处用它，多一处都算设计走味。
+	/// </summary>
+	public static IServiceProvider Services { get; private set; } = null!;
+
 	public static MauiApp CreateMauiApp()
 	{
+		// 越早挂上越好：初始化阶段崩掉的话（数据库迁移、资源字典加载），
+		// 挂晚了那一批异常一个都记不到。
+		CrashLogger.Init();
+
 		var builder = MauiApp.CreateBuilder();
 		builder
 			.UseMauiApp<App>()
@@ -51,6 +69,11 @@ public static class MauiProgram
 
 		var dbPath = Path.Combine(dataDir, "daymanager.db");
 
+		// 读写不再互斥（见 SqliteBootstrap 的说明）。
+		// 必须在任何连接打开之前做：采集器每 5 秒写一次库，
+		// 时间页刷新要读一整天——默认模式下这两件事会互相挡。
+		DayManager.Data.SqliteBootstrap.EnableWal(dbPath);
+
 		// 【为什么注册的是"工厂"而不是直接注册 DbContext】
 		// AppDbContext 内部会缓存它查过的数据，如果整个程序共用一个实例，
 		// 缓存会越来越大，而且它不允许同时被两处代码使用（不是线程安全的），
@@ -70,12 +93,95 @@ public static class MauiProgram
 		//   MainViewModel 会保存一堆当前状态（今天列表、输入框内容）→ 用 Transient，
 		//     这样每次打开页面都是干净的，不会带着上一次的旧数据
 		builder.Services.AddSingleton<ItemRepository>();
+		builder.Services.AddSingleton<ProjectRepository>();
+
+		// 对话记录：关掉程序也要留着（见 ChatMessage 的说明）。
+		builder.Services.AddSingleton<ChatRepository>();
+
+		// 设备使用时长（M7）：读写与统计都在共享代码里，两端以后一起用。
+		builder.Services.AddSingleton<UsageRepository>();
+
+#if WINDOWS
+		// 采集器只有 Windows 一份实现（全靠 user32.dll）。
+		// 【这里为什么用编译符号而不是像数据库路径那样运行时判断】
+		// 因为 WindowsUsageTracker 这个类型在 Android 上根本不存在，
+		// 运行时判断连编译都过不去。这是唯一必须用 #if 的场合。
+		builder.Services.AddSingleton<WindowsUsageTracker>();
+#endif
+
+		// 任务的「更多」菜单：日程页和大任务详情页共用同一份实现，
+		// 所以它是单例（自己不存任何状态，只拿着仓储）。
+		builder.Services.AddSingleton<ItemActionService>();
 		builder.Services.AddTransient<MainViewModel>();
+
+		// ================= 后端访问 =================
+
+		// 服务器地址与令牌：进程内只有一份，任何地方改了都立刻生效。
+		// 用工厂重载（而不是 AddSingleton<ServerSettings>()）是因为要先从
+		// Preferences / 本地种子文件把值读出来，不能直接 new 一个空的。
+		builder.Services.AddSingleton(_ => ServerSettings.Load());
+
+		// 【为什么这里手写 new HttpClient，而不像后端那样用 AddHttpClient】
+		// AddHttpClient 属于 Microsoft.Extensions.Http，是 Web 那一套的组件，
+		// MAUI 项目默认不带。这里只需要一个客户端实例，手写反而更清楚。
+		//
+		// 【UseProxy = false 是必须的，这里踩过真实的坑】
+		// 默认情况下 HttpClient 会读取系统的代理设置。一旦机器上配了代理或开着 VPN，
+		// 发往 127.0.0.1 的请求也会被送进代理。
+		// 实测后果：往一个根本没监听的端口发请求，居然收到了 200，
+		// 而且响应头里是 Server: Kestrel——代理把请求转给了真正的后端。
+		// 表现就是"服务器地址明明写错了却连得上"，排查时会被带得完全跑偏。
+		// 后端永远在本机或局域网，没有任何理由让它经过代理。
+		//
+		// 超时给 200 秒：AI 拆一整批任务本来就要跑一分多钟，
+		// 给短了会把正常的慢请求掐断。探测接口不用这个值——
+		// 它在 ApiClient 里单独设了 3 秒超时，见那里的说明。
+		builder.Services.AddSingleton(new HttpClient(new HttpClientHandler
+		{
+			UseProxy = false
+		})
+		{
+			Timeout = TimeSpan.FromSeconds(200)
+		});
+
+		builder.Services.AddSingleton<ApiClient>();
+
+		// 客户端自己把后端拉起来。
+		// 地址变化时（比如以后换成 Tailscale 的 100.x 地址）它会自动变成空壳不再启动，
+		// 因为那时后端跑在另一台机器上，本机启动它没有意义。
+		builder.Services.AddSingleton(provider =>
+			BackendLauncher.Create(
+				provider.GetRequiredService<ServerSettings>().BaseUrl,
+				SeedFileReader.RepoRoot));
+
+		// 任务拆解：把一件模糊的大事拆成能照着做的每日计划。
+		// 无状态（它只是拿着 ApiClient 去问 AI），所以做成单例。
+		builder.Services.AddSingleton<TaskDecomposer>();
+
+		// 说话之前先确保后端在，不在就自己拉起来。对话页和拆解页共用同一套逻辑。
+		builder.Services.AddSingleton<BackendGuard>();
 
 		// 页面也要注册，因为 AppShell 是通过 DataTemplate 让 DI 容器来创建 MainPage 的。
 		// 不注册的话，容器会尝试找无参构造函数 → MainPage 又需要一个 MainViewModel → 直接崩。
 		// 这是用 Shell + DI 时最容易漏的一步。
 		builder.Services.AddTransient<MainPage>();
+		builder.Services.AddTransient<PlanPage>();
+		builder.Services.AddTransient<PlanViewModel>();
+
+		// 对话页是核心界面，默认落在它上面（决策 D12）。
+		builder.Services.AddTransient<ChatPage>();
+		builder.Services.AddTransient<ChatViewModel>();
+
+		// 大任务（M6）：列表页 + 详情页。
+		// 用 Transient 是因为它们带着当前项目的状态，每次导航进来都该是干净的。
+		builder.Services.AddTransient<ProjectsPage>();
+		builder.Services.AddTransient<ProjectsViewModel>();
+		builder.Services.AddTransient<ProjectDetailPage>();
+		builder.Services.AddTransient<ProjectDetailViewModel>();
+
+		// 时间页（M8）：使用统计。
+		builder.Services.AddTransient<TimePage>();
+		builder.Services.AddTransient<TimeViewModel>();
 
 #if DEBUG
 		builder.Logging.AddDebug();
@@ -83,10 +189,48 @@ public static class MauiProgram
 
 		var app = builder.Build();
 
+		Services = app.Services;
+
 		InitializeDatabase(app.Services);
+
+#if WINDOWS
+		StartUsageTracking(app.Services);
+#endif
 
 		return app;
 	}
+
+#if WINDOWS
+	/// <summary>
+	/// 开始采集使用时长。
+	///
+	/// 【为什么不在界面上放一个"开始记录"的开关】
+	/// 人要记录自己的时间，还得先想起来去点一下开始——那这份数据永远缺最该记的那几天。
+	/// 采集随程序启动，不需要用户做任何动作。
+	///
+	/// 【为什么扔到后台线程】
+	/// 第一次采样会读库、读进程信息，放在启动路径上会让窗口晚出来半秒。
+	/// 采集本来就是个记录员，不该挡在用户和界面之间。
+	/// </summary>
+	private static void StartUsageTracking(IServiceProvider services)
+	{
+		var tracker = services.GetRequiredService<WindowsUsageTracker>();
+
+		_ = Task.Run(async () =>
+		{
+			try
+			{
+				await tracker.StartAsync();
+			}
+			catch (Exception ex)
+			{
+				// 采集挂了不该让程序起不来：用户的日程才是主角。
+				// 但要留下痕迹，否则"时间页一直是空的"会被当成界面 bug 查半天。
+				CrashLogger.Write("使用时长采集启动失败", ex);
+			}
+		});
+	}
+#endif
 
 	/// <summary>
 	/// 启动时确保数据表存在。

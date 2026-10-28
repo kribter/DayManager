@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:vm="clr-namespace:DayManager.App.ViewModels"
+             x:Class="DayManager.App.ChatPage"
+             x:DataType="vm:ChatViewModel"
+             Title="对话">
+
+    <!--
+      ============================================================
+      对话页是 DayManager 的核心界面。
+
+      【它和之前「拆解」页的区别】
+      拆解页是表单：填一件事 → 点按钮 → 拿到一份计划。它能做的事只有一件。
+      这一页没有这个限制：你说一句，AI 可以新建、改期、改状态、改名、删除，
+      也可以什么都不改，只是回你一句话。
+      所以这一页刻意做得简单——上面是聊天的记录，下面是一行输入框。
+      越是这样"什么都能做"的入口，越不能摆一堆控件在旁边，
+      否则人一打开就先被界面问住了。
+
+      【为什么改数据不用先弹确认】
+      每改一条都问一次"确定吗"，用起来像在填审批单。
+      改成：直接改 → 把改了哪几条列出来 → 每条下面给一个「撤回」。
+      事后撤回的代价，比事前拦一道低得多。
+      ============================================================
+
+      页面分五行：
+        第 0 行 Auto  状态条        —— 后端和 AI 在不在
+        第 1 行 *     消息列表      —— 吃掉剩余空间
+        第 2 行 Auto  思考中        —— 只在等 AI 时出现
+        第 3 行 Auto  候选回复      —— AI 猜你会说什么，点一下就发出去
+        第 4 行 Auto  输入区        —— 固定在底部
+    -->
+
+    <Grid RowDefinitions="Auto,*,Auto,Auto,Auto"
+          RowSpacing="8"
+          Padding="14">
+
+        <!-- ================= 第 0 行：状态条 =================
+             只显示一句话，但它决定用户会不会白等一次。
+             连不上后端的时候，最差的结果是他说完一整段才发现没人在听。 -->
+        <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6">
+            <BoxView Grid.Column="0"
+                     WidthRequest="8"
+                     HeightRequest="8"
+                     CornerRadius="4"
+                     VerticalOptions="Center"
+                     Color="{Binding StatusColor}" />
+            <Label Grid.Column="1"
+                   Text="{Binding StatusText}"
+                   Style="{StaticResource Caption}"
+                   VerticalOptions="Center" />
+
+            <!-- 聊过才出现。留着对话就必须能清掉它，否则越攒越长。 -->
+            <Button Grid.Column="2"
+                    Text="清空"
+                    Style="{StaticResource ChipButton}"
+                    Command="{Binding ClearHistoryCommand}"
+                    IsVisible="{Binding HasMessages}"
+                    ToolTipProperties.Text="把之前的对话收起来" />
+        </Grid>
+
+        <!-- ================= 第 1 行：消息列表 =================
+
+             【为什么用 ScrollView 而不是 CollectionView】
+             原来是 CollectionView，新消息总是滚不到位——用户得手动划到底才看得见。
+             根子在"什么时候滚"：气泡的高度要等文字**排完版**才知道，
+             而 AI 一句话能占半屏。在高度还未知的时候滚，位置是照旧布局算的，
+             于是停在半路；等高度定了，已经没有人再滚一次。
+             CollectionView 只有一个"滚到某一项"的接口，项有多大它自己管，
+             外面插不上手。
+
+             ScrollView 给的是一个**确定性的**接口：直接说"滚到 y = 内容总高"。
+             这个动作跟排版无关，什么时候调都是到底——
+             多调几次无非是重复一次同样的结果，不会越滚越偏。
+
+             【不用虚拟化的代价】
+             ScrollView 会把列表里每一条都实例化出来，不像 CollectionView 只渲染看得见的几条。
+             这里的量是可控的：历史一次只加载最近 50 条（ChatViewModel.LoadLimit），
+             而一屏能显示的气泡撑死十来条。五十个气泡的布局开销，换一个滚得准的界面，值。
+             等哪天真的要翻几百条历史，再上分页或换回 CollectionView 也不迟。
+
+             【和时间页是一致的】
+             时间页的应用排行走的就是 ScrollView + BindableLayout 这套，
+             理由也相似：整页要滚动时，里面再嵌一个自己会滚的列表，
+             滚动手势会打架（滚到列表上就滚不动页面了）。 -->
+        <ScrollView x:Name="MessageScroll"
+                    Grid.Row="1">
+            <VerticalStackLayout x:Name="MessageStack"
+                                 Padding="0,0,0,8">
+
+                <!-- 空状态写清楚"这里能干什么"。
+                     只写"还没有对话"，用户不知道能拿它做什么。 -->
+                <Label Text="直接说你想做的事就行。&#10;&#10;比如：&#10;· 两周内把开题报告弄出来&#10;· 今天没做完的都推到明天&#10;· 早上那三条太满了，减一减"
+                       Style="{StaticResource Caption}"
+                       FontSize="13"
+                       HorizontalTextAlignment="Center"
+                       Margin="0,40,0,0"
+                       IsVisible="{Binding HasMessages, Converter={StaticResource Not}}" />
+
+                <VerticalStackLayout Spacing="0"
+                                     BindableLayout.ItemsSource="{Binding Messages}">
+                    <BindableLayout.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ChatBubble">
+
+                    <!--
+                      一个气泡。
+                      三种来源（你说的 / AI 说的 / 系统提示）用同一套控件，
+                      靠对齐方式和底色区分：
+                        你   —— 靠右，浅蓝
+                        AI   —— 靠左，浅灰
+                        系统 —— 靠左，无底色，橙字（它是故障提示，不是对话内容）
+                    -->
+                    <Grid Padding="0,5"
+                          ColumnDefinitions="*"
+                          HorizontalOptions="{Binding Align}">
+
+                        <VerticalStackLayout Spacing="4"
+                                             MaximumWidthRequest="520"
+                                             HorizontalOptions="{Binding Align}">
+
+                            <!--
+                              【为什么用 Border 而不是 Frame】
+                              Frame 从 .NET 9 起标记为过时，编译器会给警告（CS0618）。
+                              它俩能做同样的事，但 Frame 内部为了兼容老版本多套了一层布局，
+                              在列表里滚动时更重。Border 是现在的推荐写法。
+                            -->
+                            <Border Padding="10,8"
+                                    BackgroundColor="{Binding BubbleColor}"
+                                    Stroke="Transparent"
+                                    IsVisible="{Binding ShowAsBubble}">
+                                <Border.StrokeShape>
+                                    <RoundRectangle CornerRadius="12" />
+                                </Border.StrokeShape>
+                                <Label Text="{Binding Text}"
+                                       FontSize="14"
+                                       TextColor="Black"
+                                       LineBreakMode="WordWrap" />
+                            </Border>
+
+                            <!-- 系统提示：不装进气泡，直接一行橙字。
+                                 把它做得像 AI 说的话，用户会把故障当成内容。 -->
+                            <Label Text="{Binding Text}"
+                                   FontSize="12"
+                                   TextColor="DarkOrange"
+                                   IsVisible="{Binding IsSystem}"
+                                   LineBreakMode="WordWrap" />
+
+                            <!-- AI 这一轮真的改了什么。
+                                 【为什么必须逐条列出来】
+                                 一次改十条却只说一句"已更新"，用户根本来不及看清改了什么。
+                                 那不叫乐观更新，叫敷衍。 -->
+                            <VerticalStackLayout Spacing="2"
+                                                 BindableLayout.ItemsSource="{Binding Outcomes}"
+                                                 IsVisible="{Binding HasOutcomes}">
+                                <BindableLayout.ItemTemplate>
+                                    <DataTemplate x:DataType="vm:ActionOutcomeDto">
+                                        <Label Text="{Binding Display}"
+                                               Style="{StaticResource Caption}" />
+                                    </DataTemplate>
+                                </BindableLayout.ItemTemplate>
+                            </VerticalStackLayout>
+
+                            <!-- 撤回。就地解决：发现它改错的那一刻你就在这一屏上，
+                                 最不想做的事就是再跟它聊一轮说"帮我撤回"。 -->
+                            <Button Text="{Binding UndoText}"
+                                    Style="{StaticResource ChipButton}"
+                                    HorizontalOptions="Start"
+                                    IsVisible="{Binding CanUndo}"
+                                    Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ChatViewModel}}, Path=UndoCommand}"
+                                    CommandParameter="{Binding .}" />
+                        </VerticalStackLayout>
+                    </Grid>
+                </DataTemplate>
+                    </BindableLayout.ItemTemplate>
+                </VerticalStackLayout>
+            </VerticalStackLayout>
+        </ScrollView>
+
+        <!-- ================= 第 2 行：思考中 =================
+             【为什么非要这一行，状态条上不是已经写了"AI 正在想……"吗】
+             状态条在顶部，字号 11、灰色，而且离输入框很远。
+             AI 一轮要跑二三十秒（拆一整批任务时更久），
+             这二三十秒里如果界面上唯一的变化是顶部一行小字，
+             用户的判断是"卡住了 / 没发出去"，然后要么狂点发送、要么直接关掉。
+
+             转圈这个动作本身信息量为零，但它回答了用户此刻唯一关心的问题：
+             "它到底还在不在跑？"
+             放在紧贴输入区上方的位置，是因为发完消息后视线就停在那里。 -->
+        <Grid Grid.Row="2"
+              ColumnDefinitions="Auto,Auto"
+              ColumnSpacing="6"
+              IsVisible="{Binding IsBusy}">
+            <ActivityIndicator Grid.Column="0"
+                               IsRunning="{Binding IsBusy}"
+                               WidthRequest="14"
+                               HeightRequest="14"
+                               VerticalOptions="Center" />
+            <Label Grid.Column="1"
+                   Text="AI 正在想……"
+                   Style="{StaticResource Caption}"
+                   VerticalOptions="Center" />
+        </Grid>
+
+        <!-- ================= 第 3 行：候选回复（AI 猜你会说什么） =================
+
+             【为什么在这里，而不是回复下面】
+             它最早是回复下方的一组预填输入框（那时候叫"AI 还想确认几件事"）。
+             实测的问题是：问完一句想看 AI 说什么，结果先看见三行要填的框——
+             话说被表单挤出了屏幕。追问用嘴问就行，不值得占掉回话的位置。
+             移到输入框上方之后，视线正好从"它说了什么"走到"我要说什么"的路上经过它，
+             既挡不住回复，也让按钮落在手要按的地方。
+
+             【为什么点一下就发出去，而不是填进输入框再让他按发送】
+             他点这个按钮的时候就已经确认了要说的是这句，再按一次发送是多余的确认。
+             多一次点击，就多一个可以放弃的路口。
+
+             【为什么用 FlexLayout】
+             候选句子的长短差得远（"好" 和 "今天先做第一条吧"），
+             横着排一行放不下，却又不能像列表那样一条一行——那会把输入框顶出去。
+             FlexLayout 的 Wrap 正好是"排满一行自动换行"，
+             比 CollectionView 轻，也不用管高度。 -->
+        <FlexLayout Grid.Row="3"
+                    Wrap="Wrap"
+                    Direction="Row"
+                    JustifyContent="Start"
+                    AlignItems="Start"
+                    Margin="0,0,0,2"
+                    IsVisible="{Binding HasSuggestions}"
+                    BindableLayout.ItemsSource="{Binding Suggestions}">
+            <BindableLayout.ItemTemplate>
+                <DataTemplate x:DataType="x:String">
+                    <Button Text="{Binding .}"
+                            Style="{StaticResource SuggestionChip}"
+                            Margin="0,0,6,6"
+                            ToolTipProperties.Text="{Binding .}"
+                            Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ChatViewModel}}, Path=PickSuggestionCommand}"
+                            CommandParameter="{Binding .}" />
+                </DataTemplate>
+            </BindableLayout.ItemTemplate>
+        </FlexLayout>
+
+        <!-- ================= 第 4 行：输入区 ================= -->
+        <Grid Grid.Row="4" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+            <!--
+              【为什么把快捷键写进 Placeholder】
+              Enter 发送、Shift+Enter 换行是看不见的功能——
+              不给提示的话，多数人要么一辈子不知道能换行，
+              要么按了 Enter 发现发出去了才知道规矩。
+              写进 Placeholder 而不是在旁边加一行小字，是因为它有内容就自动消失，
+              不占本来就紧张的输入区空间。
+            -->
+            <Editor x:Name="InputEditor"
+                    Grid.Column="0"
+                    Text="{Binding InputText}"
+                    Placeholder="说点什么……（Enter 发送，Shift+Enter 换行）"
+                    FontSize="14"
+                    AutoSize="TextChanges"
+                    MaximumHeightRequest="120" />
+
+            <!--
+              等 AI 的时候禁用发送按钮。
+              【为什么必须禁用，SendAsync 里不是已经判了 IsBusy 吗】
+              内部判断只能保证"不会真的发出去第二次"，
+              但按钮看起来还是能点的——点下去毫无反应，
+              用户分不清是"点了没生效"还是"程序卡了"。
+              灰色不可点是一个明确的答复：现在不行，稍等。
+            -->
+            <Button Grid.Column="1"
+                    Text="发送"
+                    Command="{Binding SendCommand}"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource Not}}"
+                    VerticalOptions="Start" />
+        </Grid>
+    </Grid>
+</ContentPage>

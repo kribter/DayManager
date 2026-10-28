@@ -32,7 +32,7 @@ Console.WriteLine();
 var dayStart = new DateTimeOffset(2026, 10, 4, 0, 0, 0, TimeSpan.FromHours(8));
 
 IQueryable<DayManager.Core.Entities.Item> query = db.Items
-    .Where(x => x.StartAt >= dayStart && x.Status != ItemStatus.Cancelled);
+    .Where(x => x.StartAt >= dayStart && x.Status != ItemStatus.Abandoned);
 
 Console.WriteLine(query.ToQueryString());
 

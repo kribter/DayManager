@@ -32,6 +32,19 @@ public class AppDbContext : DbContext
     public DbSet<DailyContext> DailyContexts => Set<DailyContext>();
 
     /// <summary>
+    /// 写操作日志。**撤销的基础**，永久保留，不清理。
+    /// </summary>
+    public DbSet<ActionLog> ActionLogs => Set<ActionLog>();
+
+    /// <summary>会自己变的参数（见需求文档 2.7）。</summary>
+    public DbSet<PolicySetting> PolicySettings => Set<PolicySetting>();
+
+    /// <summary>
+    /// 与 AI 的对话记录。**关掉程序也要留着**，见 ChatMessage 的说明。
+    /// </summary>
+    public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
+
+    /// <summary>
     /// 构造函数接收 options，由调用方决定连哪个库（客户端连本机 SQLite，服务端连服务器上的库）。
     /// 这种写法叫依赖注入：DbContext 自己不关心连哪，交给外部配置。
     /// </summary>
@@ -51,6 +64,9 @@ public class AppDbContext : DbContext
         ConfigureProject(modelBuilder.Entity<Project>());
         ConfigureUsageSession(modelBuilder.Entity<UsageSession>());
         ConfigureDailyContext(modelBuilder.Entity<DailyContext>());
+        ConfigureActionLog(modelBuilder.Entity<ActionLog>());
+        ConfigurePolicySetting(modelBuilder.Entity<PolicySetting>());
+        ConfigureChatMessage(modelBuilder.Entity<ChatMessage>());
 
         ApplyTimeConverters(modelBuilder);
     }
@@ -157,6 +173,7 @@ public class AppDbContext : DbContext
         b.Property(x => x.RRule).HasMaxLength(500);
         b.Property(x => x.Tags).HasMaxLength(1000);
         b.Property(x => x.Reminders).HasMaxLength(1000);
+        b.Property(x => x.SkipReason).HasMaxLength(500);
 
         // ---------- 关系 ----------
 
@@ -244,6 +261,79 @@ public class AppDbContext : DbContext
         b.HasIndex(x => x.UpdatedAt);
 
         b.HasQueryFilter(x => x.DeletedAt == null);
+    }
+
+    private static void ConfigureActionLog(Microsoft.EntityFrameworkCore.Metadata.Builders.EntityTypeBuilder<ActionLog> b)
+    {
+        b.ToTable("action_logs");
+        b.HasKey(x => x.Id);
+
+        b.Property(x => x.TargetType).IsRequired().HasMaxLength(32);
+        b.Property(x => x.Summary).IsRequired().HasMaxLength(500);
+
+        // BeforeJson / AfterJson 是一整条记录的快照，可能较长，不限制长度。
+        // SQLite 的 TEXT 本身不强制长度，这里不写 HasMaxLength 是有意的：
+        // 被截断的快照会让撤销静默失效（写回去的记录缺字段），这比多占点空间糟得多。
+
+        // ---------- 索引 ----------
+        //
+        // 【为什么按 BatchId 建索引】
+        // 撤销的典型操作是"把这一批全撤了"，也就是按 BatchId 捞出若干条。
+        // 没有索引的话，日志攒到几千条后每次撤销都要全表扫。
+        b.HasIndex(x => x.BatchId);
+
+        // 撤销列表的展示顺序：最近的在前。
+        b.HasIndex(x => x.CreatedAt);
+
+        // 冲突检测要找"这条记录最近被改过几次"，按目标查。
+        b.HasIndex(x => new { x.TargetType, x.TargetId });
+
+        // 【为什么这里不加软删除过滤】
+        // 日志就是日志，它记录的是"发生过什么"，让它消失等于抹掉历史。
+        // 不调用 HasQueryFilter，撤销记录会一直保留——
+        // 这也是"永久可撤"（D4）能成立的前提：日志还在，就撤得回来。
+    }
+
+    private static void ConfigurePolicySetting(Microsoft.EntityFrameworkCore.Metadata.Builders.EntityTypeBuilder<PolicySetting> b)
+    {
+        b.ToTable("policy_settings");
+        b.HasKey(x => x.Id);
+
+        b.Property(x => x.Key).IsRequired().HasMaxLength(64);
+        b.Property(x => x.Value).IsRequired().HasMaxLength(500);
+        b.Property(x => x.DefaultValue).IsRequired().HasMaxLength(500);
+        b.Property(x => x.Reason).HasMaxLength(1000);
+
+        // 【为什么 Key 必须唯一】
+        // 同一个参数存两行的话，读取时取到哪一行是不确定的，
+        // 表现为"设置改了但没生效"——这类 bug 极难查，因为数据看起来是对的。
+        // 数据库层面的唯一约束是唯一可靠的兜底（代码里先查再插会有竞态）。
+        b.HasIndex(x => x.Key).IsUnique();
+
+        b.HasQueryFilter(x => x.DeletedAt == null);
+    }
+
+    private static void ConfigureChatMessage(Microsoft.EntityFrameworkCore.Metadata.Builders.EntityTypeBuilder<ChatMessage> b)
+    {
+        b.ToTable("chat_messages");
+        b.HasKey(x => x.Id);
+
+        b.Property(x => x.Role).IsRequired().HasMaxLength(16);
+        b.Property(x => x.Text).IsRequired();
+
+        // ---------- 索引 ----------
+
+        // 打开对话页要取"最近若干条"，按时间倒序扫。
+        b.HasIndex(x => x.CreatedAt);
+
+        // 撤回后要把那一批标记成已撤回。
+        b.HasIndex(x => x.BatchId);
+
+        // 【为什么这里不加 HasQueryFilter】
+        // 和 action_log 一个道理：对话就是历史，删了就没了。
+        // 真要清理由用户显式操作（清屏），那时才写 DeletedAt。
+        // （HasQueryFilter 不加 = 查询默认不过滤软删，
+        //   所以"清空"要自己带 DeletedAt == null 条件，见 ChatRepository。）
     }
 
     /// <summary>

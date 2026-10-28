@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:vm="clr-namespace:DayManager.App.ViewModels"
+             x:Class="DayManager.App.ProjectDetailPage"
+             x:DataType="vm:ProjectDetailViewModel"
+             Shell.NavBarIsVisible="False"
+             Title="大任务">
+
+    <!--
+      ============================================================
+      一个大任务下面的子任务清单。
+
+      【为什么返回按钮是自己做的，还放在项目名旁边】
+      系统导航栏自带一个返回箭头，但它是个小图标、颜色很浅，
+      用户的原话是"有点不明显"——而且上一版还真的把人困住过一次
+      （那时用了 /// 导航，Tab 栏被换掉，箭头也没有）。
+      这一页唯一的出口必须一眼就看得见，所以放在标题旁边、用主色描边。
+      顺带把系统导航栏关掉：留两个返回入口反而让人犹豫该点哪个，
+      而那条横条换成内容能多显示一行。
+
+      【为什么顶部的进度条和列表里的打勾不是一回事】
+      进度条是算出来的（自动汇总），打勾是手动的。
+      两者不冲突：勾完一条，进度条立刻跟着动，
+      但没有任何一个按钮能直接把进度条拉满——
+      这是"大任务只是容器"这条决定在界面上的样子。
+      ============================================================
+
+      页面分四行：
+        第 0 行 Auto  项目名 + 目标日期
+        第 1 行 Auto  进度条 + 完成几件
+        第 2 行 Auto  加一条子任务
+        第 3 行 *     子任务清单
+    -->
+    <Grid RowDefinitions="Auto,Auto,Auto,*"
+          Padding="14"
+          RowSpacing="8">
+
+        <!-- 第 0 行：返回按钮和项目名并排。返回放在这里是因为这一页没有别的出口。 -->
+        <Grid Grid.Row="0"
+              ColumnDefinitions="Auto,*"
+              ColumnSpacing="10">
+            <Button Grid.Column="0"
+                    Text="&lt; 返回"
+                    Style="{StaticResource BackButton}"
+                    Command="{Binding BackCommand}"
+                    VerticalOptions="Center" />
+
+            <VerticalStackLayout Grid.Column="1"
+                                 Spacing="2"
+                                 VerticalOptions="Center">
+                <Label Text="{Binding Name}"
+                       FontSize="20"
+                       FontAttributes="Bold"
+                       LineBreakMode="WordWrap" />
+                <Label Text="{Binding TargetText}"
+                       Style="{StaticResource Caption}" />
+            </VerticalStackLayout>
+        </Grid>
+
+        <VerticalStackLayout Grid.Row="1" Spacing="4">
+            <ProgressBar Progress="{Binding ProgressRatio}"
+                         HeightRequest="6"
+                         ProgressColor="{StaticResource DoneGreen}" />
+            <Label Text="{Binding ProgressText}"
+                   Style="{StaticResource Caption}" />
+        </VerticalStackLayout>
+
+        <!-- ================= 第 2 行：加一条子任务 =================
+
+             【为什么这一行必须有】
+             这一页原先只能看、只能删，加子任务只能去对话页让 AI 建。
+             于是"自己新建大任务"成了半截功能：壳能建，里面装不进东西——
+             用户原话就是"我建的大任务没法往里加任务"。
+             而且 AI 不可用的时候（离线、后端没起），这条唯一的路也断了。
+             一个"只有 AI 会用"的功能，在 AI 挂掉的那一刻价值归零。
+
+             【为什么做成一个常驻的输入框，而不是顶上一个"+"按钮】
+             加任务通常不是一次性的：拆一件事要连着写好几条。
+             常驻输入框支持连续录入（回车或点按钮都能提交），
+             每次弹对话框问一遍的话，加到第三条人就烦了。
+             这也和日程页底部的快速添加区是同一个样子，不必再学一次。 -->
+        <Grid Grid.Row="2"
+              ColumnDefinitions="*,Auto"
+              ColumnSpacing="6">
+            <Entry Grid.Column="0"
+                   Text="{Binding NewTitle}"
+                   Placeholder="加一条子任务，回车就能加上"
+                   ReturnType="Done"
+                   ReturnCommand="{Binding AddSubtaskCommand}"
+                   FontSize="14" />
+            <Button Grid.Column="1"
+                    Text="加入"
+                    Command="{Binding AddSubtaskCommand}"
+                    WidthRequest="60"
+                    HeightRequest="40"
+                    CornerRadius="8"
+                    Padding="0"
+                    FontSize="13" />
+        </Grid>
+
+        <CollectionView Grid.Row="3"
+                        ItemsSource="{Binding Items}"
+                        SelectionMode="None">
+
+            <!-- 空的时候直接告诉他下面那个输入框是干嘛的，
+                 而不是让他去找"到底在哪加"。 -->
+            <CollectionView.EmptyView>
+                <Label Text="这个项目还没有任务。&#10;用上面那个输入框加第一条，&#10;或者在对话里让 AI 帮你拆。"
+                       Style="{StaticResource Caption}"
+                       FontSize="13"
+                       HorizontalTextAlignment="Center"
+                       VerticalTextAlignment="Center"
+                       Margin="0,40,0,0" />
+            </CollectionView.EmptyView>
+
+            <CollectionView.ItemTemplate>
+                <!--
+                  和日程页那一行的结构刻意保持一致：
+                  左边打勾、中间标题+徽章+说明、右边更多。
+                  同一个软件里同一种东西应该长一个样，
+                  否则用户要在两个页面各学一次"点哪里能干嘛"。
+                -->
+                <DataTemplate x:DataType="vm:ItemViewModel">
+                    <Grid ColumnDefinitions="Auto,*,Auto"
+                          ColumnSpacing="10"
+                          Padding="4,8">
+
+                        <Button Grid.Column="0"
+                                Text="&#10003;"
+                                Style="{StaticResource RoundIconButton}"
+                                TextColor="{Binding CheckColor}"
+                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ProjectDetailViewModel}}, Path=ToggleCompleteCommand}"
+                                CommandParameter="{Binding .}" />
+
+                        <VerticalStackLayout Grid.Column="1"
+                                             Spacing="2"
+                                             VerticalOptions="Center">
+                            <HorizontalStackLayout Spacing="6">
+                                <Label Text="{Binding Title}"
+                                       TextColor="{Binding TitleColor}"
+                                       TextDecorations="{Binding TitleDecorations}"
+                                       FontSize="15"
+                                       LineBreakMode="TailTruncation"
+                                       VerticalOptions="Center" />
+
+                                <Border Padding="5,1"
+                                        Stroke="{Binding StatusBrush}"
+                                        StrokeThickness="1"
+                                        VerticalOptions="Center"
+                                        IsVisible="{Binding HasStatusBadge}">
+                                    <Border.StrokeShape>
+                                        <RoundRectangle CornerRadius="4" />
+                                    </Border.StrokeShape>
+                                    <Label Text="{Binding StatusText}"
+                                           TextColor="{Binding StatusColor}"
+                                           FontSize="10" />
+                                </Border>
+                            </HorizontalStackLayout>
+
+                            <Label Text="{Binding Subtitle}"
+                                   Style="{StaticResource Caption}" />
+                        </VerticalStackLayout>
+
+                        <Button Grid.Column="2"
+                                Text="更多"
+                                Style="{StaticResource ChipButton}"
+                                WidthRequest="46"
+                                ToolTipProperties.Text="重命名 / 删除 / 改状态"
+                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ProjectDetailViewModel}}, Path=ShowActionsCommand}"
+                                CommandParameter="{Binding .}" />
+                    </Grid>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+        </CollectionView>
+    </Grid>
+</ContentPage>

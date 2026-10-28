@@ -172,6 +172,141 @@
         </Setter>
     </Style>
 
+    <!--
+      小号次要文字：说明、时间戳、撤回提示这类"不该抢注意力"的字。
+
+      【为什么非要单独一个样式，而不是每次写 TextColor="Gray" FontSize="11"】
+      写散了就有两个后果：
+        1. 深色模式下 Gray 是 #808080 固定值，在黑底上偏暗、偏糊，
+           而 AppThemeBinding 能在深色下自动换成更亮的灰；
+        2. 同一类文字在四个页面里出现四种深浅，界面看着不像同一套设计。
+      样式把它收成一处，改的时候改一行。
+    -->
+    <Style TargetType="Label" x:Key="Caption">
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource MutedText}, Dark={StaticResource Gray300}}" />
+        <Setter Property="FontSize" Value="11" />
+    </Style>
+
+    <!--
+      卡片。所有页面共用一份，改一处全站生效。
+
+      【为什么要有这个样式】
+      卡片之前是"每个页面各写一遍 Border 属性"，结果四个页面的边框色、
+      内边距、圆角各不相同，看着不像同一个软件做的。
+      而且它们全都只有描边、没有底色——这是"界面发灰发平"最主要的原因。
+
+      【为什么圆角不在样式里写】
+      `StrokeShape` 要放一个 `RoundRectangle` 实例。写在样式里的话，
+      所有卡片会共用同一个实例——`Shape` 虽然不是控件（可以共享），
+      但一旦将来有人给它加绑定就会互相串。宁可每个卡片多写两行，
+      也不要留一个"共享可变对象"的隐患。所以这里只管颜色、粗细、内边距。
+    -->
+    <Style TargetType="Border" x:Key="CardStyle">
+        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource CardBgLight}, Dark={StaticResource CardBgDark}}" />
+        <Setter Property="Stroke" Value="{AppThemeBinding Light={StaticResource CardBorderLight}, Dark={StaticResource CardBorderDark}}" />
+        <Setter Property="StrokeThickness" Value="1" />
+        <Setter Property="Padding" Value="16,14" />
+    </Style>
+
+    <!--
+      卡片里的小标题（"什么时候在用""用在哪"这类）。
+
+      【为什么字号从 13 提到 14、颜色不用纯黑】
+      卡片有了底色之后，块与块之间靠的是"标题 + 内容"的层级，
+      标题太小会和内容糊在一起。颜色取正文色而不是纯黑，
+      是为了让视线先落在内容上——这一页是给人看自己的数据的，不是看标题的。
+    -->
+    <Style TargetType="Label" x:Key="CardTitle">
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontAttributes" Value="Bold" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource Gray900}, Dark={StaticResource Gray100}}" />
+    </Style>
+
+    <!--
+      小按钮（撤回 / 不用了 / 回到今天 / 更多）。
+
+      【为什么必须显式把 MinimumHeightRequest 改成 0】
+      上面的全局 Button 样式设了 MinimumHeightRequest=44（触控友好默认值）。
+      它是"下限"，优先级高于 HeightRequest：
+      你在页面上写 HeightRequest="28" 想做小按钮，实际量出来还是 44，
+      而且不报错——只是按钮比设计的大一圈，一排小按钮看着很笨重。
+      要用小尺寸就得把下限一起清掉，这是 MAUI 里很容易忽略的一条。
+    -->
+    <Style TargetType="Button" x:Key="ChipButton">
+        <Setter Property="BackgroundColor" Value="Transparent" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource MutedText}, Dark={StaticResource Gray300}}" />
+        <Setter Property="BorderColor" Value="{AppThemeBinding Light={StaticResource Gray300}, Dark={StaticResource Gray600}}" />
+        <Setter Property="BorderWidth" Value="1" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="Padding" Value="10,2" />
+        <Setter Property="HeightRequest" Value="30" />
+        <Setter Property="MinimumHeightRequest" Value="0" />
+        <Setter Property="MinimumWidthRequest" Value="0" />
+    </Style>
+
+    <!--
+      输入框上方那一排"AI 猜你会说什么"的候选回复。
+
+      【为什么它不能复用 ChipButton】
+      ChipButton 是 11px 灰字的次要动作（撤回 / 回到今天），刻意做弱、固定 30 高。
+      候选回复是**内容**，不是按钮：它写的是一句要说的话，
+      字号小了读不出来，又因为句子长短不一，固定高度会把长句截掉一半。
+      所以这里不设 HeightRequest（让它按内容长），字放大到 12，
+      圆角做成一个"聊天胶囊"的样子，颜色和 AI 气泡同一族浅灰，
+      让人一眼看出"这是话，不是功能键"。
+
+      MaximumWidthRequest 是防失控用的：模型偶尔会吐一句二十几个字的话，
+      不设上限的话一个 chip 就横穿整屏，把别的都挤下去。
+    -->
+    <Style TargetType="Button" x:Key="SuggestionChip">
+        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource CardBgLight}, Dark={StaticResource CardBgDark}}" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource Gray900}, Dark={StaticResource Gray100}}" />
+        <Setter Property="BorderColor" Value="{AppThemeBinding Light={StaticResource CardBorderLight}, Dark={StaticResource CardBorderDark}}" />
+        <Setter Property="BorderWidth" Value="1" />
+        <Setter Property="CornerRadius" Value="14" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="Padding" Value="12,6" />
+        <Setter Property="MaximumWidthRequest" Value="300" />
+        <Setter Property="MinimumHeightRequest" Value="0" />
+        <Setter Property="MinimumWidthRequest" Value="0" />
+    </Style>
+
+    <!--
+      返回按钮。
+      【为什么它不能复用 ChipButton】
+      ChipButton 是 11px 的灰字，那是给"撤回""不用了"这类次要动作用的——
+      刻意做弱。但"从详情页回到列表"是这一页唯一的出口：
+      用过一次被困住的经历之后，它必须一眼就看得到。
+      所以这里用主色描边 + 主色文字 + 13px，比 ChipButton 重一个级别。
+    -->
+    <Style TargetType="Button" x:Key="BackButton">
+        <Setter Property="BackgroundColor" Value="Transparent" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+        <Setter Property="BorderColor" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource PrimaryDark}}" />
+        <Setter Property="BorderWidth" Value="1" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Padding" Value="12,4" />
+        <Setter Property="HeightRequest" Value="34" />
+        <Setter Property="MinimumHeightRequest" Value="0" />
+        <Setter Property="MinimumWidthRequest" Value="0" />
+    </Style>
+
+    <!-- 列表右侧的圆形打勾按钮，同样是清掉 44 下限才能真做成圆的 -->
+    <Style TargetType="Button" x:Key="RoundIconButton">
+        <Setter Property="BackgroundColor" Value="Transparent" />
+        <Setter Property="BorderColor" Value="{AppThemeBinding Light={StaticResource Gray300}, Dark={StaticResource Gray600}}" />
+        <Setter Property="BorderWidth" Value="1" />
+        <Setter Property="FontSize" Value="17" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="CornerRadius" Value="17" />
+        <Setter Property="HeightRequest" Value="34" />
+        <Setter Property="WidthRequest" Value="34" />
+        <Setter Property="MinimumHeightRequest" Value="0" />
+        <Setter Property="MinimumWidthRequest" Value="0" />
+    </Style>
+
     <Style TargetType="Label" x:Key="Headline">
         <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource MidnightBlue}, Dark={StaticResource White}}" />
         <Setter Property="FontSize" Value="32" />

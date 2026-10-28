@@ -2,6 +2,7 @@
 <Application xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
              xmlns:local="clr-namespace:DayManager.App"
+             xmlns:converters="clr-namespace:DayManager.App.Converters"
              x:Class="DayManager.App.App">
     <Application.Resources>
         <ResourceDictionary>
@@ -9,6 +10,13 @@
                 <ResourceDictionary Source="Resources/Styles/Colors.xaml" />
                 <ResourceDictionary Source="Resources/Styles/Styles.xaml" />
             </ResourceDictionary.MergedDictionaries>
+
+            <!--
+              放在全局而不是某个页面里：取反这种转换器每个页面都会用到，
+              每页各声明一次的话，将来改名要改好几处。
+              这里声明之后任何 XAML 都能直接 {StaticResource Not}。
+            -->
+            <converters:InvertedBoolConverter x:Key="Not" />
         </ResourceDictionary>
     </Application.Resources>
 </Application>
