@@ -36,6 +36,10 @@ public partial class App : Application
 		// 第二个参数就是告诉它：这次是我自己起来的，别出来。
 		MauiProgram.Services.GetService<IWindowShell>()?.Attach(window, WindowsAutoStart.IsLaunchedInBackground());
 
+		// 标题栏染色：那条横条是系统画的，深色下会留一条白边。
+		// 放在这里而不是在界面里，是因为它是整个窗口的事，不该由某个页面负责。
+		WindowsTitleBar.Attach(window);
+
 		// 关窗时把使用时长采集停掉。
 		//
 		// 【为什么不写也能用】

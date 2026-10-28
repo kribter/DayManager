@@ -49,6 +49,15 @@ public static class AppColors
         return fallback;
     }
 
+    /// <summary>
+    /// 页面底色。
+    ///
+    /// 平时 XAML 直接用 AppThemeBinding 引用就行，这里留一份是给
+    /// <b>窗口标题栏</b>用的：那条横条由系统绘制，只能从 C# 里按色值设，
+    /// 而它必须和页面底色同为一色，否则深色窗口顶上留一条白边。
+    /// </summary>
+    public static Color PageBg => Pick("PageBgLight", "PageBgDark", Colors.White, Colors.White);
+
     /// <summary>正文。</summary>
     public static Color Text => Pick("TextPrimaryLight", "TextPrimaryDark", Colors.Black, Colors.White);
 
