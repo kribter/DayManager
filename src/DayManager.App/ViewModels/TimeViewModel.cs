@@ -117,7 +117,24 @@ public partial class TimeViewModel : ObservableObject
                     return;
                 }
 
-                await RefreshAsync(quiet: true);
+                // 【为什么整个刷新都要切回主线程，而不是只把"改属性"那几行切过去】
+                // 这里曾经直接在后台线程跑 RefreshAsync，结果界面纹丝不动：
+                // MAUI 的 ObservableCollection 和绑定属性只能由 UI 线程改，
+                // 后台线程改集合要么不渲染、要么当场抛异常——
+                // 而 quiet 模式又把异常吞了（"自动刷新失败不该弹框"是对的），
+                // 于是每次刷新都在无声地失败，看日志才找得到。
+                // 顺带的取舍：把查库也放进主线程。单人用的 SQLite 查询是毫秒级，
+                // 20 秒一次，不值得为它把"取数"和"上屏"拆成两半各管各的线程。
+                try
+                {
+                    await MainThread.InvokeOnMainThreadAsync(() => RefreshAsync(quiet: true));
+                }
+                catch (Exception ex)
+                {
+                    // 调度本身失败（理论上只有线程模型被破坏才会走到这）也落日志，
+                    // 别再让一次刷新无声无息地消失。
+                    Services.CrashLogger.Write("时间页自动刷新调度失败", ex);
+                }
             }
         });
     }
@@ -522,9 +539,15 @@ public partial class TimeViewModel : ObservableObject
             {
                 await ReportErrorAsync(ex);
             }
+            else
+            {
+                // 自动刷新不弹框是对的（每 20 秒弹一个框会把人赶离这一页），
+                // 但"吞掉 + 不留痕"意味着失败永远找不到——这次的
+                // "数字不动"就是这样查出来的。落一行日志，代价几乎为零。
+                Services.CrashLogger.Write("时间页自动刷新失败", ex);
+            }
 
-            // 自动刷新失败了就等下一轮。数字暂时停在旧值是可以接受的，
-            // 而每 20 秒弹一个框会把人赶离这一页。
+            // 数字暂时停在旧值是可以接受的，下一轮还会再试。
         }
     }
 
