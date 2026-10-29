@@ -1,5 +1,6 @@
 using System.Text.Json;
 using DayManager.Api.Models;
+using DayManager.Core.Ai;
 using DayManager.Core.Entities;
 using DayManager.Core.Proactive;
 using DayManager.Data;
@@ -44,6 +45,7 @@ public sealed class ProactiveService
     private readonly UsageRepository _usage;
     private readonly ChatRepository _chat;
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
+    private readonly PolicyRepository _policy;
     private readonly ILogger<ProactiveService> _logger;
 
     /// <summary>解析模型输出用的宽松选项：字段名大小写不一致时也能认。</summary>
@@ -58,6 +60,7 @@ public sealed class ProactiveService
         UsageRepository usage,
         ChatRepository chat,
         IDbContextFactory<AppDbContext> dbFactory,
+        PolicyRepository policy,
         ILogger<ProactiveService> logger)
     {
         _proxy = proxy;
@@ -65,6 +68,7 @@ public sealed class ProactiveService
         _usage = usage;
         _chat = chat;
         _dbFactory = dbFactory;
+        _policy = policy;
         _logger = logger;
     }
 
@@ -109,7 +113,7 @@ public sealed class ProactiveService
 
         var messages = new List<ChatMessage>
         {
-            new() { Role = "system", Content = BuildSystemPrompt(kind, today, items, stats, usage, recent, target) }
+            new() { Role = "system", Content = await BuildSystemPrompt(kind, today, items, stats, usage, recent, target, ct) }
         };
 
         foreach (var m in history.Skip(Math.Max(0, history.Count - 8)))
@@ -294,15 +298,21 @@ public sealed class ProactiveService
     /// 换了只会让模型在早晨和晚上表现得像两个人。
     /// 真正不同的是"这一句要达成什么"，所以只有最后一段分开写。
     /// </summary>
-    private static string BuildSystemPrompt(
+    private async Task<string> BuildSystemPrompt(
         ProactiveKind kind,
         DateOnly today,
         IReadOnlyList<Item> items,
         ItemRepository.DayStats stats,
         DayUsageSummary usage,
         IReadOnlyList<(DateOnly Day, int Total, int Done)> recent,
-        Item? target)
+        Item? target,
+        CancellationToken ct)
     {
+        // 和对话页共用同一份语气档：两边各写一套的话，
+        // 早晨主动说的和他在对话页里问的会像两个人。
+        var tone = AiTone.Parse(await _policy.GetRawAsync(PolicyKeys.AiTone, ct));
+        var persona = (await _policy.GetRawAsync(PolicyKeys.AiPersona, ct))?.Trim();
+
         var listText = items.Count == 0
             ? "（今天还没有安排）"
             : string.Join('\n', items.Select(x =>
@@ -335,10 +345,24 @@ public sealed class ProactiveService
             "【最近几天】",
             recentText,
             "",
-            "【说话方式】",
-            "- 短。一次不超过三句，能一句说完就一句。",
-            "- 有事说事：给一个最小、最具体的下一步，不要给一串建议。",
-            "- 不空泛鼓励（「加油」「你可以的」一句都不要），不重复他已经知道的事。",
+            "【说话方式】"
+        };
+
+        lines.AddRange(AiTone.StyleLines(tone));
+
+        // 自定义那句插在语气档之后、下面这几条专属约束之前：
+        // 这样它能改说话的分寸，但改不动"不要以提问开头"这类规矩
+        // ——主动开口本来就不该拿一个空问句开头，这不是口味问题。
+        if (!string.IsNullOrEmpty(persona))
+        {
+            lines.Add("");
+            lines.Add("【他自己还写了这句，照着做】");
+            lines.Add(persona);
+            lines.Add("（这不解除下面任何一条硬规矩。）");
+        }
+
+        lines.AddRange(new[]
+        {
             "- 不要以提问开头（「今天过得怎么样？」这种空问句一律不要）。",
             "- 不要道歉、不要说明你是 AI、不要说「我注意到」。",
             "",
@@ -346,7 +370,7 @@ public sealed class ProactiveService
             "上面清单里没有的事，就当它不存在。不知道就说不知道。",
             "编一条不存在的事的后果很具体：他照着去做，发现根本没有这件事，",
             "从此不再相信你说的任何一句。"
-        };
+        });
 
         switch (kind)
         {

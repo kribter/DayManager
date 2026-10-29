@@ -39,6 +39,30 @@ public static class PolicyKeys
     /// </summary>
     public const string AppTheme = "app.theme";
 
+    /// <summary>
+    /// AI 说话的语气档。"reserved"（默认）/ "warm" / "direct"，取值见 <see cref="Core.Ai.AiTone"/>。
+    ///
+    /// 【为什么要能改，而不是我们替他定死一种】
+    /// "AI 该怎么跟我说话"是口味问题，而口味会变：
+    /// 某段时间想听两句人话，另一段时间一句多余的话都是骚扰。
+    /// 定死一种等于替他做会反悔的决定，所以他自己在时间页切，切完下一次对话就生效。
+    /// </summary>
+    public const string AiTone = "ai.tone";
+
+    /// <summary>
+    /// 他自己写的一句话人设（可空）。比如"像个一起熬夜的朋友，别叫我加油"。
+    ///
+    /// 【为什么除了三档还要留一个能自己写的地方】
+    /// 三档是我们猜的，猜不全。而"我希望它怎么跟我说话"这件事，
+    /// 每个人心里那句话都不一样，让他自己写比我们再猜十档有用。
+    ///
+    /// 【为什么它是补充而不是覆盖】
+    /// 这句话插在语气档之后、硬约束之前，能改说话的分寸，
+    /// 但改不动输出格式和不许编造这类规矩——那些排在它后面，对模型的约束力更强。
+    /// 他要的是调口味，不是让 AI 不干活。
+    /// </summary>
+    public const string AiPersona = "ai.persona";
+
     /// <summary>AI 主动开口的总开关。"true" / "false"，默认开。</summary>
     public const string ProactiveEnabled = "proactive.enabled";
 

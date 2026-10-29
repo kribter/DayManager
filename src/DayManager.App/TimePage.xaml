@@ -436,6 +436,51 @@
                     </VerticalStackLayout>
                 </Border>
 
+                <!-- ================= AI 怎么说话 =================
+
+                     【为什么这里要放三档，外加一个能自己写一句的地方】
+                     "AI 该怎么跟我说话"是口味问题，而口味会变：
+                     某段时间想听两句人话，另一段时间一句多余的话都是骚扰。
+                     定死一种等于替他做一个他每隔一阵就会反悔的决定。
+                     三档是我们猜的，猜不全——他心里那句话往往比我们设计的任何一档都准，
+                     所以再留一个能自己写的口子。 -->
+                <Border Grid.Row="0"
+                        Style="{StaticResource CardStyle}"
+                        Margin="0,12,0,0"
+                        Padding="16,14">
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="12" />
+                    </Border.StrokeShape>
+
+                    <VerticalStackLayout Spacing="8">
+                        <Label Text="AI 怎么说话"
+                               Style="{StaticResource CardTitle}" />
+
+                        <HorizontalStackLayout Spacing="16">
+                            <RadioButton Content="克制"
+                                         GroupName="AiTone"
+                                         IsChecked="{Binding IsToneReserved}" />
+                            <RadioButton Content="温和"
+                                         GroupName="AiTone"
+                                         IsChecked="{Binding IsToneWarm}" />
+                            <RadioButton Content="直接"
+                                         GroupName="AiTone"
+                                         IsChecked="{Binding IsToneDirect}" />
+                        </HorizontalStackLayout>
+
+                        <Label Text="{Binding ToneHint}"
+                               Style="{StaticResource Caption}" />
+
+                        <!-- 失焦才存：每敲一个字写一次库会把一行设置变成几十行垃圾。 -->
+                        <Entry Placeholder="还可以自己写一句，比如：像个一起熬夜的朋友，别叫我加油"
+                               Text="{Binding AiPersona}"
+                               Unfocused="OnPersonaUnfocused" />
+
+                        <Label Text="下一句话就生效，不用重启。它改得了说话的分寸，改不了格式和那些硬规矩。"
+                               Style="{StaticResource Caption}" />
+                    </VerticalStackLayout>
+                </Border>
+
                 <!-- ================= 后台与开机 =================
 
                      【为什么这一块必须摆出来】

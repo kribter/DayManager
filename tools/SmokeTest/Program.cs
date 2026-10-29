@@ -1,6 +1,7 @@
 // 临时冒烟测试：验证 ItemRepository 的核心逻辑是否按预期工作。
 // 刻意用一个独立的临时数据库文件，不碰用户真实的数据。
 
+using DayManager.Core.Ai;
 using DayManager.Core.Entities;
 using DayManager.Core.Enums;
 using DayManager.Core.Intervention;
@@ -1252,6 +1253,31 @@ Console.WriteLine("=== 22. AI 主动开口：什么时候该说话 ===");
     });
     Check("早晨和日程前撞车时，先说更急的那件",
         both.Kind == ProactiveKind.Before, both.Kind.ToString());
+}
+
+// ---- AI 说话的语气档 ----
+//
+// 【为什么这几条值得测】
+// 提示词的措辞改错了没有任何报错：AI 说话变味了，不进日志、不崩，
+// 只能靠读它说的话才能发现。放到 Core 之后，这几条能兜住
+// "档位解析退化了""三档文案被改成一模一样""底线条款被删掉"这三类失误。
+{
+    Check("没设过语气时退回克制档", AiTone.Parse(null) == AiTone.Reserved);
+    Check("库里写坏了也退回克制档", AiTone.Parse("  瞎写的 ") == AiTone.Reserved);
+    Check("大小写和空格不影响识别", AiTone.Parse(" Warm ") == AiTone.Warm);
+
+    var reserved = AiTone.StyleLines(AiTone.Reserved);
+    var warm = AiTone.StyleLines(AiTone.Warm);
+    var direct = AiTone.StyleLines(AiTone.Direct);
+
+    Check("三档文案都非空", reserved.Count > 0 && warm.Count > 0 && direct.Count > 0);
+    Check("三档文案互不相同",
+        !reserved.SequenceEqual(warm) && !warm.SequenceEqual(direct) && !reserved.SequenceEqual(direct));
+
+    // 这条是底线：温度可以调，"不许挖苦、不许审判"不能调。
+    // 空泛鼓励只在温和档里被明令禁止（直接档是压根不给鼓励），所以只查这一条。
+    Check("每一档都守着不许挖苦这条底线",
+        new[] { reserved, warm, direct }.All(x => x.Any(l => l.Contains("不许挖苦"))));
 }
 
 Console.WriteLine();

@@ -89,6 +89,9 @@ builder.Services.AddSingleton<DayManager.Data.Repositories.ActionLogRepository>(
 builder.Services.AddSingleton<DayManager.Data.Repositories.UsageRepository>();
 builder.Services.AddSingleton<DayManager.Data.Repositories.ChatRepository>();
 
+// AI 说话的语气和自定义人设存在这张表里（时间页改，后端读）。
+builder.Services.AddSingleton<DayManager.Data.Repositories.PolicyRepository>();
+
 // AI 主动开口：它要自己读今天排了什么、做了多少、娱乐多久、昨天聊过什么。
 builder.Services.AddSingleton<ProactiveService>();
 

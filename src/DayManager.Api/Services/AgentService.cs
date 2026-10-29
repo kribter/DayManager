@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using DayManager.Api.Models;
+using DayManager.Core.Ai;
 using DayManager.Core.Enums;
 using DayManager.Core.Planning;
 using DayManager.Data.Repositories;
@@ -28,6 +29,7 @@ public sealed class AgentService
     private readonly AiProxy _proxy;
     private readonly ItemTools _tools;
     private readonly ItemRepository _items;
+    private readonly PolicyRepository _policy;
     private readonly ILogger<AgentService> _logger;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -78,11 +80,13 @@ public sealed class AgentService
         AiProxy proxy,
         ItemTools tools,
         ItemRepository items,
+        PolicyRepository policy,
         ILogger<AgentService> logger)
     {
         _proxy = proxy;
         _tools = tools;
         _items = items;
+        _policy = policy;
         _logger = logger;
     }
 
@@ -120,7 +124,7 @@ public sealed class AgentService
 
         var messages = new List<ChatMessage>
         {
-            new() { Role = "system", Content = BuildSystemPrompt(day, items, stats, upcoming) }
+            new() { Role = "system", Content = await BuildSystemPrompt(day, items, stats, upcoming, ct) }
         };
 
         // 只带最近几轮历史：全部带上的话，聊久了 token 会失控，
@@ -306,12 +310,18 @@ public sealed class AgentService
     /// 用户以为只是今天不做，结果那条任务再也不出现了——
     /// 这是最伤人的一类错误，因为它表现为"软件帮我弄丢了事情"。
     /// </summary>
-    private static string BuildSystemPrompt(
+    private async Task<string> BuildSystemPrompt(
         DateOnly day,
         IReadOnlyList<DayManager.Core.Entities.Item> items,
         ItemRepository.DayStats stats,
-        IReadOnlyList<DayList> upcoming)
+        IReadOnlyList<DayList> upcoming,
+        CancellationToken ct)
     {
+        // 语气是用户自己选的，每次拼提示词时现读——
+        // 他在时间页切完档，下一条对话就是新的说法，不需要重启任何东西。
+        var tone = AiTone.Parse(await _policy.GetRawAsync(PolicyKeys.AiTone, ct));
+        var persona = (await _policy.GetRawAsync(PolicyKeys.AiPersona, ct))?.Trim();
+
         var listText = items.Count == 0
             ? "（今天还没有安排）"
             : string.Join('\n', items.Select(x =>
@@ -366,11 +376,25 @@ public sealed class AgentService
             "空的那几天写着「空」，那是真的没有安排，不是没查到。",
             upcomingText,
             "",
-            "【说话方式】",
-            "- 短。一次不超过三句。他不会读长文字。",
-            "- 不重复他已经知道的事，不空泛鼓励（「加油」「你可以的」这类话一句都不要）。",
-            "- 有事说事：给他一个最小、最具体的下一步。",
-            "- 连续几天完成率低时可以直接严肃，但**不许挖苦、不许审判**。",
+            "【说话方式】"
+        };
+
+        lines.AddRange(AiTone.StyleLines(tone));
+
+        // 【为什么自定义那句插在这里，而不是插在最前面】
+        // 模型对**靠后**的指令权重更高。放在语气档之后，它能改说话的分寸；
+        // 而输出格式、不许编造、不许挖苦这些硬规矩排在它后面，约束力更强。
+        // 他要的是调口味，不是让 AI 不干活——这个顺序让两件事各自成立。
+        if (!string.IsNullOrEmpty(persona))
+        {
+            lines.Add("");
+            lines.Add("【他自己还写了这句，照着做】");
+            lines.Add(persona);
+            lines.Add("（这不解除下面任何一条硬规矩。）");
+        }
+
+        lines.AddRange(new[]
+        {
             "",
             "【两件事分开写，这是最容易出错的地方】",
             "- **think**（只有你看得到）：你在想什么、他这句话什么意思、你打算怎么答。",
@@ -453,7 +477,7 @@ public sealed class AgentService
             "- 没什么可猜的（比如他只是在陈述一件事）就不给，留空数组。",
             "",
             "think 是必填的：先想清楚再说话，想到的东西放在那里，别放进 reply。"
-        };
+        });
 
         return string.Join('\n', lines);
     }

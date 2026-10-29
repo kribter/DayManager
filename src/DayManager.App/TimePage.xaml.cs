@@ -55,4 +55,20 @@ public partial class TimePage : ContentPage
         _chart.Bars = _viewModel.Bars;
         Chart.Invalidate();
     }
+
+    /// <summary>
+    /// 人设输入框失焦时存一次。
+    ///
+    /// 【为什么挂在失焦而不是 TextChanged】
+    /// 每敲一个字写一次库，一行设置会变成几十行垃圾；
+    /// 而失焦正好是"人打完了"的时刻。代价是中途切走会丢最后几个字——
+    /// 一句话的人设，这个代价可以接受。
+    /// </summary>
+    private void OnPersonaUnfocused(object? sender, FocusEventArgs e)
+    {
+        if (_viewModel.SavePersonaCommand.CanExecute(null))
+        {
+            _viewModel.SavePersonaCommand.Execute(null);
+        }
+    }
 }

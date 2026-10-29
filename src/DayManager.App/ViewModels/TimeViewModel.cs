@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using DayManager.App.Services;
+using DayManager.Core.Ai;
 using DayManager.Core.Enums;
 using DayManager.Core.Intervention;
 using DayManager.Data.Repositories;
@@ -518,6 +519,86 @@ public partial class TimeViewModel : ObservableObject
         _suppressThemeApply = false;
     }
 
+    // ==================== AI 怎么说话 ====================
+
+    /// <summary>
+    /// 三档语气，和主题那三个圆点同一套做法。
+    ///
+    /// 【为什么这三档的共同底线是"不许挖苦、不许空泛鼓励"】
+    /// 这不是口味问题：为了对抗逃避而做的软件里，
+    /// "你怎么又没做"和"加油你可以的"是同一种东西的两面——都是不看你究竟做了什么。
+    /// 三档只调温度，不调这条底线。具体措辞见 <see cref="AiTone"/>。
+    /// </summary>
+    [ObservableProperty]
+    public partial bool IsToneReserved { get; set; } = true;
+
+    [ObservableProperty]
+    public partial bool IsToneWarm { get; set; }
+
+    [ObservableProperty]
+    public partial bool IsToneDirect { get; set; }
+
+    /// <summary>他自己写的那句人设。可空；写完输入框失焦就存。</summary>
+    [ObservableProperty]
+    public partial string AiPersona { get; set; } = string.Empty;
+
+    private string CurrentTone =>
+        IsToneWarm ? AiTone.Warm
+        : IsToneDirect ? AiTone.Direct
+        : AiTone.Reserved;
+
+    public string ToneText => AiTone.DisplayName(CurrentTone);
+
+    public string ToneHint => AiTone.Description(CurrentTone);
+
+    private bool _suppressToneApply;
+
+    partial void OnIsToneReservedChanged(bool value) => OnTonePicked(AiTone.Reserved, value);
+
+    partial void OnIsToneWarmChanged(bool value) => OnTonePicked(AiTone.Warm, value);
+
+    partial void OnIsToneDirectChanged(bool value) => OnTonePicked(AiTone.Direct, value);
+
+    private void OnTonePicked(string tone, bool value)
+    {
+        OnPropertyChanged(nameof(ToneText));
+        OnPropertyChanged(nameof(ToneHint));
+
+        if (!value || _suppressToneApply)
+        {
+            return;
+        }
+
+        // 存库而不是只改内存：后端每次拼提示词时从这张表里读，
+        // 不落库的话下一次开机（或后端重启）又变回克制档。
+        _ = SavePolicyAsync(PolicyKeys.AiTone, tone);
+    }
+
+    private void SelectToneOnly(string tone)
+    {
+        _suppressToneApply = true;
+        IsToneReserved = tone == AiTone.Reserved;
+        IsToneWarm = tone == AiTone.Warm;
+        IsToneDirect = tone == AiTone.Direct;
+        _suppressToneApply = false;
+
+        OnPropertyChanged(nameof(ToneText));
+        OnPropertyChanged(nameof(ToneHint));
+    }
+
+    /// <summary>
+    /// 存自定义那句人设。
+    ///
+    /// 【为什么是失焦才存，而不是每敲一个字存一次】
+    /// 每敲一下写一次库，一行设置会变成几十行垃圾；
+    /// 而输入框失焦正好是人打完一句话的自然时机，写一次就够。
+    /// </summary>
+    [RelayCommand]
+    private async Task SavePersonaAsync()
+    {
+        await SavePolicyAsync(PolicyKeys.AiPersona, (AiPersona ?? string.Empty).Trim());
+    }
+
     /// <summary>
     /// 正在把库里的值写进界面。
     ///
@@ -596,10 +677,14 @@ public partial class TimeViewModel : ObservableObject
             var threshold = await _policy.GetIntAsync(PolicyKeys.ThresholdMinutes, 30);
             var closeToTray = await _policy.GetBoolAsync(PolicyKeys.CloseToTray, true);
             var proactive = await _policy.GetBoolAsync(PolicyKeys.ProactiveEnabled, true);
+            var tone = AiTone.Parse(await _policy.GetRawAsync(PolicyKeys.AiTone));
+            var persona = await _policy.GetRawAsync(PolicyKeys.AiPersona);
 
             _suppressPolicySave = true;
             IsReminderOn = enabled;
             SelectThemeOnly(_theme.Mode);
+            SelectToneOnly(tone);
+            AiPersona = persona ?? string.Empty;
             ThresholdMinutes = threshold;
             IsCloseToTray = closeToTray;
             IsProactiveOn = proactive;
