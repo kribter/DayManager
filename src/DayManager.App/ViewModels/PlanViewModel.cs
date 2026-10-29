@@ -28,6 +28,7 @@ public partial class PlanViewModel : ObservableObject
     private readonly ProjectRepository _projects;
     private readonly ApiClient _api;
     private readonly BackendGuard _guard;
+    private readonly AiSettings _ai;
 
     private SpreadingResult? _spread;
 
@@ -38,12 +39,14 @@ public partial class PlanViewModel : ObservableObject
         TaskDecomposer decomposer,
         ProjectRepository projects,
         ApiClient api,
-        BackendGuard guard)
+        BackendGuard guard,
+        AiSettings ai)
     {
         _decomposer = decomposer;
         _projects = projects;
         _api = api;
         _guard = guard;
+        _ai = ai;
 
         Deadline = DateTime.Today.AddDays(7);
         DailyMinutes = PlanSpreader.DefaultDailyMinutes;
@@ -211,12 +214,17 @@ public partial class PlanViewModel : ObservableObject
 
     private void ApplyHealth(HealthResult health)
     {
-        IsServerReady = health.Ok && health.AiReady;
+        // 密钥改成界面填之后，服务端配置里那把是刻意留空的；
+        // 时间页填的那把会随每次请求带上，同样算就绪。
+        var aiUsable = health.AiReady || _ai.HasKey;
+        IsServerReady = health.Ok && aiUsable;
 
         StatusText = health.Ok
-            ? health.AiReady
-                ? $"已连上后端，AI 就绪（{health.Provider} / {health.Model}）"
-                : "后端在线，但 AI 还没配好。检查后端 appsettings.Local.json 里的 Ai:ApiKey。"
+            ? aiUsable
+                ? health.AiReady
+                    ? $"已连上后端，AI 就绪（{health.Provider} / {health.Model}）"
+                    : "已连上后端，AI 就绪（用你在时间页填的密钥）"
+                : "后端在线，但 AI 密钥还没填。到时间页的「AI 接入」里填一下。"
             : $"连不上后端：{health.ErrorMessage}";
     }
 

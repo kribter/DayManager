@@ -47,6 +47,7 @@ public sealed class ProactiveNudgeService : IDisposable
     private readonly PolicyRepository _policy;
     private readonly ApiClient _api;
     private readonly BackendGuard _guard;
+    private readonly AiSettings _ai;
     private readonly IInterventionNotifier? _notifier;
 
     private Timer? _timer;
@@ -65,6 +66,7 @@ public sealed class ProactiveNudgeService : IDisposable
         PolicyRepository policy,
         ApiClient api,
         BackendGuard guard,
+        AiSettings ai,
         IInterventionNotifier? notifier = null)
     {
         _items = items;
@@ -72,6 +74,7 @@ public sealed class ProactiveNudgeService : IDisposable
         _policy = policy;
         _api = api;
         _guard = guard;
+        _ai = ai;
         _notifier = notifier;
 
         if (_notifier is not null)
@@ -222,9 +225,12 @@ public sealed class ProactiveNudgeService : IDisposable
             return string.Empty;
         }
 
-        if (!health.AiReady)
+        // 密钥改成界面填之后，服务端那份是刻意留空的；客户端填的那把
+        // 会随下面的请求带上，同样算就绪。这里拦错一次的代价是
+        // "该开口的晚上一次都没说"，所以要宽松而不是严格。
+        if (!health.AiReady && !_ai.HasKey)
         {
-            SetStatus("后端在，但 AI 没配好（appsettings.Local.json 里缺 key）");
+            SetStatus("后端在，但 AI 密钥还没填（时间页「AI 接入」）");
             await MarkAttemptedAsync(markAsFired, false, kind, today, decision.ItemId);
             return string.Empty;
         }

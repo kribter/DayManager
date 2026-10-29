@@ -52,15 +52,17 @@ public partial class ChatViewModel : ObservableObject
     private readonly ApiClient _api;
     private readonly BackendGuard _guard;
     private readonly ChatRepository _chat;
+    private readonly AiSettings _ai;
 
     /// <summary>历史只加载一次。切 Tab 回来时 Shell 会再触发，重复加载会把列表翻倍。</summary>
     private bool _loaded;
 
-    public ChatViewModel(ApiClient api, BackendGuard guard, ChatRepository chat)
+    public ChatViewModel(ApiClient api, BackendGuard guard, ChatRepository chat, AiSettings ai)
     {
         _api = api;
         _guard = guard;
         _chat = chat;
+        _ai = ai;
 
         StatusText = "还没说话";
 
@@ -362,11 +364,17 @@ public partial class ChatViewModel : ObservableObject
 
             IsServerReady = true;
 
-            if (!health.AiReady)
+            // 【为什么不能只看 health.AiReady】
+            // 那是"服务端配置文件里有没有 key"——密钥改成界面填之后，
+            // 服务端那份是刻意留空的（否则打包发出去等于送钥匙）。
+            // 真正的问题是"这次请求有没有钥匙可用"：服务端有，或
+            // 时间页填的那把会随请求带上，都算就绪。真填错了，上游的
+            // 401 会顺着这条链路显示出来，比在这里猜更准。
+            if (!health.AiReady && !_ai.HasKey)
             {
                 Messages.Add(ChatBubble.System(
-                    "后端起来了，但 AI 还没配好（appsettings.Local.json 里缺 Ai:ApiKey）。"));
-                StatusText = "AI 没配好";
+                    "还没有 AI 密钥。到时间页的「AI 接入」里填上你自己的密钥（填完点「保存并试一下」就能验证）。"));
+                StatusText = "AI 密钥没填";
                 return;
             }
 
@@ -552,13 +560,15 @@ public partial class ChatViewModel : ObservableObject
     private async Task CheckServerAsync()
     {
         var health = await _guard.EnsureAsync(s => StatusText = s);
-        IsServerReady = health.Ok && health.AiReady;
+        IsServerReady = health.Ok && (health.AiReady || _ai.HasKey);
 
         StatusText = !health.Ok
             ? $"连不上后端：{health.ErrorMessage}"
-            : !health.AiReady
-                ? "后端起来了，AI 还没配好"
-                : "准备好了";
+            : !IsServerReady
+                ? "后端起来了，AI 密钥还没填（时间页「AI 接入」）"
+                : health.AiReady
+                    ? "准备好了"
+                    : "准备好了（用你填的密钥）";
     }
 }
 
