@@ -14,6 +14,9 @@ public sealed class AgentChatRequest
     /// 否则会出现"我说明天的事，它却去改了今天"的错位。
     /// </summary>
     public DateOnly? Today { get; set; }
+
+    /// <summary>本次请求自带的密钥 / 接口地址 / 模型。见 <see cref="AiOverride"/> 的说明。</summary>
+    public AiOverride? Ai { get; set; }
 }
 
 /// <summary>
@@ -35,6 +38,9 @@ public sealed class ProactiveRequest
 
     /// <summary>"今天"是哪一天（yyyy-MM-dd）。可空，默认服务端当天。</summary>
     public DateOnly? Today { get; set; }
+
+    /// <summary>本次请求自带的密钥 / 接口地址 / 模型。见 <see cref="AiOverride"/> 的说明。</summary>
+    public AiOverride? Ai { get; set; }
 }
 
 /// <summary>手工新建一条（不经 AI）。</summary>

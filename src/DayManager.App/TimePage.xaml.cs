@@ -71,4 +71,20 @@ public partial class TimePage : ContentPage
             _viewModel.SavePersonaCommand.Execute(null);
         }
     }
+
+    /// <summary>
+    /// 密钥那几个输入框失焦即存。
+    ///
+    /// 【为什么不用按钮才存】
+    /// 三个输入框共用一个统一的时机比让人记住"要点保存"简单；
+    /// 而它们是空的操作不需要网络，落一次注册表没有副作用。
+    /// 真正的验证留给"保存并试一下"那个按钮——那是要花钱的。
+    /// </summary>
+    private void OnAiKeyUnfocused(object? sender, FocusEventArgs e)
+    {
+        if (_viewModel.SaveAiCommand.CanExecute(null))
+        {
+            _viewModel.SaveAiCommand.Execute(null);
+        }
+    }
 }

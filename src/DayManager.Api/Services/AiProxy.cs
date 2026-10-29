@@ -48,27 +48,42 @@ public sealed class AiProxy
         // 在调试 AI 提示词的时候，这个差别是"每次都重启一遍"和"改完直接重试"的区别。
         var opt = _options.CurrentValue;
 
-        if (string.IsNullOrWhiteSpace(opt.ApiKey))
+        // 请求里带了密钥/地址/模型就用请求里的，没带才用服务端配置的那份。
+        // 【为什么要有这条"外交部级"的覆盖】
+        // 服务端配置是"一个人在自己机器上跑"的用法；把软件发给别人时，
+        // 别人的密钥不能（也不该）写进服务端文件——那样分发包里就带着我的凭据。
+        // 所以密钥由使用者在自己的界面里填，随请求带来，这里取出来用一次。
+        // 它不会被写进任何文件、不会进日志、不会出现在响应里。
+        var apiKey = string.IsNullOrWhiteSpace(request.Ai?.ApiKey) ? opt.ApiKey : request.Ai.ApiKey;
+        var baseUrl = string.IsNullOrWhiteSpace(request.Ai?.BaseUrl) ? opt.BaseUrl : request.Ai.BaseUrl;
+        var model = string.IsNullOrWhiteSpace(request.Ai?.Model) ? opt.Model : request.Ai.Model;
+
+        if (string.IsNullOrWhiteSpace(apiKey))
         {
             // 明确告诉使用者去哪里配，而不是抛一个看不懂的异常。
             // 这里的 503（服务不可用）比 500 准确：不是程序出错，是还没配好。
+            //
+            // 【为什么提示语改成"去界面里填"】
+            // 服务端文件里不再预置任何密钥（否则打包分发出去等于送人额度），
+            // 所以"服务端尚未配置"这句话对使用者已经没有行动指引了——
+            // 他唯一该去的入口是时间页那张卡。
             return AiProxyResult.Fail(
                 StatusCodes.Status503ServiceUnavailable,
-                "{\"error\":\"服务端尚未配置 Ai:ApiKey。请把密钥写进 appsettings.Local.json（该文件已被 git 忽略），不要写进代码或 appsettings.json。\"}");
+                "{\"error\":\"还没有 AI 密钥。到时间页的「AI 接入」里填上你自己的密钥，或者让服务端在 appsettings.Local.json 配 Ai:ApiKey。\"}");
         }
 
-        if (string.IsNullOrWhiteSpace(opt.BaseUrl))
+        if (string.IsNullOrWhiteSpace(baseUrl))
         {
             return AiProxyResult.Fail(
                 StatusCodes.Status503ServiceUnavailable,
-                "{\"error\":\"服务端尚未配置 Ai:BaseUrl。\"}");
+                "{\"error\":\"还没有 AI 接口地址。默认用 DeepSeek，可以在时间页的「AI 接入」里改。\"}");
         }
 
         // ---------- 拼上游请求体 ----------
 
         var payload = new Dictionary<string, object?>
         {
-            ["model"] = opt.Model,
+            ["model"] = model,
             ["messages"] = (request.Messages ?? new List<ChatMessage>())
                 .Select(m => new { role = m.Role, content = m.Content })
                 .ToArray(),
@@ -98,15 +113,15 @@ public sealed class AiProxy
         var client = _httpClientFactory.CreateClient();
         client.Timeout = TimeSpan.FromSeconds(opt.TimeoutSeconds <= 0 ? 180 : opt.TimeoutSeconds);
 
-        var url = opt.BaseUrl.TrimEnd('/') + "/" + opt.ChatPath.TrimStart('/');
+        var url = baseUrl.TrimEnd('/') + "/" + opt.ChatPath.TrimStart('/');
 
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, url)
         {
             Content = JsonContent.Create(payload, options: JsonOpts)
         };
 
-        // 密钥唯一的出场位置。
-        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", opt.ApiKey);
+        // 密钥唯一的出场位置。注意不要把它塞进任何日志或异常消息里。
+        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
         HttpResponseMessage response;
         try

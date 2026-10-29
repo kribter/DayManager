@@ -229,7 +229,7 @@ app.MapPost("/api/ai/agent", async Task<IResult> (
         return Results.BadRequest(new { error = "messages 不能为空" });
     }
 
-    var result = await agent.ChatAsync(request.Messages, request.Today, cancellationToken);
+    var result = await agent.ChatAsync(request.Messages, request.Today, request.Ai, cancellationToken);
 
     // 【为什么失败也返回 200】
     // 这一轮的失败（模型输出不合法、某个动作没执行成）大部分是可以重试的，
@@ -260,7 +260,7 @@ app.MapPost("/api/ai/proactive", async Task<IResult> (
     }
 
     var today = request.Today ?? DateOnly.FromDateTime(DateTime.Now);
-    var result = await proactive.SpeakAsync(kind, request.ItemId, today, cancellationToken);
+    var result = await proactive.SpeakAsync(kind, request.ItemId, today, request.Ai, cancellationToken);
 
     // 【为什么失败也返回 200】
     // 和 /api/ai/agent 同一个道理：说不出话是"这次没说"，不是网络故障。

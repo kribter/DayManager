@@ -36,6 +36,8 @@ public partial class TimeViewModel : ObservableObject
     private readonly UsageRepository _usage;
     private readonly PolicyRepository _policy;
     private readonly AppRuleRepository _rules;
+    private readonly AiSettings _ai;
+    private readonly ApiClient? _api;
 
     /// <summary>
     /// 干预引擎。**可空**：它依赖采集器和系统通知，而这两样只有 Windows 端有。
@@ -95,7 +97,9 @@ public partial class TimeViewModel : ObservableObject
         IWindowShell? shell = null,
         IAutoStartService? autoStart = null,
         ProactiveNudgeService? proactive = null,
-        ThemeService? theme = null)
+        ThemeService? theme = null,
+        AiSettings? ai = null,
+        ApiClient? api = null)
     {
         _usage = usage;
         _policy = policy;
@@ -105,6 +109,8 @@ public partial class TimeViewModel : ObservableObject
         _autoStart = autoStart;
         _proactive = proactive;
         _theme = theme ?? new ThemeService(policy);
+        _ai = ai ?? AiSettings.Load();
+        _api = api;
 
         if (_proactive is not null)
         {
@@ -599,6 +605,99 @@ public partial class TimeViewModel : ObservableObject
         await SavePolicyAsync(PolicyKeys.AiPersona, (AiPersona ?? string.Empty).Trim());
     }
 
+    // ==================== AI 接入（密钥） ====================
+
+    /// <summary>
+    /// 密钥输入框里的内容。**注意它只在内存里和 Preferences（注册表）里**，
+    /// 不会被写进任何随程序目录分发的配置文件。
+    /// </summary>
+    [ObservableProperty]
+    public partial string AiKeyInput { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string AiBaseUrlInput { get; set; } = AiSettings.DefaultBaseUrl;
+
+    [ObservableProperty]
+    public partial string AiModelInput { get; set; } = AiSettings.DefaultModel;
+
+    [ObservableProperty]
+    public partial string AiStatusText { get; set; } = "还没填密钥";
+
+    [ObservableProperty]
+    public partial bool AiStatusOk { get; set; }
+
+    [ObservableProperty]
+    public partial bool IsTestingAi { get; set; }
+
+    public string AiTestButtonText => IsTestingAi ? "正在试…" : "保存并试一下";
+
+    /// <summary>把界面上的三行写回 Preferences。</summary>
+    [RelayCommand]
+    private void SaveAi()
+    {
+        _ai.ApiKey = (AiKeyInput ?? string.Empty).Trim();
+        _ai.BaseUrl = (AiBaseUrlInput ?? string.Empty).Trim();
+        _ai.Model = (AiModelInput ?? string.Empty).Trim();
+        _ai.Save();
+
+        AiStatusText = _ai.HasKey ? "已保存。点右边的按钮试一下能不能通。" : "密钥还没填。";
+        AiStatusOk = false;
+    }
+
+    /// <summary>
+    /// 真的发一条最小的请求，确认这条路走得通。
+    ///
+    /// 【为什么要真发一条，而不是只看"填了没有"】
+    /// 密钥错一位也能填进去。填完以为能用、到真要用的时候才发现不对，
+    /// 那次失败正好发生在他开口说正事的当下——最打击人的时机。
+    /// 一个字的请求只花几分钱，换"填完就知道能不能用"，值。
+    /// </summary>
+    [RelayCommand]
+    private async Task TestAiAsync()
+    {
+        SaveAi();
+
+        if (_api is null)
+        {
+            AiStatusText = "后端还没连上，稍等几秒再试。";
+            return;
+        }
+
+        if (!_ai.HasKey)
+        {
+            AiStatusText = "先填密钥再试。";
+            return;
+        }
+
+        IsTestingAi = true;
+        AiStatusText = "正在试…";
+        OnPropertyChanged(nameof(AiTestButtonText));
+
+        try
+        {
+            var reply = await _api.ChatAsync(
+                new List<ChatMessageDto> { new() { Role = "user", Content = "只回一个字：好" } },
+                jsonMode: false,
+                maxTokens: 8);
+
+            AiStatusOk = reply.Success;
+            AiStatusText = reply.Success
+                ? $"通了（{reply.Model ?? "已连接"}）。回对话页说句话试试。"
+                : reply.ErrorMessage ?? "没通过，看看密钥对不对。";
+        }
+        catch (Exception ex)
+        {
+            AiStatusOk = false;
+            AiStatusText = "连不上后端。";
+            CrashLogger.Write("测试 AI 密钥", ex);
+        }
+        finally
+        {
+            IsTestingAi = false;
+            OnPropertyChanged(nameof(AiTestButtonText));
+        }
+    }
+
     /// <summary>
     /// 正在把库里的值写进界面。
     ///
@@ -685,6 +784,16 @@ public partial class TimeViewModel : ObservableObject
             SelectThemeOnly(_theme.Mode);
             SelectToneOnly(tone);
             AiPersona = persona ?? string.Empty;
+
+            // 密钥属于"连接设置"，不进 policy_settings：那张表在数据库里，
+            // 而数据库是要能被拷给别人看数据的——密钥绝不能搭这趟车。
+            AiKeyInput = _ai.ApiKey;
+            AiBaseUrlInput = _ai.BaseUrl;
+            AiModelInput = _ai.Model;
+            AiStatusOk = _ai.HasKey;
+            AiStatusText = _ai.HasKey
+                ? $"已保存（{AiSettings.Mask(_ai.ApiKey)}）。回对话页说句话就是它在回答。"
+                : "还没填密钥，AI 现在没法回答。";
             ThresholdMinutes = threshold;
             IsCloseToTray = closeToTray;
             IsProactiveOn = proactive;

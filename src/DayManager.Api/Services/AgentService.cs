@@ -96,6 +96,7 @@ public sealed class AgentService
     public async Task<AgentResult> ChatAsync(
         IReadOnlyList<ChatMessage> history,
         DateOnly? today = null,
+        AiOverride? ai = null,
         CancellationToken ct = default)
     {
         var day = today ?? DateOnly.FromDateTime(DateTime.Now);
@@ -159,6 +160,9 @@ public sealed class AgentService
         {
             Messages = messages,
             JsonMode = true,
+            // 把调用者带来的密钥/地址/模型一路带下去：
+            // 服务端自己未必配了密钥（分发时不能带），这条链路是唯一的来源。
+            Ai = ai,
             // 【为什么 max_tokens 必须给足】
             // V4 系列会先消耗 reasoning token，再输出正式内容。
             // 给小了的表现不是报错，而是"调用成功但内容是空的"——

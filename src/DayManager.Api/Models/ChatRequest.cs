@@ -36,6 +36,35 @@ public sealed class ChatRequest
     /// 这比在提示词里恳求它"请只返回 JSON"可靠得多。
     /// </summary>
     public bool JsonMode { get; set; }
+
+    /// <summary>
+    /// 本次请求自带的密钥 / 接口地址 / 模型。
+    ///
+    /// 【为什么允许请求临时带密钥，而不是只从服务端文件读】
+    /// 这个软件是要能发给别人用的。密钥如果只能写进服务端的配置文件，
+    /// 那么分发包里就必须带着我自己的那把——别人拿来直接烧我的额度。
+    /// 让每个使用者在自己的界面里填自己的密钥，这次请求带上、用完即弃，
+    /// 服务端不留一行，才是唯一能"发出去而不送凭据"的做法。
+    ///
+    /// 【为什么是"带了就用，没带就用服务端那份"】
+    /// 服务端那份是给"一个人在自己机器上跑"这种场景留的兜底：
+    /// 配了就能用，不用先去界面填一遍。两者不冲突，优先级是请求 > 文件。
+    ///
+    /// 【安全性边界】
+    /// 这条链路是本机回环（127.0.0.1），密钥不过公网；
+    /// 后端不写盘、不打日志、不出现在任何响应里。
+    /// </summary>
+    public AiOverride? Ai { get; set; }
+}
+
+/// <summary>
+/// 一次请求里对 AI 连接的临时覆盖。三项都可空：不写就用服务端配置的那份。
+/// </summary>
+public sealed class AiOverride
+{
+    public string? ApiKey { get; set; }
+    public string? BaseUrl { get; set; }
+    public string? Model { get; set; }
 }
 
 public sealed class ChatMessage

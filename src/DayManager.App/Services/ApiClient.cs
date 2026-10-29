@@ -8,10 +8,15 @@ namespace DayManager.App.Services;
 /// <summary>
 /// 跟自己的后端说话的客户端。
 ///
-/// 【为什么 AI 请求不能由客户端直连 DeepSeek】
-/// 那需要把 API key 放进客户端。MAUI 打出来的安装包可以被反编译，
-/// 任何写在里面的字符串——哪怕加密了，因为解密逻辑也在包里——都等同于公开。
-/// 所以客户端只跟自己的后端说话，key 从头到尾只存在于服务端。
+/// 【为什么 AI 请求不能由客户端直连 DeepSeek（这条仍然成立）】
+/// 早期设想是把 key 打进客户端：安装包可以被反编译，任何写在里面的字符串
+/// ——哪怕加密了，因为解密逻辑也在包里——都等同于公开。所以客户端只跟自己的后端说话。
+///
+/// 【但"密钥只存在服务端"这条已经不成立了，现在的规矩是这样】
+/// 服务端自己的配置文件里现在**不放密钥**（放了就等于随分发包送人）。
+/// 使用者在自己的界面里填他自己的那把，存进系统凭据区，
+/// 由这里随每次请求带给本机后端；后端取出来用一次，不写盘、不打日志。
+/// 要发给别人时，程序目录里干净得像刚出厂。
 /// </summary>
 public sealed class ApiClient
 {
@@ -26,12 +31,35 @@ public sealed class ApiClient
 
     private readonly HttpClient _http;
     private readonly ServerSettings _settings;
+    private readonly AiSettings _ai;
 
-    public ApiClient(HttpClient http, ServerSettings settings)
+    public ApiClient(HttpClient http, ServerSettings settings, AiSettings ai)
     {
         _http = http;
         _settings = settings;
+        _ai = ai;
     }
+
+    /// <summary>
+    /// 每次请求带上使用者自己的密钥（没填就带 null，让服务端用它自己那份配置）。
+    ///
+    /// 【为什么是随请求带而不是"启动时上报一次存服务端"】
+    /// 服务端一旦把密钥存下来，它就又回到了"某个文件里躺着一把钥匙"的状态，
+    /// 而那个文件下一次打包就会被人拷走。随请求带、用完即弃，
+    /// 服务端磁盘上从头到尾没有它。
+    ///
+    /// 【为什么这样做没有额外风险】
+    /// 链路是本机回环（127.0.0.1），不出网卡。
+    /// </summary>
+    private object? AiPayload() =>
+        _ai.HasKey
+            ? new
+            {
+                apiKey = _ai.ApiKey,
+                baseUrl = string.IsNullOrWhiteSpace(_ai.BaseUrl) ? null : _ai.BaseUrl,
+                model = string.IsNullOrWhiteSpace(_ai.Model) ? null : _ai.Model
+            }
+            : null;
 
     /// <summary>
     /// 探测后端在不在，顺便问到 AI 是否已经配好。
@@ -108,6 +136,7 @@ public sealed class ApiClient
         var payload = new ChatRequestDto
         {
             Messages = messages.ToList(),
+            Ai = AiPayload(),
             JsonMode = jsonMode,
             Temperature = temperature,
             MaxTokens = maxTokens
@@ -169,7 +198,8 @@ public sealed class ApiClient
         var payload = new
         {
             messages = messages.Select(x => new { role = x.Role, content = x.Content }).ToList(),
-            today = today?.ToString("yyyy-MM-dd")
+            today = today?.ToString("yyyy-MM-dd"),
+            ai = AiPayload()
         };
 
         try
@@ -217,7 +247,8 @@ public sealed class ApiClient
         {
             kind,
             itemId,
-            today = today?.ToString("yyyy-MM-dd")
+            today = today?.ToString("yyyy-MM-dd"),
+            ai = AiPayload()
         };
 
         try
@@ -529,6 +560,9 @@ public sealed class ChatRequestDto
     public double? Temperature { get; set; }
     public int? MaxTokens { get; set; }
     public bool JsonMode { get; set; }
+
+    /// <summary>本次请求自带的密钥 / 接口地址 / 模型。没填就是 null，服务端用它自己那份。</summary>
+    public object? Ai { get; set; }
 }
 
 public sealed class ChatMessageDto

@@ -169,6 +169,10 @@ public static class MauiProgram
 		// Preferences / 本地种子文件把值读出来，不能直接 new 一个空的。
 		builder.Services.AddSingleton(_ => ServerSettings.Load());
 
+		// AI 密钥：进程内一份。它从 Preferences（Windows 上是注册表）读出来，
+		// 不落在程序目录里——这样打包发出去时不会带着我自己的那把钥匙。
+		builder.Services.AddSingleton(_ => AiSettings.Load());
+
 		// 【为什么这里手写 new HttpClient，而不像后端那样用 AddHttpClient】
 		// AddHttpClient 属于 Microsoft.Extensions.Http，是 Web 那一套的组件，
 		// MAUI 项目默认不带。这里只需要一个客户端实例，手写反而更清楚。

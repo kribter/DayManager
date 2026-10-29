@@ -82,6 +82,7 @@ public sealed class ProactiveService
         ProactiveKind kind,
         Guid? itemId,
         DateOnly today,
+        AiOverride? ai = null,
         CancellationToken ct = default)
     {
         // ---------- ① 把"它该知道的"查出来 ----------
@@ -141,6 +142,7 @@ public sealed class ProactiveService
         {
             Messages = messages,
             JsonMode = true,
+            Ai = ai,
             // V4 系列会先消耗 reasoning token 再输出内容，给小了的表现是
             // "调用成功但内容是空的"——最难查的那类问题。
             MaxTokens = 2000
