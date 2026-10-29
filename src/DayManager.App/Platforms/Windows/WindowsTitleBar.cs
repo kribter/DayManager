@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using CommunityToolkit.Mvvm.Messaging;
 using DayManager.App.Messages;
 using DayManager.App.Services;
@@ -164,20 +165,20 @@ public static class WindowsTitleBar
                 //   - NavigationView 的 TopNavArea（顶部标签行那条横带）
                 // 这些元素 MAUI 没给公开的设置口子，只能这样按名字找。
                 SetRootBackground(root);
-                if (TintShell(root) == 0 && !_loadedHooked)
+                if (!_shellTinted)
                 {
-                    // Handler 刚搭好时可视树可能还没长出来，一个 NavigationView 都找不到。
-                    // 那就等根布局 Loaded（模板此时已经应用完）再补一次。
-                    _loadedHooked = true;
-                    root.Loaded += (_, _) =>
+                    // 【为什么挂 LayoutUpdated 反复试】
+                    // 可视树是分层长出来的：Handler 好了 ≠ Shell 的模板应用完了 ≠
+                    // 内层 NavigationView 的 TopNavArea 存在。Loaded 只保证根布局加载，
+                    // 实测（2026-10-29）赶不上内层模板，标签行还是黑的。
+                    // LayoutUpdated 每次布局都会发，涂上 TopNavArea 之前每次都再试，
+                    // 成功（_shellTinted）就摘掉，不留常驻开销。
+                    if (_layoutHookedRoot is null)
                     {
-                        if (_window?.Handler?.PlatformView is Microsoft.UI.Xaml.Window w &&
-                            w.Content is Microsoft.UI.Xaml.FrameworkElement r)
-                        {
-                            SetRootBackground(r);
-                            TintShell(r);
-                        }
-                    };
+                        _layoutHookedRoot = root;
+                        root.LayoutUpdated += OnRootLayoutUpdated;
+                    }
+                    TintShell(root);
                 }
             }
 
@@ -245,7 +246,37 @@ public static class WindowsTitleBar
         }
     }
 
-    private static bool _loadedHooked;
+    private static Microsoft.UI.Xaml.FrameworkElement? _layoutHookedRoot;
+    private static bool _shellTinted;
+    private static readonly List<Microsoft.UI.Xaml.Controls.StackPanel> _tintedAreas = new();
+
+    private static void OnRootLayoutUpdated(object? sender, object e)
+    {
+        // 已经涂过的 TopNavArea 每次布局都复查一遍：模板重应用、显示模式切换
+        // 都可能造出新实例或把值盖回去。发现被盖就重涂并记日志。
+        foreach (var sp in _tintedAreas)
+        {
+            var b = sp.Background as Microsoft.UI.Xaml.Media.SolidColorBrush;
+            if (b is null || b.Color.R != 0x1A || b.Color.G != 0x1A || b.Color.B != 0x1A)
+            {
+                CrashLogger.Write("标题栏诊断", new Exception(
+                    $"[topnav] overwritten bg={DescribeBrush(sp.Background)}, re-tinting"));
+                sp.Background = Brush(AppColors.PageBg);
+            }
+        }
+
+        if (_shellTinted)
+        {
+            return;
+        }
+
+        if (_window?.Handler?.PlatformView is Microsoft.UI.Xaml.Window w &&
+            w.Content is Microsoft.UI.Xaml.FrameworkElement r)
+        {
+            SetRootBackground(r);
+            TintShell(r);
+        }
+    }
 
     /// <summary>
     /// 遍历可视树，给 Shell 的原生绘制部件上色。
@@ -253,38 +284,44 @@ public static class WindowsTitleBar
     /// 【为什么按名字找而不是走公开 API】
     /// Shell 在 Windows 上是两层 NavigationView（外层 RootNavigationView 套内层顶部标签栏），
     /// 顶部标签那条横带的底色是模板里 TopNavArea 的 {ThemeResource NavigationViewTopPaneBackground}，
-    /// MAUI 没有暴露任何属性能改它。资源字典覆盖（应用级 ThemeDictionaries）实测也不生效
-    /// （2026-10-29：标签行仍是纯黑），只能直接对元素赋值——这总会生效，
-    /// 代价是换主题后要重新走一遍（ApplyCore 在 ThemeChangedMessage 时会再次调用）。
+    /// MAUI 没有暴露任何属性能改它。应用级 ThemeDictionaries 覆盖够不到模板；
+    /// 直接赋值的元素实例又可能被模板重应用换掉——所以两条都做：
+    /// 元素资源塞覆盖（重应用后新实例会解析到我们的色）+ 直接赋值（当下这帧就对）。
     /// 找不到就跳过：结构变化时宁可退回系统默认，不能崩。
     /// </summary>
-    /// <returns>找到并处理了几层 NavigationView（0 = 可视树还没长好）。</returns>
-    private static int TintShell(Microsoft.UI.Xaml.DependencyObject node)
+    private static void TintShell(Microsoft.UI.Xaml.DependencyObject node)
     {
-        var found = 0;
         switch (node)
         {
             case Microsoft.UI.Xaml.Controls.NavigationView nav
                 when node is Microsoft.UI.Xaml.FrameworkElement navElement:
-                // 给 NavigationView 自身资源塞一份覆盖：ShellItemHandler 处理标签项时
-                // 会从这里读 NavigationViewItemForeground（MAUI 源码里就是这么取的）。
+                // 给 NavigationView 自身资源塞一份覆盖：标签项文字色是
+                // ShellItemHandler 从这里读的（MAUI 源码里就是这么取的）；
+                // 顶栏底色资源是给模板重应用时的新 TopNavArea 兜底——
+                // 直接赋值的元素实例会被换掉，元素资源不会。
                 navElement.Resources["NavigationViewItemForeground"] = Brush(AppColors.Muted);
-                found++;
+                navElement.Resources["NavigationViewTopPaneBackground"] = Brush(AppColors.PageBg);
                 break;
             case Microsoft.UI.Xaml.Controls.TextBlock tb when tb.Name == "AppTitle":
                 tb.Foreground = Brush(AppColors.Text);
                 break;
             case Microsoft.UI.Xaml.Controls.StackPanel sp when sp.Name == "TopNavArea":
                 sp.Background = Brush(AppColors.PageBg);
+                _shellTinted = true;
+                if (!_tintedAreas.Contains(sp))
+                {
+                    _tintedAreas.Add(sp);
+                }
                 break;
         }
 
         var count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(node);
         for (var i = 0; i < count; i++)
         {
-            found += TintShell(Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(node, i));
+            TintShell(Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(node, i));
         }
-
-        return found;
     }
+
+    private static string DescribeBrush(Microsoft.UI.Xaml.Media.Brush? b) =>
+        b is Microsoft.UI.Xaml.Media.SolidColorBrush s ? $"#{s.Color.R:X2}{s.Color.G:X2}{s.Color.B:X2}" : b?.GetType().Name ?? "null";
 }

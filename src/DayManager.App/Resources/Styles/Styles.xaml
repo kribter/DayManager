@@ -296,6 +296,13 @@
     <!-- 列表右侧的圆形打勾按钮，同样是清掉 44 下限才能真做成圆的 -->
     <Style TargetType="Button" x:Key="RoundIconButton">
         <Setter Property="BackgroundColor" Value="Transparent" />
+        <!--
+          文字色必须自己给：不设的话继承全局按钮样式的深色档 PrimaryDarkText
+          （#1B2B3D 深藏青），那是给浅色底（PrimaryDark 浅蓝按钮）配的深字。
+          这个样式底色是透明的，深底上深字 = 符号隐形，
+          日程页翻日期的 < > 两个圆圈就是这么变成"空按钮"的（2026-10-29）。
+        -->
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource Gray900}, Dark={StaticResource Gray300}}" />
         <Setter Property="BorderColor" Value="{AppThemeBinding Light={StaticResource Gray300}, Dark={StaticResource Gray600}}" />
         <Setter Property="BorderWidth" Value="1" />
         <Setter Property="FontSize" Value="17" />
