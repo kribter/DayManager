@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:vm="clr-namespace:DayManager.App.ViewModels"
+             x:Class="DayManager.App.SettingsPage"
+             x:DataType="vm:SettingsViewModel"
+             Shell.NavBarIsVisible="False"
+             Title="设置">
+
+    <!--
+      ============================================================
+      设置页：所有"填一次就再也不看"的东西。
+
+      【为什么这一页存在】
+      它们原先全堆在时间页底部，而时间页是每天要翻的——
+      想看今天的时长，得先滚过密钥输入框、主题、语气、托盘开关。
+      设置不该住在每天要路过的地方。
+
+      【为什么不占 Tab】
+      Tab 的顺序就是优先级的表达（对话放第一），
+      而设置不是工作流目的地，是"偶尔去一次"的地方。
+      和大任务详情页一样注册成普通页面：进得去也出得来。
+
+      【为什么返回按钮自己做】
+      系统导航栏那个箭头又小又浅，详情页踩过一次。
+      这一页唯一的出口要一眼看得见，所以放左上、用 BackButton 样式。
+
+      【留在这页之外的两条】
+      AI 主动开口（有心跳、有"现在说一句"，每天瞄一眼）和
+      娱乐超时提醒（看着今天的数据才想起改）都留在时间页——
+      它们不是"填一次就忘"的东西，搬走反而割裂。
+      ============================================================
+    -->
+
+    <Grid RowDefinitions="Auto,*"
+          Padding="18,14,18,0"
+          RowSpacing="12">
+
+        <!-- 第 0 行：返回 -->
+        <Button Grid.Row="0"
+                Text="&lt; 返回"
+                Style="{StaticResource BackButton}"
+                Command="{Binding BackCommand}"
+                HorizontalOptions="Start" />
+
+        <ScrollView Grid.Row="1">
+            <VerticalStackLayout Spacing="0">
+
+                <!-- ================= AI 接入（密钥） =================
+
+                     【为什么放在第一张】
+                     拿到这个软件的人，第一件必须做的事就是填自己的密钥——
+                     不填的话 AI 一句都说不了。它排在"最需要先解决"的位置。
+
+                     【为什么密钥要在这里填，而不是放进某个配置文件】
+                     这个软件是要能发给别人用的。写在程序目录里的任何一行密钥，
+                     都会在"打包发给朋友"的那一步跟着走——他一打开就在烧我的额度。
+                     所以：界面填 → 存系统凭据区（Windows 是注册表，不随安装目录走）
+                     → 随每次请求交给本机后端 → 后端用完即弃，不写盘。
+                     这样发出去的包里干净得像刚出厂。 -->
+                <Border Style="{StaticResource CardStyle}"
+                        Padding="16,14">
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="12" />
+                    </Border.StrokeShape>
+
+                    <VerticalStackLayout Spacing="8">
+                        <Label Text="AI 接入"
+                               Style="{StaticResource CardTitle}" />
+
+                        <Label Text="这是你自己的密钥，只存在这台机器上，不会跟着软件一起发给别人。"
+                               Style="{StaticResource Caption}" />
+
+                        <Entry Placeholder="密钥，一般是 sk- 开头的一长串"
+                               Text="{Binding AiKeyInput}"
+                               IsPassword="True"
+                               Unfocused="OnAiKeyUnfocused" />
+
+                        <Entry Placeholder="接口地址（留空用 DeepSeek）"
+                               Text="{Binding AiBaseUrlInput}"
+                               Unfocused="OnAiKeyUnfocused" />
+
+                        <Entry Placeholder="模型名（留空用 deepseek-chat）"
+                               Text="{Binding AiModelInput}"
+                               Unfocused="OnAiKeyUnfocused" />
+
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <Label Text="{Binding AiStatusText}"
+                                   Style="{StaticResource Caption}"
+                                   VerticalOptions="Center" />
+                            <Button Grid.Column="1"
+                                    Text="{Binding AiTestButtonText}"
+                                    Style="{StaticResource ChipButton}"
+                                    Command="{Binding TestAiCommand}"
+                                    IsEnabled="{Binding IsTestingAi, Converter={StaticResource Not}}"
+                                    HorizontalOptions="End" />
+                        </Grid>
+                    </VerticalStackLayout>
+                </Border>
+
+                <!-- ================= AI 怎么说话 =================
+
+                     【为什么这里要放三档，外加一个能自己写一句的地方】
+                     "AI 该怎么跟我说话"是口味问题，而口味会变：
+                     某段时间想听两句人话，另一段时间一句多余的话都是骚扰。
+                     定死一种等于替他做一个他每隔一阵就会反悔的决定。
+                     三档是我们猜的，猜不全——他心里那句话往往比我们设计的任何一档都准，
+                     所以再留一个能自己写的口子。 -->
+                <Border Style="{StaticResource CardStyle}"
+                        Margin="0,12,0,0"
+                        Padding="16,14">
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="12" />
+                    </Border.StrokeShape>
+
+                    <VerticalStackLayout Spacing="8">
+                        <Label Text="AI 怎么说话"
+                               Style="{StaticResource CardTitle}" />
+
+                        <HorizontalStackLayout Spacing="16">
+                            <RadioButton Content="克制"
+                                         GroupName="AiTone"
+                                         IsChecked="{Binding IsToneReserved}" />
+                            <RadioButton Content="温和"
+                                         GroupName="AiTone"
+                                         IsChecked="{Binding IsToneWarm}" />
+                            <RadioButton Content="直接"
+                                         GroupName="AiTone"
+                                         IsChecked="{Binding IsToneDirect}" />
+                        </HorizontalStackLayout>
+
+                        <Label Text="{Binding ToneHint}"
+                               Style="{StaticResource Caption}" />
+
+                        <!-- 失焦才存：每敲一个字写一次库会把一行设置变成几十行垃圾。 -->
+                        <Entry Placeholder="还可以自己写一句，比如：像个一起熬夜的朋友，别叫我加油"
+                               Text="{Binding AiPersona}"
+                               Unfocused="OnPersonaUnfocused" />
+
+                        <Label Text="下一句话就生效，不用重启。它改得了说话的分寸，改不了格式和那些硬规矩。"
+                               Style="{StaticResource Caption}" />
+                    </VerticalStackLayout>
+                </Border>
+
+                <!-- ================= 外观 =================
+
+                     【为什么要放"跟随系统 / 浅色 / 深色"三档，而不是一个开关】
+                     系统是浅色、其它软件各自深色是非常常见的组合
+                     （编辑器、浏览器、终端常被手动设成深色）。
+                     只做"跟随系统"的话，这个软件会是他屏幕上唯一一块白的；
+                     只做"深色开关"的话，白天又得手动切回来。
+                     三档里"跟随系统"是默认值，另两档留给"我就是想让它深一点"的时刻。 -->
+                <Border Style="{StaticResource CardStyle}"
+                        Margin="0,12,0,0"
+                        Padding="16,14">
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="12" />
+                    </Border.StrokeShape>
+
+                    <VerticalStackLayout Spacing="8">
+                        <Label Text="外观"
+                               Style="{StaticResource CardTitle}" />
+
+                        <!-- RadioButton 的 GroupName 保证三选一，
+                             选中态直接绑到 ViewModel 的三个布尔上，
+                             不需要"点了之后再把另外两个取消"这种代码。 -->
+                        <HorizontalStackLayout Spacing="16">
+                            <RadioButton Content="跟随系统"
+                                         GroupName="AppTheme"
+                                         IsChecked="{Binding IsThemeSystem}" />
+                            <RadioButton Content="浅色"
+                                         GroupName="AppTheme"
+                                         IsChecked="{Binding IsThemeLight}" />
+                            <RadioButton Content="深色"
+                                         GroupName="AppTheme"
+                                         IsChecked="{Binding IsThemeDark}" />
+                        </HorizontalStackLayout>
+
+                        <Label Text="选完立刻生效，不用重启。写下来是给开机自启用的——不然下次开机又变回系统那一档。"
+                               Style="{StaticResource Caption}" />
+                    </VerticalStackLayout>
+                </Border>
+
+                <!-- ================= 后台与开机 =================
+
+                     【为什么这一块必须摆出来】
+                     "窗口不见了但程序还在跑"这件事如果只有一个地方能改（托盘菜单），
+                     人要么不知道它存在，要么知道了也不知道怎么关掉。
+                     而"以为关掉了其实还在后台记着"是比任何 bug 都严重的失信。 -->
+                <Border Style="{StaticResource CardStyle}"
+                        IsVisible="{Binding HasShellControls}"
+                        Margin="0,12,0,0"
+                        Padding="14,12">
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="14" />
+                    </Border.StrokeShape>
+
+                    <VerticalStackLayout Spacing="8">
+                        <Label Text="后台与开机"
+                               Style="{StaticResource CardTitle}" />
+
+                        <HorizontalStackLayout Spacing="8">
+                            <Button Text="{Binding AutoStartText}"
+                                    Style="{StaticResource ChipButton}"
+                                    Command="{Binding ToggleAutoStartCommand}" />
+
+                            <Button Text="{Binding CloseToTrayText}"
+                                    Style="{StaticResource ChipButton}"
+                                    Command="{Binding ToggleCloseToTrayCommand}" />
+                        </HorizontalStackLayout>
+
+                        <Label Text="藏起来之后，使用时长照记、提醒照弹。任务栏不再占位置，托盘里能把它叫回来。"
+                               Style="{StaticResource Caption}" />
+
+                        <Button Text="现在就藏到托盘"
+                                Style="{StaticResource ChipButton}"
+                                HorizontalOptions="Start"
+                                Command="{Binding HideToTrayCommand}" />
+                    </VerticalStackLayout>
+                </Border>
+            </VerticalStackLayout>
+        </ScrollView>
+    </Grid>
+</ContentPage>

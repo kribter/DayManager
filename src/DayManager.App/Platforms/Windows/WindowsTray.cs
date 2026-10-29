@@ -50,6 +50,7 @@ public sealed class WindowsTray : IWindowShell, IDisposable
 
     private const int MenuOpen = 1001;
     private const int MenuQuit = 1002;
+    private const int MenuSettings = 1003;
 
     /// <summary>explorer 重启后会广播这个消息。不重新加图标的话，托盘上就永远空了。</summary>
     private const string TaskbarCreatedName = "TaskbarCreated";
@@ -351,6 +352,10 @@ public sealed class WindowsTray : IWindowShell, IDisposable
     {
         var menu = NativeMethods.CreatePopupMenu();
         NativeMethods.AppendMenu(menu, 0, MenuOpen, "打开 DayManager");
+
+        // 设置也从这里进：程序平时是藏在托盘里的，
+        // 那才是"突然想改一下"最常见的时刻——先打开窗口再找入口太绕。
+        NativeMethods.AppendMenu(menu, 0, MenuSettings, "设置…");
         NativeMethods.AppendMenu(menu, 0x00000800, 0, string.Empty); // MF_SEPARATOR
         NativeMethods.AppendMenu(menu, 0, MenuQuit, "退出");
 
@@ -412,6 +417,11 @@ public sealed class WindowsTray : IWindowShell, IDisposable
                     self.Restore();
                     break;
 
+                case MenuSettings:
+                    self.Restore();
+                    self.OpenSettings();
+                    break;
+
                 case MenuQuit:
                     self.Quit();
                     break;
@@ -421,6 +431,21 @@ public sealed class WindowsTray : IWindowShell, IDisposable
         }
 
         return NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    /// <summary>
+    /// 跳到设置页。
+    ///
+    /// 【为什么要排在 Restore 之后】
+    /// 导航是界面操作，窗口还藏着的话改了也看不见——
+    /// 先把它叫回来，再压进设置页，人才知道发生了什么。
+    /// </summary>
+    private void OpenSettings()
+    {
+        Microsoft.Maui.Controls.Application.Current?.Dispatcher.Dispatch(() =>
+        {
+            _ = Microsoft.Maui.Controls.Shell.Current.GoToAsync("SettingsPage");
+        });
     }
 
     private void Quit()

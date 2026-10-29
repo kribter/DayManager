@@ -238,6 +238,10 @@ public static class MauiProgram
 		builder.Services.AddTransient<TimePage>();
 		builder.Services.AddTransient<TimeViewModel>();
 
+		// 设置页：不占 Tab 的普通页面（见 SettingsViewModel 的说明）。
+		builder.Services.AddTransient<SettingsPage>();
+		builder.Services.AddTransient<SettingsViewModel>();
+
 #if DEBUG
 		builder.Logging.AddDebug();
 #endif
