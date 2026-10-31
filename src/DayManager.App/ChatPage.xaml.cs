@@ -1,3 +1,6 @@
+using CommunityToolkit.Mvvm.Messaging;
+using DayManager.App.Messages;
+
 namespace DayManager.App;
 
 /// <summary>
@@ -44,6 +47,13 @@ public partial class ChatPage : ContentPage
         // 将来接 Android 时即使暂时没实现也不会编译失败，只是回车还不响应，
         // 比一堆 #if 少一个"改了条件忘了另一边"的出错机会。
         AttachEnterToSend();
+
+        // 换了头像要让已经在屏幕上的那些圆重画一次。
+        // 【为什么必须有人显式叫一次】
+        // 头像是画出来的，不是绑出来的：改了图不会触发任何属性变化，
+        // GraphicsView 也就不会自己重绘。不叫的话，
+        // 换完头像回到对话页看到的还是旧的那张，看着像设置没生效。
+        WeakReferenceMessenger.Default.Register<AvatarChangedMessage>(this, (_, _) => RedrawAvatars());
     }
 
     /// <summary>
@@ -55,6 +65,16 @@ public partial class ChatPage : ContentPage
     protected override async void OnAppearing()
     {
         base.OnAppearing();
+
+        // 回来时也重画一次：切去设置页换头像的时候，这一页的画还是旧的，
+        // 而 Shell 切回来不保证会重排这些圆。
+        RedrawAvatars();
+
+        // 气泡颜色兜底刷新。在设置页换过主题的话，气泡的底色/文字色
+        // 是 C# 里按"取值那一刻的主题"算的，没人重新取就停在旧色上。
+        // 从设置页回到这里必然触发 OnAppearing，正好补上这一刀——
+        // 就算换主题的广播消息没送到 ViewModel，回来时也能修正。
+        _viewModel.RefreshBubblesForTheme();
 
         // 只探一次：切个 Tab 回来就再等一轮健康检查，既慢又没意义。
         if (_serverChecked)
@@ -68,6 +88,34 @@ public partial class ChatPage : ContentPage
         // 历史要在探活之后加载：万一加载失败，页面上的提示会盖在
         // "准备好了"这类状态后面，用户看到的最后一句话才是有用的那句。
         await _viewModel.LoadHistoryCommand.ExecuteAsync(null);
+    }
+
+    /// <summary>
+    /// 让消息列表里所有头像圆重画一次。
+    ///
+    /// 【为什么是遍历可视树，而不是让 ViewModel 发一个属性变化】
+    /// 气泡是 DataTemplate 生成的，ViewModel 里没有"那几十个圆"这回事；
+    /// 而 GraphicsView 只有被 Invalidate 才会重绘，
+    /// 改了 drawable 内部的图不会自动通知到它们。
+    /// 遍历是本页内部的事，不值得为此在 ViewModel 里造一套控件引用。
+    /// </summary>
+    private void RedrawAvatars()
+    {
+        void Walk(IVisualTreeElement element)
+        {
+            if (element is GraphicsView view)
+            {
+                view.Invalidate();
+                return;
+            }
+
+            foreach (var child in element.GetVisualChildren())
+            {
+                Walk(child);
+            }
+        }
+
+        MainThread.BeginInvokeOnMainThread(() => Walk(MessageStack));
     }
 
     private void ScrollToLast()

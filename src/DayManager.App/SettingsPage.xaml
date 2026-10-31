@@ -100,12 +100,20 @@
 
                 <!-- ================= AI 怎么说话 =================
 
-                     【为什么这里要放三档，外加一个能自己写一句的地方】
+                     【为什么这里要放三档，外加一个能自己写的地方】
                      "AI 该怎么跟我说话"是口味问题，而口味会变：
                      某段时间想听两句人话，另一段时间一句多余的话都是骚扰。
                      定死一种等于替他做一个他每隔一阵就会反悔的决定。
                      三档是我们猜的，猜不全——他心里那句话往往比我们设计的任何一档都准，
-                     所以再留一个能自己写的口子。 -->
+                     所以再留一个能自己写的口子。
+
+                     【为什么那个人设框要能写多行、而且是被全部放开的那一段】
+                     它原先是个单行输入框，只能塞一句话。
+                     实测的结果是：有人写了"一只猫娘"，AI 能做到的极限
+                     只是在句末加个"喵"——因为篇幅、要不要夸人这些
+                     原先和真正的硬规矩锁在一起，谁也改不动。
+                     现在只锁输出格式、不许编造、拆分与额度这几类真正的功能，
+                     身份、口癖、篇幅、要不要夸人，全交给他写。 -->
                 <Border Style="{StaticResource CardStyle}"
                         Margin="0,12,0,0"
                         Padding="16,14">
@@ -114,7 +122,7 @@
                     </Border.StrokeShape>
 
                     <VerticalStackLayout Spacing="8">
-                        <Label Text="AI 怎么说话"
+                        <Label Text="AI 怎么说话、长什么样"
                                Style="{StaticResource CardTitle}" />
 
                         <HorizontalStackLayout Spacing="16">
@@ -132,12 +140,91 @@
                         <Label Text="{Binding ToneHint}"
                                Style="{StaticResource Caption}" />
 
-                        <!-- 失焦才存：每敲一个字写一次库会把一行设置变成几十行垃圾。 -->
-                        <Entry Placeholder="还可以自己写一句，比如：像个一起熬夜的朋友，别叫我加油"
-                               Text="{Binding AiPersona}"
-                               Unfocused="OnPersonaUnfocused" />
+                        <!-- 多行：一句话的人设想表达的东西往往不止一行。
+                             MaxLength 只在这里挡一下，后端拼提示词时还会按同一个上限再截一次。 -->
+                        <Editor Placeholder="它是谁、你俩什么关系、怎么称呼你、要不要夸你、能说多长——都能写，换行随意。&#xA;比如：像个一起熬夜的朋友，做完事别光说知道了，要说具体做完了哪件事；别叫我加油。"
+                                Text="{Binding AiPersona}"
+                                MaxLength="500"
+                                AutoSize="TextChanges"
+                                Unfocused="OnPersonaUnfocused" />
 
-                        <Label Text="下一句话就生效，不用重启。它改得了说话的分寸，改不了格式和那些硬规矩。"
+                        <Label Text="{Binding PersonaCountText}"
+                               Style="{StaticResource Caption}"
+                               HorizontalOptions="End" />
+
+                        <!-- ================= 两边头像 =================
+
+                             【为什么头像放在这一张卡里，不单独开一张】
+                             它和"怎么说话"是同一件事的两半：一个是它说什么，一个是它看起来是谁。
+                             分成两张卡，他会以为这是两个互不相关的设置，
+                             而实际上它们一起决定"对面坐着的是个什么东西"。
+
+                             【为什么默认图形不是猫耳】
+                             人设是他自己能改的（今天猫娘、明天损友、后天教练），
+                             而头像长在界面上，不会跟着人设变。
+                             画一个具体的形象，等于替他把人设定死了——
+                             哪天换成"教练"，旁边还顶着一对猫耳朵就讲不通。
+                             想要猫耳：用下面这个按钮选一张自己喜欢的图就行。 -->
+                        <Label Text="头像"
+                               Style="{StaticResource Caption}"
+                               Margin="0,2,0,0" />
+
+                        <HorizontalStackLayout Spacing="10">
+                            <GraphicsView x:Name="AiAvatarPreview"
+                                          WidthRequest="36"
+                                          HeightRequest="36"
+                                          VerticalOptions="Center"
+                                          Drawable="{Binding AiAvatar}" />
+
+                            <VerticalStackLayout Spacing="4"
+                                                 VerticalOptions="Center">
+                                <HorizontalStackLayout Spacing="6">
+                                    <Button Text="给 AI 换一张"
+                                            Style="{StaticResource ChipButton}"
+                                            Command="{Binding PickAiAvatarCommand}" />
+                                    <Button Text="恢复默认"
+                                            Style="{StaticResource ChipButton}"
+                                            Command="{Binding ClearAiAvatarCommand}"
+                                            IsVisible="{Binding HasCustomAiAvatar}" />
+                                </HorizontalStackLayout>
+
+                                <Label Text="默认是那个日历格子，和程序图标一个意思。"
+                                       Style="{StaticResource Caption}" />
+                            </VerticalStackLayout>
+                        </HorizontalStackLayout>
+
+                        <!-- 你自己那一侧。为什么两边都要：见 ChatBubble.ShowMyAvatar 里的说明——
+                             两边都是空的占位符时才会变成两排圆点，默认图形一个是蓝格子、一个是灰人影，
+                             反倒互相解释了谁是谁。 -->
+                        <HorizontalStackLayout Spacing="10"
+                                               Margin="0,6,0,0">
+                            <GraphicsView x:Name="MyAvatarPreview"
+                                          WidthRequest="36"
+                                          HeightRequest="36"
+                                          VerticalOptions="Center"
+                                          Drawable="{Binding MyAvatar}" />
+
+                            <VerticalStackLayout Spacing="4"
+                                                 VerticalOptions="Center">
+                                <HorizontalStackLayout Spacing="6">
+                                    <Button Text="给我自己换一张"
+                                            Style="{StaticResource ChipButton}"
+                                            Command="{Binding PickMyAvatarCommand}" />
+                                    <Button Text="恢复默认"
+                                            Style="{StaticResource ChipButton}"
+                                            Command="{Binding ClearMyAvatarCommand}"
+                                            IsVisible="{Binding HasCustomMyAvatar}" />
+                                </HorizontalStackLayout>
+
+                                <Label Text="默认是个人影。你的气泡靠右，它显示在右下角。"
+                                       Style="{StaticResource Caption}" />
+                            </VerticalStackLayout>
+                        </HorizontalStackLayout>
+
+                        <Label Text="选完复制一份压成 256 存本机，原图删了也不影响。"
+                               Style="{StaticResource Caption}" />
+
+                        <Label Text="下一句话就生效，不用重启。这一段能覆盖上面三档的篇幅和口气（要它别夸你就写「别夸我」），改不了输出格式、能改哪几样东西、不许编造和那些拆分规矩。"
                                Style="{StaticResource Caption}" />
                     </VerticalStackLayout>
                 </Border>

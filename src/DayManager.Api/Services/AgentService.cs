@@ -324,7 +324,15 @@ public sealed class AgentService
         // 语气是用户自己选的，每次拼提示词时现读——
         // 他在时间页切完档，下一条对话就是新的说法，不需要重启任何东西。
         var tone = AiTone.Parse(await _policy.GetRawAsync(PolicyKeys.AiTone, ct));
-        var persona = (await _policy.GetRawAsync(PolicyKeys.AiPersona, ct))?.Trim();
+        var persona = AiTone.NormalizePersona(await _policy.GetRawAsync(PolicyKeys.AiPersona, ct));
+
+        // 【为什么必须把"现在几点"给它】
+        // 它原先只知道今天几号。于是他问"现在几点了""离三点还有多久"，
+        // 模型只能瞎编一个钟点——而钟点是这个软件里最不能编的东西之一：
+        // 他照着那个错的时间去安排，等发现不对时已经晚了。
+        // 反过来，给一个不准的"还有 47 分钟"比不说更糟，所以下面明写"算不准就说大概"。
+        var now = DateTime.Now;
+        var isToday = day == DateOnly.FromDateTime(now);
 
         var listText = items.Count == 0
             ? "（今天还没有安排）"
@@ -365,7 +373,9 @@ public sealed class AgentService
         {
             "你是 DayManager 里的日程伙伴。你在和一个**知道自己该做什么、但启动困难**的人说话。",
             "",
-            $"【今天】{day:yyyy-MM-dd}（{day:dddd}）",
+            // 只在真的说今天时才给钟点：拼的是别的日子却写"现在 23:14"，
+            // 那是拿一个假的时间让他做决定。
+            $"【今天】{day:yyyy-MM-dd}（{day:dddd}）" + (isToday ? $"，现在 {now:HH:mm}" : ""),
             $"【今天的清单】共 {stats.Total} 条，已完成 {stats.Done} 条{skippedNote}",
             listText,
             "",
@@ -380,21 +390,46 @@ public sealed class AgentService
             "空的那几天写着「空」，那是真的没有安排，不是没查到。",
             upcomingText,
             "",
+            // 【为什么要把"怎么用这个钟点"也讲一遍】
+            // 只给数字不给用法，模型要么不用它（继续瞎编），
+            // 要么在上面硬算减法——而减法算错会给出一个看着很确定、其实是错的分钟数，
+            // 这比回答"不知道"有害得多。
+            "【关于时间】上面那个钟点是现在的真实时刻，",
+            "他问「现在几点了」「离 X 点还有多久」「今天还剩多少时间」时照它答。",
+            "算时间差容易算错：算不准就说「大概 X 分钟」，不要给一个精确的错数。",
+            "",
             "【说话方式】"
         };
 
         lines.AddRange(AiTone.StyleLines(tone));
 
-        // 【为什么自定义那句插在这里，而不是插在最前面】
-        // 模型对**靠后**的指令权重更高。放在语气档之后，它能改说话的分寸；
-        // 而输出格式、不许编造、不许挖苦这些硬规矩排在它后面，约束力更强。
+        // 做成事之后的那半句。三档都有（见 AiTone.FeedbackLines 的注释）：
+        // 实测里"做完"这件事在系统里一直是静音的，而人在人设里仍可把它关掉。
+        lines.Add("");
+        lines.Add("【他做成一件事时】");
+        lines.AddRange(AiTone.FeedbackLines(tone));
+
+        // 【为什么自定义那句插在这里】
+        // 提示词越靠后，模型给它的权重越高。放在说话方式和正反馈之后，
+        // 它就能覆盖那两段（要长就长、要别夸就别夸、要某个口癖就有）；
+        // 而输出格式、不许编造、拆分与额度的规矩排在它**后面**，约束力更强。
         // 他要的是调口味，不是让 AI 不干活——这个顺序让两件事各自成立。
+        //
+        // 【为什么用横线把这段包起来】
+        // 人设现在是能换行的整段文字，不画个边界，
+        // 它里面的空行和列举就会跟后面的硬规矩连成一片，分不清哪句算数。
         if (!string.IsNullOrEmpty(persona))
         {
             lines.Add("");
-            lines.Add("【他自己还写了这句，照着做】");
+            lines.Add("【他给你的设定：这段怎么写你就怎么来，它说了算】");
+            lines.Add("---- 他写的人设开始 ----");
             lines.Add(persona);
-            lines.Add("（这不解除下面任何一条硬规矩。）");
+            lines.Add("---- 他写的人设结束 ----");
+            lines.Add("");
+            lines.Add("（上面这一段优先于前面的说话方式和正反馈：");
+            lines.Add("他让你别夸你就别夸，让你多说两句你就多说两句。");
+            lines.Add("但它改不了下面任何一种东西——输出格式、能用哪五种操作、");
+            lines.Add("不许编造、拆分与额度的规矩，以及不许挖苦这条底线。）");
         }
 
         lines.AddRange(new[]
@@ -410,8 +445,11 @@ public sealed class AgentService
             "",
             "【你能做的事】用 actions 声明，系统会真的执行。可用的操作只有这五种：",
             "- create     新建一条。参数：title（必填）、date（yyyy-MM-dd，不给就是今天）、time（HH:mm，可空）、estimateMinutes（可空）、project（可空）、projectTarget（可空，yyyy-MM-dd）",
+            "  **他说了具体钟点（「下午三点」「明天 9 点半」）时，time 必须填。**",
+            "  只把钟点写进 reply、不填 time，建出来的还是一条没有时间的待办——",
+            "  他会看到你说「排好了 15:00」，清单里那条却不带钟点。这等于没排。",
             "- set_status 改状态。参数：id（必填）、status（必填）、reason（status=skipped 时写上原因）",
-            "- reschedule 改期。参数：id（必填）、date（必填）、time（可空）",
+            "- reschedule 改期。参数：id（必填）、date（必填）、time（可空，改几点同样靠它）",
             "- rename     改标题。参数：id（必填）、title（必填）",
             "- delete     删除。参数：id（必填）",
             "",
@@ -458,6 +496,8 @@ public sealed class AgentService
             "  这是实测出来的一个坑：模型说过「今天先放一条」，但看到今天已经排满了就没建，",
             "  结果话里承诺了、清单里没有。他不会认为你在做情境判断，只会认为事情又丢了。",
             "  没建的就别说建了，没改的就别描述改后的样子。",
+            "  同一类实测问题：**你说了具体钟点但 actions 里没带 time，reply 里就不许写那个钟点。**",
+            "  说过「排好了 15:00」而清单里那条不带时间，他会以为软件坏了——比不说更糟。",
             "- 缺信息就**在 reply 里直接问**，一句话一个问题，不要一次甩三个问号。",
             "",
             "【输出格式】严格输出 JSON，不要任何解释文字：",
@@ -467,9 +507,12 @@ public sealed class AgentService
             "{",
             "  \"think\": \"你的判断，不给用户看\",",
             "  \"reply\": \"对用户说的话\",",
-            "  \"actions\": [ { \"op\": \"create\", \"title\": \"...\" } ],",
+            "  \"actions\": [ { \"op\": \"create\", \"title\": \"...\", \"date\": \"yyyy-MM-dd\", \"time\": \"HH:mm\" } ],",
             "  \"suggestions\": [ \"每天一小时吧\", \"周末再弄\", \"第一条现在就开始\" ]",
             "}",
+            "actions 里写清楚了 date 和 time，那条才会真的落在那个日期那个钟点上。",
+            "上面示例里的 yyyy-MM-dd / HH:mm 是占位符，要换成真实的日期和时刻；",
+            "他没说具体几点时，time 这个字段整个省掉（不要写 time: null）。",
             "没有要改的就让 actions 为空数组。",
             "",
             "【suggestions：猜他下一句会说什么】",

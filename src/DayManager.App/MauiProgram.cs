@@ -216,6 +216,11 @@ public static class MauiProgram
 		// 界面深浅。跟随系统 / 强制浅色 / 强制深色，用户的选择存在策略表里。
 		builder.Services.AddSingleton<ThemeService>();
 
+		// 对话两边的头像：AI 一个、他自己一个。
+		// 图片各复制一份存在本机应用数据目录，路径记在 Preferences 里。
+		// 单例是因为它手里握着解码出来的那两张图——每个气泡各解一份太浪费。
+		builder.Services.AddSingleton<AvatarService>();
+
 		// 页面也要注册，因为 AppShell 是通过 DataTemplate 让 DI 容器来创建 MainPage 的。
 		// 不注册的话，容器会尝试找无参构造函数 → MainPage 又需要一个 MainViewModel → 直接崩。
 		// 这是用 Shell + DI 时最容易漏的一步。

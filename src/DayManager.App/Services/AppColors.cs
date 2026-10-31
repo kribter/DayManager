@@ -61,6 +61,16 @@ public static class AppColors
     /// <summary>正文。</summary>
     public static Color Text => Pick("TextPrimaryLight", "TextPrimaryDark", Colors.Black, Colors.White);
 
+    /// <summary>
+    /// 界面主色（按钮、高亮）。
+    ///
+    /// 【为什么连它也要在这里留一份】
+    /// XAML 里到处写的是 <c>{StaticResource Primary}</c>，但画出来的东西
+    /// （默认头像里那几格）拿不到静态资源，只能从 C# 里要。
+    /// 不留这份就得在画的地方再抄一遍色号，于是又多出一个真值来源。
+    /// </summary>
+    public static Color Primary => Pick("Primary", "PrimaryDark", Color.FromArgb("#3F6FB5"), Color.FromArgb("#9DB8DE"));
+
     /// <summary>次要说明文字（副标题、单位、提示）。</summary>
     public static Color Muted => Pick("TextMutedLight", "TextMutedDark", Colors.Gray, Colors.LightGray);
 

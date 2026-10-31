@@ -115,6 +115,29 @@
                           ColumnDefinitions="*"
                           HorizontalOptions="{Binding Align}">
 
+                        <!--
+                          两边头像夹着中间的内容，排成一行。
+                          三个位置都常驻在模板里，靠 IsVisible 决定露哪边：
+                          AI 说的只露左边，你说的只露右边，系统提示两边都不露。
+                          【为什么不用 Spacing】
+                          StackLayout 的 Spacing 对不可见的子项行为依赖实现，
+                          宁可用 Margin：两个头像各自只留靠内容那一侧的间距，
+                          不显示的时候一个像素也不会留下。
+                        -->
+                        <HorizontalStackLayout Spacing="0"
+                                               HorizontalOptions="{Binding Align}">
+
+                            <!-- AI 那侧。
+                                 画出来的（AvatarDrawable），不是 Image 控件：
+                                 WinUI 的 Clip 只支持矩形，圆形裁剪在 Windows 上不生效。
+                                 尺寸给 26：比一行字略矮，不抢内容的注意力。 -->
+                            <GraphicsView WidthRequest="26"
+                                          HeightRequest="26"
+                                          VerticalOptions="Start"
+                                          Margin="0,2,8,0"
+                                          IsVisible="{Binding ShowAvatar}"
+                                          Drawable="{Binding Source={RelativeSource AncestorType={x:Type vm:ChatViewModel}}, Path=AiAvatar}" />
+
                         <VerticalStackLayout Spacing="4"
                                              MaximumWidthRequest="520"
                                              HorizontalOptions="{Binding Align}">
@@ -176,6 +199,16 @@
                                     Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ChatViewModel}}, Path=UndoCommand}"
                                     CommandParameter="{Binding .}" />
                         </VerticalStackLayout>
+
+                            <!-- 你自己那侧，排在内容的右边（气泡本来就靠右），
+                                 所以间距留给左边。 -->
+                            <GraphicsView WidthRequest="26"
+                                          HeightRequest="26"
+                                          VerticalOptions="Start"
+                                          Margin="8,2,0,0"
+                                          IsVisible="{Binding ShowMyAvatar}"
+                                          Drawable="{Binding Source={RelativeSource AncestorType={x:Type vm:ChatViewModel}}, Path=MyAvatar}" />
+                        </HorizontalStackLayout>
                     </Grid>
                 </DataTemplate>
                     </BindableLayout.ItemTemplate>

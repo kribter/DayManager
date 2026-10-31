@@ -337,9 +337,9 @@ public partial class TimeViewModel : ObservableObject
     /// 每天想看今天的时长，得先滚过密钥输入框和一堆开关。
     /// 详见 SettingsViewModel 的说明。
     ///
-    /// 【入口为什么留在这页最底下】
-    /// 完全藏起来等于把功能删了人找不到；
-    /// 放在最显眼处又等于天天提醒他"还有一堆没配"。最底下刚好。
+    /// 【为什么这里不再要有入口】
+    /// 时间页底部那张「设置 >」卡片已经换成窗口右上角的齿轮了，
+    /// 命令留着不删只是为了防止将来有别的页面还要跳过去；界面上没有它在的位置了。
     /// </summary>
     [RelayCommand]
     private async Task OpenSettingsAsync() => await Shell.Current.GoToAsync("SettingsPage");

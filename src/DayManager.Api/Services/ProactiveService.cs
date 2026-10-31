@@ -110,11 +110,15 @@ public sealed class ProactiveService
             target = items.FirstOrDefault(x => x.Id == id);
         }
 
+        // "现在几点"要在查数据的同一刻取：隔了几秒再取，
+        // 算出来的"还有几分钟"可能和通知弹出的时间对不上。
+        var now = DateTimeOffset.Now;
+
         // ---------- ② 拼提示 ----------
 
         var messages = new List<ChatMessage>
         {
-            new() { Role = "system", Content = await BuildSystemPrompt(kind, today, items, stats, usage, recent, target, ct) }
+            new() { Role = "system", Content = await BuildSystemPrompt(kind, today, now, items, stats, usage, recent, target, ct) }
         };
 
         foreach (var m in history.Skip(Math.Max(0, history.Count - 8)))
@@ -303,6 +307,7 @@ public sealed class ProactiveService
     private async Task<string> BuildSystemPrompt(
         ProactiveKind kind,
         DateOnly today,
+        DateTimeOffset now,
         IReadOnlyList<Item> items,
         ItemRepository.DayStats stats,
         DayUsageSummary usage,
@@ -313,7 +318,7 @@ public sealed class ProactiveService
         // 和对话页共用同一份语气档：两边各写一套的话，
         // 早晨主动说的和他在对话页里问的会像两个人。
         var tone = AiTone.Parse(await _policy.GetRawAsync(PolicyKeys.AiTone, ct));
-        var persona = (await _policy.GetRawAsync(PolicyKeys.AiPersona, ct))?.Trim();
+        var persona = AiTone.NormalizePersona(await _policy.GetRawAsync(PolicyKeys.AiPersona, ct));
 
         var listText = items.Count == 0
             ? "（今天还没有安排）"
@@ -336,7 +341,7 @@ public sealed class ProactiveService
             "而且划走两三次之后他会关掉这个功能。所以每一句都必须有具体信息，",
             "不能是「新的一天开始了，加油」这种谁都能说的话。",
             "",
-            $"【今天】{today:yyyy-MM-dd}（{today:dddd}）",
+            $"【今天】{today:yyyy-MM-dd}（{today:dddd}），现在 {now:HH:mm}",
             $"【今天的清单】共 {stats.Total} 条，已完成 {stats.Done} 条" +
                 (stats.SkippedToday > 0 ? $"，跳过 {stats.SkippedToday} 条" : ""),
             listText,
@@ -352,15 +357,27 @@ public sealed class ProactiveService
 
         lines.AddRange(AiTone.StyleLines(tone));
 
-        // 自定义那句插在语气档之后、下面这几条专属约束之前：
-        // 这样它能改说话的分寸，但改不动"不要以提问开头"这类规矩
+        // 和对话页共用同一份规则（见 AiTone.FeedbackLines）：
+        // 晚间总结本来就是最容易写成"数据播报"的一处，这边更要明说。
+        lines.Add("");
+        lines.Add("【他做成一件事时】");
+        lines.AddRange(AiTone.FeedbackLines(tone));
+
+        // 自定义那段插在语气与正反馈之后、下面这几条专属约束之前：
+        // 这样它能改说话的分寸和篇幅，但改不动"不要以提问开头"这类规矩
         // ——主动开口本来就不该拿一个空问句开头，这不是口味问题。
         if (!string.IsNullOrEmpty(persona))
         {
             lines.Add("");
-            lines.Add("【他自己还写了这句，照着做】");
+            lines.Add("【他给你的设定：这段怎么写你就怎么来，它说了算】");
+            lines.Add("---- 他写的人设开始 ----");
             lines.Add(persona);
-            lines.Add("（这不解除下面任何一条硬规矩。）");
+            lines.Add("---- 他写的人设结束 ----");
+            lines.Add("");
+            lines.Add("（上面这一段优先于前面的说话方式和正反馈：");
+            lines.Add("他让你别夸你就别夸，让你多说两句你就多说两句。");
+            lines.Add("但它改不了下面任何一种东西——候选场合要说什么、");
+            lines.Add("不许编造，以及不许挖苦这条底线。）");
         }
 
         lines.AddRange(new[]
@@ -374,6 +391,21 @@ public sealed class ProactiveService
             "从此不再相信你说的任何一句。"
         });
 
+        // 日程前提醒要把"还有几分钟"替它算好。
+        //
+        // 【为什么不把两个钟点丢给它让它自己减】
+        // 模型做减法是有出错率的，而这是它唯一被允许报出的一个数字——
+        // "还有 8 分钟"错一次，他对整套提醒的信任就塌了。
+        // 减法是我们能替它做、且一定做对的事，那就别让它做。
+        var beforeTimeNote = string.Empty;
+        if (kind == ProactiveKind.Before && target?.StartAt is { } startAt)
+        {
+            var left = (int)Math.Ceiling((startAt - now).TotalMinutes);
+            beforeTimeNote = left <= 0
+                ? $"- 这一件 {startAt:HH:mm} 开始，已经到点了。"
+                : $"- 这一件 {startAt:HH:mm} 开始，还有 {left} 分钟。";
+        }
+
         switch (kind)
         {
             case ProactiveKind.Morning:
@@ -386,11 +418,20 @@ public sealed class ProactiveService
                     "- 有开始时间的，把时间带上；没有的，就说明它今天到期。",
                     "- 今天一件都没排时，不要劝他“排点什么”，那是催促。",
                     "  可以说一句今天空的、想做点什么随时叫我。",
-                    "- 60 字以内。"
+                    "- **默认 60 字以内。** 这是推送通知，长了他一眼不看就划走。",
+                    "  例外：他的人设里明确要求多说几句时可以放宽，但最多 120 字——再多那是聊天，不是提醒。"
                 });
                 break;
 
             case ProactiveKind.Before:
+                if (beforeTimeNote.Length > 0)
+                {
+                    lines.Add("");
+                    lines.Add("【这一件的时间】");
+                    lines.Add(beforeTimeNote);
+                    lines.Add("（这是系统算好的，直接照说，不要自己再算一遍。）");
+                }
+
                 lines.AddRange(new[]
                 {
                     "",
@@ -402,7 +443,8 @@ public sealed class ProactiveService
                               ? $"。它的第一步是「{step}」，直接把这一步说出来——"
                               : "。直接说“现在就做”，然后给一个最小动作——"),
                     "  他要的不是“该开始了”这个通知，而是“第一步做什么”这个答案。",
-                    "- 40 字以内。这条会弹成系统通知，长了他不看。"
+                    "- **默认 40 字以内。** 这条会弹成系统通知，长了他不看。",
+                    "  例外：他的人设要求更长的口吻时最多 80 字，再多就没有“扫一眼”的效果了。"
                 });
                 break;
 
@@ -410,7 +452,9 @@ public sealed class ProactiveService
                 lines.AddRange(new[]
                 {
                     "",
-                    "【这次要说：晚间总结】**严格控制在 60-80 字**",
+                    "【这次要说：晚间总结】**默认控制在 60-80 字**",
+                    "- 这是推送，默认篇幅是 UI 决定的，不是内容决定的。",
+                    "  例外：他的人设要求写得更多时最多 140 字。这句话同样会被存成今天的总结，越长越没人翻。",
                     "- 结构固定三块：**一句正反馈 + 一个具体的建议 + 一个数据**。",
                     "- 正反馈必须是真的：今天做成了一件事，就说那件事。",
                     "  一件都没做成时，不许硬夸。改成一句不带评价的事实（比如“今天没动”），",
@@ -433,7 +477,8 @@ public sealed class ProactiveService
                     "  是不是排太多了？是不是那件事本身就太大？是不是最近几天根本不在状态？",
                     "- 给一个能立刻做的减法：今天只留一件，或者把最难那条拆一半。",
                     "- 可以问一句“要不要我把今天没做完的重新排一下”，但**不要自己动手改**。",
-                    "- 70 字以内。"
+                    "- **默认 70 字以内。** 严肃的话更忌长，长了就变成说教。",
+                    "  例外：他的人设要求更长的口吻时最多 130 字。"
                 });
                 break;
         }

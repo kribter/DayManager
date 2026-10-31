@@ -1,4 +1,38 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!--
+  DayManager 的程序图标：日历里高亮「今天」那一格。
+
+  【为什么是白底而不是一块纯色】
+  纯色块底 + 白符号在 16 像素（任务栏、托盘）下会缩成一团糊；
+  白底 + 一条蓝顶栏 + 一个实心的蓝格，缩到最小也还是"一个格子被点亮的日历"。
+  白底另一个好处：深色任务栏上它是整排图标里最醒目的那个。
+
+  【为什么格子是实心的、没有外框线】
+  日历的方框细线在 16 像素下会直接消失（试过，只剩一个蓝方块）。
+  所以"日历"靠顶栏和网格的**实心块**表达，线一律不用。
+
+  【为什么只高亮一格】
+  它就是这个软件在说的事：日子是一格一格过的，而今天那一格是亮的。
+
+  约束：只用纯色矩形和圆角，不用渐变、滤镜、外部字体、外部引用——
+  构建期要把这张 svg 转成多尺寸 ico，任何一样花哨都会让转换结果不可控。
+-->
 <svg width="456" height="456" viewBox="0 0 456 456" version="1.1" xmlns="http://www.w3.org/2000/svg">
-    <rect x="0" y="0" width="456" height="456" fill="#512BD4" />
+    <clipPath id="rounded">
+        <rect x="0" y="0" width="456" height="456" rx="100" ry="100" />
+    </clipPath>
+
+    <rect x="3" y="3" width="450" height="450" rx="98" ry="98" fill="#FFFFFF" stroke="#E3E7EC" stroke-width="6" />
+
+    <g clip-path="url(#rounded)">
+        <rect x="0" y="0" width="456" height="120" fill="#3F6FB5" />
+    </g>
+
+    <rect x="60" y="188" width="96" height="88" rx="20" ry="20" fill="#C4CFE0" />
+    <rect x="180" y="188" width="96" height="88" rx="20" ry="20" fill="#3F6FB5" />
+    <rect x="300" y="188" width="96" height="88" rx="20" ry="20" fill="#C4CFE0" />
+
+    <rect x="60" y="300" width="96" height="88" rx="20" ry="20" fill="#C4CFE0" />
+    <rect x="180" y="300" width="96" height="88" rx="20" ry="20" fill="#C4CFE0" />
+    <rect x="300" y="300" width="96" height="88" rx="20" ry="20" fill="#C4CFE0" />
 </svg>

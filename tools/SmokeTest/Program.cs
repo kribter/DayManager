@@ -1278,6 +1278,52 @@ Console.WriteLine("=== 22. AI 主动开口：什么时候该说话 ===");
     // 空泛鼓励只在温和档里被明令禁止（直接档是压根不给鼓励），所以只查这一条。
     Check("每一档都守着不许挖苦这条底线",
         new[] { reserved, warm, direct }.All(x => x.Any(l => l.Contains("不许挖苦"))));
+
+    // 【为什么这一条值得测】
+    // 曾经这里写着"一次不超过三句"，结果人设框里写再多也没用：
+    // 篇幅限制排在硬规矩里，一个人想让 AI 多说两句的请求会被它直接吃掉。
+    // 篇幅是口味不是格式，锁在这个位置上会连带把人设一起锁死。
+    // 这里用最长中文句子长度的粗筛守着：不许再出现"不超过 X 句"这种话。
+    var countCaps = new[] { reserved, warm, direct }
+        .SelectMany(x => x)
+        .Where(l => l.Contains("不超过") && l.Contains("句") && !l.Contains("句号"))
+        .ToList();
+    Check("说话方式里不许再写死句数上限", countCaps.Count == 0);
+}
+
+// ---- 做成一件事之后的那半句 ----
+//
+// 【为什么这几条值得测】
+// 实测里他把一条画完，AI 回的是"挂上了，今天一条"——一句纯记账，
+// "做完"在系统里是静音的。这是一类最容易被删掉的规则：
+// 它不影响任何功能、不进日志、不崩，删了之后看起来什么问题都没有，
+// 只是人慢慢地不想再开始第二次。所以要用断言把它钉住。
+{
+    var reserved = AiTone.FeedbackLines(AiTone.Reserved);
+    var warm = AiTone.FeedbackLines(AiTone.Warm);
+    var direct = AiTone.FeedbackLines(AiTone.Direct);
+
+    Check("三档都给了做完之后的那半句", reserved.Count > 0 && warm.Count > 0 && direct.Count > 0);
+    Check("每一档都守着不许挖苦这条底线",
+        new[] { reserved, warm, direct }.All(x => x.Any(l => l.Contains("不许挖苦"))));
+
+    // 这条是它的命门：只要在要求"夸具体那件事"，就不用怕它会滑坡成"加油你可以的"。
+    Check("每一档都禁止空泛鼓励",
+        new[] { reserved, warm, direct }.All(x => x.Any(l => l.Contains("不许空泛鼓励"))));
+
+    // 它必须是"默认就有"的。写成硬规矩就没法被"别夸我"关掉了。
+    Check("三档都说得到'刚做成的是哪一件'",
+        new[] { reserved, warm, direct }.All(x => x.Any(l => l.Contains("刚做成"))));
+}
+
+// ---- 人设的清洗与上限 ----
+{
+    Check("没写人设时得到空串", AiTone.NormalizePersona(null) == string.Empty);
+    Check("写坏了的空白也算没写", AiTone.NormalizePersona("   \n\t ") == string.Empty);
+    Check("换行被归一化", !AiTone.NormalizePersona("甲\r\n乙")!.Contains('\r'));
+    Check("超过上限会被截断而不是报错",
+        AiTone.NormalizePersona(new string('字', AiTone.MaxPersonaLength + 200))!.Length
+            == AiTone.MaxPersonaLength);
 }
 
 Console.WriteLine();

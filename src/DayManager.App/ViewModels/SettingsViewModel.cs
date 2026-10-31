@@ -1,5 +1,6 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using DayManager.App.Drawables;
 using DayManager.App.Services;
 using DayManager.Core.Ai;
 using DayManager.Core.Enums;
@@ -27,6 +28,7 @@ public partial class SettingsViewModel : ObservableObject
     private readonly PolicyRepository _policy;
     private readonly AiSettings _ai;
     private readonly ApiClient? _api;
+    private readonly AvatarService _avatars;
 
     /// <summary>
     /// 托盘与开机自启。可空：这是 Windows 特有的能力，
@@ -40,14 +42,18 @@ public partial class SettingsViewModel : ObservableObject
     public SettingsViewModel(
         PolicyRepository policy,
         AiSettings ai,
+        AvatarService avatars,
         ApiClient? api = null,
         IWindowShell? shell = null,
         IAutoStartService? autoStart = null,
         ThemeService? theme = null)
     {
+        AiAvatar = new AvatarDrawable(avatars.Ai);
+        MyAvatar = new AvatarDrawable(avatars.Me);
         _policy = policy;
         _ai = ai;
         _api = api;
+        _avatars = avatars;
         _shell = shell;
         _autoStart = autoStart;
         _theme = theme ?? new ThemeService(policy);
@@ -165,9 +171,55 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     public partial bool IsToneDirect { get; set; }
 
-    /// <summary>他自己写的那句人设。可空；写完输入框失焦就存。</summary>
+    /// <summary>
+    /// 他自己写的那段人设。可空；能写多行，最多 <see cref="AiTone.MaxPersonaLength"/> 字。
+    /// </summary>
     [ObservableProperty]
     public partial string AiPersona { get; set; } = string.Empty;
+
+    /// <summary>字数提示。写在输入框右下角，让人知道还能写多少。</summary>
+    public string PersonaCountText =>
+        $"{AiTone.NormalizePersona(AiPersona).Length} / {AiTone.MaxPersonaLength} 字";
+
+    /// <summary>
+    /// 停手一会儿就自己存。
+    ///
+    /// 【为什么改成"停手就存"而不是只靠失焦】
+    /// 失焦存对人设框来说不再够用：现在能写几百字，
+    /// 写到一半被别的窗口抢走焦点、或者压根忘了点别处直接关掉页面，
+    /// 丢的就不是"最后几个字"而是一整段设定。
+    /// 延迟排队的写法能兼顾两头——连续打字只在最后一次停手时写一次库，
+    /// 不会像每敲一个字存一次那样把一行设置变成几十行垃圾。
+    /// </summary>
+    private CancellationTokenSource? _personaSaveCts;
+
+    partial void OnAiPersonaChanged(string value)
+    {
+        OnPropertyChanged(nameof(PersonaCountText));
+        QueuePersonaSave();
+    }
+
+    private void QueuePersonaSave()
+    {
+        _personaSaveCts?.Cancel();
+        _personaSaveCts?.Dispose();
+
+        var cts = new CancellationTokenSource();
+        _personaSaveCts = cts;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(1200, cts.Token);
+                await SavePolicyAsync(PolicyKeys.AiPersona, AiTone.NormalizePersona(AiPersona));
+            }
+            catch (OperationCanceledException)
+            {
+                // 又接着打了：这一次取消，新的那次会负责存。
+            }
+        });
+    }
 
     private string CurrentTone =>
         IsToneWarm ? AiTone.Warm
@@ -214,16 +266,90 @@ public partial class SettingsViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 存自定义那句人设。
+    /// 存这段人设。失焦时也会走一次（<see cref="QueuePersonaSave"/> 负责打字中途的自动存）。
     ///
-    /// 【为什么是失焦才存，而不是每敲一个字存一次】
-    /// 每敲一下写一次库，一行设置会变成几十行垃圾；
-    /// 而输入框失焦正好是人打完一句话的自然时机，写一次就够。
+    /// 【为什么不丢那个自动存的时机】
+    /// 两边都存同一个地方、同一个值，重复写一次的成本远小于"他以为存了其实没存"。
     /// </summary>
     [RelayCommand]
     private async Task SavePersonaAsync()
     {
-        await SavePolicyAsync(PolicyKeys.AiPersona, (AiPersona ?? string.Empty).Trim());
+        // 已经有自动存在排队了，先把它撤掉，免得紧接着再写一遍同样的内容。
+        _personaSaveCts?.Cancel();
+        await SavePolicyAsync(PolicyKeys.AiPersona, AiTone.NormalizePersona(AiPersona));
+    }
+
+    // ==================== 两边头像 ====================
+
+    /// <summary>
+    /// AI 那支笔。界面上所有 AI 头像圆共用同一个实例：
+    /// 它不是每个圆一份的状态，只是"知道现在该画哪张图"的同一个对象。
+    /// </summary>
+    public AvatarDrawable AiAvatar { get; }
+
+    /// <summary>你自己那支笔。同上。</summary>
+    public AvatarDrawable MyAvatar { get; }
+
+    /// <summary>
+    /// 已经换过自定义头像（决定「恢复默认」那个按钮要不要露出来）。
+    ///
+    /// 【为什么按"图还在不在"算，而不是按"存没存过"】
+    /// 头像文件在本机应用数据目录里，他有可能自己翻进去删掉。
+    /// 那种情况下界面应该回到没换过的样子，而不是显示一个永远画不出来的设置。
+    /// </summary>
+    [ObservableProperty]
+    public partial bool HasCustomAiAvatar { get; set; }
+
+    /// <summary>同上，你自己那一侧。</summary>
+    [ObservableProperty]
+    public partial bool HasCustomMyAvatar { get; set; }
+
+    /// <summary>
+    /// 给 AI 换一张。
+    ///
+    /// 【为什么失败要说一句，而不是静默】
+    /// 选图失败几乎都发生在他确实选了东西之后（格式怪、读不出来），
+    /// 静默的表现是"头像没变"，他会以为自己点错了。
+    /// </summary>
+    [RelayCommand]
+    private async Task PickAiAvatarAsync()
+    {
+        var ok = await _avatars.Ai.PickAsync();
+        HasCustomAiAvatar = _avatars.Ai.HasCustom;
+
+        if (!ok)
+        {
+            await ShowMessageAsync("没换成", "没选到图片，或者这张图读不出来。换一张（png / jpg）试试。");
+        }
+    }
+
+    /// <summary>AI 恢复成默认的那个格子。</summary>
+    [RelayCommand]
+    private void ClearAiAvatar()
+    {
+        _avatars.Ai.Clear();
+        HasCustomAiAvatar = _avatars.Ai.HasCustom;
+    }
+
+    /// <summary>给自己换一张。</summary>
+    [RelayCommand]
+    private async Task PickMyAvatarAsync()
+    {
+        var ok = await _avatars.Me.PickAsync();
+        HasCustomMyAvatar = _avatars.Me.HasCustom;
+
+        if (!ok)
+        {
+            await ShowMessageAsync("没换成", "没选到图片，或者这张图读不出来。换一张（png / jpg）试试。");
+        }
+    }
+
+    /// <summary>自己那侧恢复成默认的人影。</summary>
+    [RelayCommand]
+    private void ClearMyAvatar()
+    {
+        _avatars.Me.Clear();
+        HasCustomMyAvatar = _avatars.Me.HasCustom;
     }
 
     // ==================== 外观：深浅 ====================
@@ -432,7 +558,13 @@ public partial class SettingsViewModel : ObservableObject
 
             SelectThemeOnly(_theme.Mode);
             SelectToneOnly(tone);
-            AiPersona = persona ?? string.Empty;
+            AiPersona = AiTone.NormalizePersona(persona);
+            OnPropertyChanged(nameof(PersonaCountText));
+            HasCustomAiAvatar = _avatars.Ai.HasCustom;
+            HasCustomMyAvatar = _avatars.Me.HasCustom;
+
+            // 刚读出来就被排了一次自动存，那是把已经存好的东西再写一遍。撤掉。
+            _personaSaveCts?.Cancel();
             IsCloseToTray = closeToTray;
 
             // 托盘那边马上要知道：它在任何界面操作之前就得按这个偏好拦住"关闭"。

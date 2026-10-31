@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using CommunityToolkit.Mvvm.Messaging;
 using DayManager.App.Messages;
 using DayManager.App.Services;
@@ -195,6 +196,15 @@ public static class WindowsTitleBar
             // 注意 ButtonForegroundColor 也要设，否则深色条上那三个
             // 最小化/最大化/关闭按钮还是按浅色主题画的深灰箭头，看不清。
             var handle = WinRT.Interop.WindowNative.GetWindowHandle(native);
+
+            // 主题掰过之后齿轮的笔画也要跟着换色。
+            // EnsureSettingsButton 里之所以不做这件事，是因为它只在找到 TopNavArea 时被调到，
+            // 而用户切主题时不一定再走那一步——这里补一次才跟得上。
+            if (_settingsButton is not null)
+            {
+                _settingsButton.Foreground = Brush(AppColors.Muted);
+            }
+
             var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(handle);
             if (Microsoft.UI.Windowing.AppWindow.GetFromWindowId(windowId) is { } appWindow)
             {
@@ -263,6 +273,13 @@ public static class WindowsTitleBar
                     $"[topnav] overwritten bg={DescribeBrush(sp.Background)}, re-tinting"));
                 sp.Background = Brush(AppColors.PageBg);
             }
+
+            // 每次复查都顺手确认齿轮还挂在树上：
+            // 上面那条日志说的"模板重应用会换掉元素实例"，对按钮一样成立——
+            // 被摘掉之后不重新挂上去，设置入口就凭空消失了，而且没有任何报错。
+            // 顺手把这一小片也重新涂一遍（TintShell 会走到 TopNavGrid 分支，
+            // EnsureSettingsButton 里面有节流，重复调没有代价）。
+            TintShell(sp);
         }
 
         if (_shellTinted)
@@ -275,6 +292,217 @@ public static class WindowsTitleBar
         {
             SetRootBackground(r);
             TintShell(r);
+        }
+    }
+
+    // ---------- 右上角的设置齿轮 ----------
+
+    private static Microsoft.UI.Xaml.Controls.Button? _settingsButton;
+
+    /// <summary>
+    /// 把齿轮挂进标签行（TopNavGrid）右端。重复调用是安全的——挂好了就不再动。
+    ///
+    /// 【为什么齿轮要这样做，而不是在界面上加一个按钮】
+    /// Shell 的顶部是 WinUI 的 NavigationView 画出来的，几个 Tab 之外全是原生控件，
+    /// 页面上画的东西都落在标签行下面，想放进那一行只能走可视树这一条路。
+    /// 好处是它不占额外的高度——用户当初关掉标题栏就是为了把那一行还给清单。
+    /// 挂进标签行容器之后右对齐、垂直居中，天然和标签文字齐平，
+    /// 不需要任何"往下挪多少像素"的测量——那种测量在这个结构里测不准（实测）。
+    ///
+    /// 【为什么挂载必须异步，哪怕调用时已经在 UI 线程上】
+    /// 这个方法的调用方之一是 LayoutUpdated——**布局回调**。
+    /// 在布局回调里同步改可视树（Children.Add），WinUI 会报
+    /// LayoutCycleException（2026-10-30 实测，整个窗口黑掉）：
+    /// "我这轮布局还没算完，你又塞了个新元素进来逼我重新布局"。
+    /// 所以挂载一律 Dispatch 到下一拍，脱离布局回调的调用栈再动手。
+    ///
+    /// 【为什么挂上就不再搬家】
+    /// Shell 是两层 NavigationView，可能碰上一条以上的 TopNavGrid；
+    /// "从旧的摘下来挂到新的"是个竞态：两个 Dispatch 闭包谁后执行看运气。
+    /// 挂上第一条就认它——每条标签行容器都是满宽的，挂哪条贴的都是右边缘。
+    ///
+    /// 【为什么要节流】
+    /// LayoutUpdated 每帧都发。不做节流的话，这里每帧都会排一次 Dispatch，
+    /// 而 Dispatch 本身又可能催生下一轮布局——恶性循环。
+    /// 半秒最多试一次；成功挂好之后，闭包里发现按钮已经在位就什么都不做。
+    ///
+    /// 【为什么数失败次数】
+    /// 挂载永远失败的话（比如某个系统版本不接受这种塞法），
+    /// 就该安静地放弃：少一个设置入口是可用性损失，不是崩溃。
+    /// 三次不成先认输，等下次主题切换还会再给机会。
+    /// </summary>
+    private static void EnsureSettingsButton(Microsoft.UI.Xaml.Controls.Grid? navGrid)
+    {
+        var now = Environment.TickCount64;
+
+        if (now - _lastSettingsAttempt < 500 || _settingsFailures >= MaxSettingsFailures)
+        {
+            return;
+        }
+
+        _lastSettingsAttempt = now;
+
+        Microsoft.Maui.Controls.Application.Current?.Dispatcher.Dispatch(() =>
+        {
+            try
+            {
+                var button = _settingsButton ??= BuildSettingsButton();
+
+                if (button.Parent is not null)
+                {
+                    // 已经挂上了：只把颜色跟紧主题，不搬家。
+                    button.Foreground = Brush(AppColors.Muted);
+                    _settingsFailures = 0;
+                    return;
+                }
+
+                // 【为什么挂标签行容器的父 Grid，而不是 TopNavGrid 自己】
+                // TopNavGrid 里面是列布局，新塞进来的按钮没有列号，会被归进第 0 列，
+                // Right 对齐成了"第 0 列的右端"——实际落在容器左边界外面（实测 X=-34），
+                // 看起来就是"挂了但看不见"；用 Translation 硬推又被整个无视（实测无效）。
+                // 它的父 Grid 是普通的叠放容器（TopNavArea、SplitView 全都叠在一个格里），
+                // Right 对齐在这种 Grid 里说到做到。按钮 Top 对齐 + 8px 边距，
+                // 正好落在标签行的行高里，和文字齐平。
+                var host = FindTabRowHost();
+
+                if (host is null)
+                {
+                    // 这一刻没有活着的容器（多半是启动太早，模板还没展开）。
+                    // 什么都不挂，等下一轮复查带着新几何再来。
+                    if (!_loggedNoHost)
+                    {
+                        _loggedNoHost = true;
+                        CrashLogger.Write("齿轮诊断", new Exception("no live tab-row host found"));
+                    }
+
+                    return;
+                }
+
+                host.Children.Add(button);
+                // 【为什么提 z 序】host 里后加的 SplitView 等大件会按叠放顺序画在
+                // 同层；按钮虽然也是后加，但实测仍被标签行的原生内容压住
+                // （红块实验：只有行底部一条缝露出来）。ZIndex 直接拉满。
+                Microsoft.UI.Xaml.Controls.Canvas.SetZIndex(button, 1000);
+                button.Foreground = Brush(AppColors.Muted);
+                _settingsFailures = 0;
+            }
+            catch (Exception ex)
+            {
+                // 失败的半成品不能留着力气下次接着用——
+                // 复用一个挂不上去的按钮只会一直失败。丢掉重造。
+                _settingsButton = null;
+                _settingsFailures++;
+                if (_settingsFailures <= MaxSettingsFailures)
+                {
+                    // 齿轮挂不上只是少了一个入口，不该把整个标题栏的适配拖崩。
+                    CrashLogger.Write("挂设置齿轮失败", ex);
+                }
+            }
+        });
+    }
+
+    /// <summary>挂载齿轮的连续失败上限，超过就先不再试（见上面注释）。</summary>
+    private const int MaxSettingsFailures = 3;
+
+    private static int _settingsFailures;
+
+    /// <summary>上次尝试挂载的时刻（TickCount 毫秒）。节流用，跨线程读它没有 COM 风险。</summary>
+    private static long _lastSettingsAttempt;
+
+    /// <summary>"找不到活容器"只记一次日志，别让高频重试把它刷成瀑布。</summary>
+    private static bool _loggedNoHost;
+
+    /// <summary>
+    /// 从窗口当前的内容树里找"正在显示"的标签行所在的那个 Grid。
+    ///
+    /// 【为什么绕了两层】
+    /// 树里叫 TopNavGrid 的容器可能不止一个：外层 NavigationView 是 Left 模式，
+    /// 它自己的 TopNavGrid 恒为 0×0（永不显示）；真正渲染标签行的是
+    /// SplitView 深处内层 NavigationView 的那一条。第一个碰到的是外层的——
+    /// 直接挂就是"成功挂载、永远不可见"，连报错都没有（2026-10-30 实测）。
+    /// 所以按 ActualWidth 挑出有尺寸的那条 TopNavGrid，再取它的父 Grid
+    /// （一个普通的叠放容器）作为挂靠点——Right 对齐在那里说到做到。
+    /// </summary>
+    private static Microsoft.UI.Xaml.Controls.Grid? FindTabRowHost()
+    {
+        if (_window?.Handler?.PlatformView is not Microsoft.UI.Xaml.Window w ||
+            w.Content is not Microsoft.UI.Xaml.FrameworkElement root)
+        {
+            return null;
+        }
+
+        Microsoft.UI.Xaml.Controls.Grid? widest = null;
+        FindWidestTopNavGrid(root, ref widest);
+
+        if (widest?.Parent is Microsoft.UI.Xaml.Controls.StackPanel navArea &&
+            navArea.Parent is Microsoft.UI.Xaml.Controls.Grid host &&
+            host.XamlRoot is not null)
+        {
+            return host;
+        }
+
+        return null;
+    }
+
+    private static void FindWidestTopNavGrid(Microsoft.UI.Xaml.DependencyObject node, ref Microsoft.UI.Xaml.Controls.Grid? best)
+    {
+        if (node is Microsoft.UI.Xaml.Controls.Grid g &&
+            g.Name == "TopNavGrid" &&
+            g.XamlRoot is not null &&
+            (best is null || g.ActualWidth > best.ActualWidth))
+        {
+            best = g;
+        }
+
+        var count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(node);
+        for (var i = 0; i < count; i++)
+        {
+            FindWidestTopNavGrid(Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(node, i), ref best);
+        }
+    }
+
+    private static Microsoft.UI.Xaml.Controls.Button BuildSettingsButton()
+    {
+        var button = new Microsoft.UI.Xaml.Controls.Button
+        {
+            // Segoe Fluent Icons（Win11）里的「设置」字形，Win10 上有同名同位的 MDL2 兜底。
+            Content = "\uE713",
+            FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
+            FontSize = 16,
+            Width = 34,
+            Height = 32,
+            Padding = new Microsoft.UI.Xaml.Thickness(0),
+            Margin = new Microsoft.UI.Xaml.Thickness(0, 8, 8, 0),
+            HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Right,
+            VerticalAlignment = Microsoft.UI.Xaml.VerticalAlignment.Top,
+            HorizontalContentAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Center,
+            VerticalContentAlignment = Microsoft.UI.Xaml.VerticalAlignment.Center,
+            // 透明底：标签行已经染成了页面色，再画一层按钮底色就会露出一个方块。
+            Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(new global::Windows.UI.Color { A = 0 }),
+            BorderThickness = new Microsoft.UI.Xaml.Thickness(0)
+        };
+
+        Microsoft.UI.Xaml.Controls.ToolTipService.SetToolTip(button, "设置");
+        button.Click += OnSettingsClicked;
+        return button;
+    }
+
+    private static void OnSettingsClicked(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        try
+        {
+            // 【为什么不能直接在这儿导航】
+            // Click 是 WinUI 的 UI 线程回调，而 Shell 的导航得走 MAUI 的调度器。
+            // 窗口还藏在托盘里时也要先叫回来——和托盘菜单里那段的处理一致：
+            // 先 Restore，再压进设置页，人才看得见发生了什么。
+            Microsoft.Maui.Controls.Application.Current?.Dispatcher.Dispatch(() =>
+            {
+                _ = Microsoft.Maui.Controls.Shell.Current.GoToAsync("SettingsPage");
+            });
+        }
+        catch (Exception ex)
+        {
+            CrashLogger.Write("设置齿轮跳转失败", ex);
         }
     }
 
@@ -312,6 +540,16 @@ public static class WindowsTitleBar
                 {
                     _tintedAreas.Add(sp);
                 }
+                break;
+            case Microsoft.UI.Xaml.Controls.Grid g when g.Name == "TopNavGrid":
+                // 齿轮的家。TopNavGrid 是标签行本体（里面装着 tabs 的 ItemsRepeater），
+                // 挂这里不用任何偏移计算：右对齐贴边、垂直居中，天然和标签文字齐平。
+                //
+                // 【为什么当初放弃了它】第一次诊断它 ActualWidth=0，以为是隐藏容器——
+                // 其实只是读得太早、布局还没跑。标签正常显示这件事本身就证明它有尺寸。
+                // 绕道"挂 TopNavArea + 渲染偏移"折腾了四轮（COM 异常、布局循环、
+                // 两条带抢按钮、TransformToVisual 报假坐标），最后回到这里一步到位。
+                EnsureSettingsButton(g);
                 break;
         }
 

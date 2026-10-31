@@ -396,31 +396,17 @@
                     </VerticalStackLayout>
                 </Border>
 
-                <!-- ================= 去设置页 =================
+                <!--
+                     ================= 设置入口（已移到窗口右上角） =============
+                     这里原本有一张「设置 >」的卡片。它现在变成右上角那个齿轮了。
 
-                     【为什么入口放在最底下，而不是顶上】
-                     这一页是"看时间去了哪"的地方，设置是"偶尔去一次"的地方。
-                     把它摆在最显眼的位置等于每天提醒一次"你还有一堆没配"——
-                     那正是让人不想打开这一页的东西。
-                     但也不能藏：缩进设置页里却找不到入口，等于把功能删了。 -->
-                <Border Grid.Row="0"
-                        Style="{StaticResource CardStyle}"
-                        Margin="0,12,0,0"
-                        Padding="14,12">
-                    <Border.StrokeShape>
-                        <RoundRectangle CornerRadius="14" />
-                    </Border.StrokeShape>
-
-                    <VerticalStackLayout Spacing="6">
-                        <Button Text="设置 >"
-                                Style="{StaticResource ChipButton}"
-                                HorizontalOptions="Start"
-                                Command="{Binding OpenSettingsCommand}" />
-
-                        <Label Text="外观、AI 怎么说话、AI 密钥、开机与托盘都在里面。"
-                               Style="{StaticResource Caption}" />
-                    </VerticalStackLayout>
-                </Border>
+                     【为什么搬走而不是两个都留】
+                     设置是"偶尔去一次"的地方，放在一个每天翻的页面底部，
+                     等于每看一次就被提醒一次"你还有一堆没配"；
+                     而搬进工具栏之后，它始终在同一个位置，不用记"它在时间页最下面"。
+                     留两条入口的话，其中一条迟早变成没人维护的死路——
+                     上次改了其中之一、忘了另一条，用户会以为功能没了。
+                     托盘右键里的「设置…」保留，那是另一个场景：窗口不在桌面上时用它。 -->
 
                 <!-- 空状态里必须说清楚"为什么没有"。
                      只说"还没有数据"，用户会以为是这一页坏了——

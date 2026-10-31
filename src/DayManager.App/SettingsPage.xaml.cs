@@ -1,3 +1,5 @@
+using CommunityToolkit.Mvvm.Messaging;
+using DayManager.App.Messages;
 using DayManager.App.ViewModels;
 
 namespace DayManager.App;
@@ -19,6 +21,15 @@ public partial class SettingsPage : ContentPage
         InitializeComponent();
 
         BindingContext = _viewModel = viewModel;
+
+        // 换完头像让两个预览圆立刻重画。
+        // 头像是画出来的，改了图不会触发属性变化，不叫一次就还是旧的那张。
+        WeakReferenceMessenger.Default.Register<AvatarChangedMessage>(
+            this, (_, _) => MainThread.BeginInvokeOnMainThread(() =>
+            {
+                AiAvatarPreview.Invalidate();
+                MyAvatarPreview.Invalidate();
+            }));
     }
 
     protected override async void OnAppearing()

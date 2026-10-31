@@ -4,6 +4,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using CommunityToolkit.Mvvm.Messaging;
 using DayManager.App.Messages;
+using DayManager.App.Drawables;
 using DayManager.App.Services;
 using DayManager.Core.Entities;
 using DayManager.Core.Planning;
@@ -57,12 +58,14 @@ public partial class ChatViewModel : ObservableObject
     /// <summary>历史只加载一次。切 Tab 回来时 Shell 会再触发，重复加载会把列表翻倍。</summary>
     private bool _loaded;
 
-    public ChatViewModel(ApiClient api, BackendGuard guard, ChatRepository chat, AiSettings ai)
+    public ChatViewModel(ApiClient api, BackendGuard guard, ChatRepository chat, AiSettings ai, AvatarService avatars)
     {
         _api = api;
         _guard = guard;
         _chat = chat;
         _ai = ai;
+        AiAvatar = new AvatarDrawable(avatars.Ai);
+        MyAvatar = new AvatarDrawable(avatars.Me);
 
         StatusText = "还没说话";
 
@@ -75,11 +78,26 @@ public partial class ChatViewModel : ObservableObject
         WeakReferenceMessenger.Default.Register<ProactiveSpokeMessage>(
             this, (_, _) => _ = AppendLatestAsync());
 
-        // 气泡的底色和文字色是每个气泡生成时算好的（BubbleColor / BubbleTextColor），
-        // 换个主题它们不会自己变：新气泡是深色、旧气泡还是浅底黑字，
-        // 一屏里两种配色。所以这里整页重读一遍。
+        // 气泡的底色和文字色是每个气泡取值的那一瞬间算的（BubbleColor / BubbleTextColor），
+        // 没人重新取它就永远停在旧值。换主题时对每个气泡叫一遍，让绑定重取。
         WeakReferenceMessenger.Default.Register<ThemeChangedMessage>(
-            this, (_, _) => _ = ReloadForThemeAsync());
+            this, (_, _) => RefreshBubblesForTheme());
+    }
+
+    /// <summary>
+    /// 通知所有气泡：主题变了，颜色重新取一遍。
+    ///
+    /// 【为什么不在收到消息时顺手把页面级的东西也刷】
+    /// 页面级（背景、状态条）走的是 XAML 的 AppThemeBinding，框架自己跟；
+    /// 这里只管 C# 里算出来的那几个值。设置页返回对话页时 ChatPage.OnAppearing
+    /// 还会再调一次本方法兜底——消息万一没送到，回到页面时也能修正。
+    /// </summary>
+    public void RefreshBubblesForTheme()
+    {
+        foreach (var bubble in Messages)
+        {
+            bubble.RefreshTheme();
+        }
     }
 
     /// <summary>
@@ -133,6 +151,19 @@ public partial class ChatViewModel : ObservableObject
 
     /// <summary>对话气泡。最新的在最后。</summary>
     public ObservableCollection<ChatBubble> Messages { get; } = new();
+
+    /// <summary>
+    /// 两侧头像各一支笔。全部气泡共用这两个实例：
+    /// 它们不存"某个气泡的头像"，只是每次重绘时去问一次"现在是哪张图"。
+    ///
+    /// 【为什么放在 ViewModel 上而不是每个气泡一份】
+    /// 气泡是数据，笔是画法。五十个气泡各造一支笔，
+    /// 换头像时要挨个通知一遍——放在外面就只需要在页面上重画一次。
+    /// </summary>
+    public AvatarDrawable AiAvatar { get; }
+
+    /// <summary>同上，你自己这一侧。</summary>
+    public AvatarDrawable MyAvatar { get; }
 
     /// <summary>
     /// AI 猜的、你接下来最可能说的几句。显示在输入框上方，点一下就发出去。
@@ -212,18 +243,6 @@ public partial class ChatViewModel : ObservableObject
     /// 重读一次库很便宜（最近 50 条），换来的是配色整齐。
     /// 历史还没加载过时不用管，等打开页面那一次自然会带上新配色。
     /// </summary>
-    private async Task ReloadForThemeAsync()
-    {
-        if (!_loaded)
-        {
-            return;
-        }
-
-        _loaded = false;
-        Messages.Clear();
-        await LoadHistoryAsync();
-    }
-
     [RelayCommand]
     private async Task LoadHistoryAsync()
     {
@@ -618,6 +637,23 @@ public partial class ChatBubble : ObservableObject
     public bool ShowAsBubble => !IsSystem;
 
     /// <summary>
+    /// AI 那侧的头像：只有它说的话旁边摆。系统提示不是它说的（那是故障说明），不摆。
+    /// </summary>
+    public bool ShowAvatar => !IsUser && !IsSystem;
+
+    /// <summary>
+    /// 你自己那侧的头像：只有你说的话旁边摆。
+    ///
+    /// 【为什么两边都摆，而不是只摆 AI 那侧】
+    /// 只摆一侧时，"哪段是谁说的"得靠左右对齐来判断；
+    /// 两边都有个圆，扫一眼就分开了，不用读字。
+    /// 之前只摆一侧的理由是"两边都是空占位符时会变成两排圆点"——
+    /// 那是指没有个人信息的时候；现在你这边默认是一个灰色人影，AI 那边是蓝格子，
+    /// 两个图形不一样，反而是互相解释的：蓝的是系统，灰的是人。
+    /// </summary>
+    public bool ShowMyAvatar => IsUser;
+
+    /// <summary>
     /// 气泡底色。
     ///
     /// 【为什么气泡要自己给底色，而不是直接用页面底色】
@@ -646,6 +682,22 @@ public partial class ChatBubble : ObservableObject
     public string UndoText => IsUndone ? "已撤回" : $"撤回这 {Outcomes.Count} 条改动";
 
     public void MarkUndone() => IsUndone = true;
+
+    /// <summary>
+    /// 主题换过后叫一次，让绑定重新来取 BubbleColor / BubbleTextColor。
+    ///
+    /// 【为什么需要显式叫，而不是指望绑定自己更新】
+    /// 这两个属性是普通 Binding（不是 AppThemeBinding）：值是**取的那一瞬间**算的，
+    /// 底下没人发 PropertyChanged，界面就永远停在第一次取到的值。
+    /// 之前靠"清空列表重新读库"来重建气泡，实测靠不住——
+    /// 重建是异步的、依赖加载状态，任何一环没跑完气泡就停在旧色上，
+    /// 而且重建还会把滚动位置扔掉。直接通知属性变化：同步、必达、不折腾列表。
+    /// </summary>
+    public void RefreshTheme()
+    {
+        OnPropertyChanged(nameof(BubbleColor));
+        OnPropertyChanged(nameof(BubbleTextColor));
+    }
 
     public static ChatBubble User(string text) =>
         new() { IsUser = true, Text = text };

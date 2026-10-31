@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using DayManager.Api.Models;
 using DayManager.Core.Entities;
 using DayManager.Core.Enums;
@@ -165,8 +166,14 @@ public sealed class ItemTools
             item = await db.Items.AsNoTracking().FirstAsync(x => x.Id == item.Id, ct);
         }
 
+        //
+        // 【为什么时间要用 HH 而不是 hh】
+        // hh 是 12 小时制：15:00 会被显示成 "03:00"，下午的日程看着像凌晨三点。
+        // 这里是给用户看的结果文字，不是给机器读的，必须保留 24 小时制。
+        // 另外前面要留一个空格——贴着日期写成 "10-3015:00" 看不出来那是几点。
+        //
         return (Ok("create", item.Id, item.Title,
-            $"加到 {day:MM-dd}" + (time is null ? "" : time.Value.ToString(@"hh\:mm"))
+            $"加到 {day:MM-dd}" + (time is null ? "" : " " + time.Value.ToString(@"HH\:mm"))
             + (action.Project is null ? "" : $"，归到「{action.Project.Trim()}」")), item);
     }
 
@@ -317,6 +324,17 @@ public sealed class ItemTools
             : null;
     }
 
+    /// <summary>
+    /// 解析具体时刻。认得的标准写法以外的，能接住的尽量接住。
+    ///
+    /// 【为什么这里要收这么多种写法】
+    /// 模型被要求输出 HH:mm，但它不是机器：单数字的 "9:30"、带秒的 "15:00:00"、
+    /// 偶尔还会照着用户的原话写 "下午三点"。
+    /// 每漏掉一种，后果都是同一件最糟的事：
+    /// 用户明确说了几点，建出来的那条却没有时间，而且没有任何报错。
+    /// 静默丢字段是这个软件里最难发现、也最难信任回来的一类错误，
+    /// 宁可在这里多写几行把它接住。
+    /// </summary>
     private static TimeSpan? ParseTime(string? text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -324,8 +342,92 @@ public sealed class ItemTools
             return null;
         }
 
-        return TimeSpan.TryParseExact(text.Trim(), "HH:mm", CultureInfo.InvariantCulture, out var t) ? t : null;
+        var raw = text.Trim();
+
+        // 先用明确格式，避免把 "10-27" 这类东西也糊里胡嗦解析成时间。
+        if (TimeSpan.TryParseExact(raw, new[] { "HH:mm", "H:mm", "HH:mm:ss", "H:mm:ss" },
+                CultureInfo.InvariantCulture, out var exact))
+        {
+            return exact;
+        }
+
+        if (TimeSpan.TryParse(raw, CultureInfo.InvariantCulture, out var loose))
+        {
+            return loose;
+        }
+
+        // 最后试中文口语："下午三点" "晚上十点半" "3点15"。
+        return ParseSpokenTime(raw);
     }
+
+    /// <summary>
+    /// 中文口语时刻 → TimeSpan。认不全也没关系，认不出来返回 null，
+    /// 由调用方照旧建成不带时刻的待办（这条用户可以自己再改，不会写坏数据）。
+    /// </summary>
+    private static TimeSpan? ParseSpokenTime(string text)
+    {
+        var hourMatch = Regex.Match(text, @"(\d{1,2}|[一二三四五六七八九十两]+)\s*[点时]");
+        if (!hourMatch.Success)
+        {
+            return null;
+        }
+
+        var hourText = hourMatch.Groups[1].Value;
+        var hour = int.TryParse(hourText, out var n) ? n : SpokenNumber(hourText);
+        if (hour is < 0 or > 23)
+        {
+            return null;
+        }
+
+        // 分钟：只有紧跟在"点"后面的那几个字才算，避免把句子后半段的数字也吃进来。
+        var tail = text[(hourMatch.Index + hourMatch.Length)..];
+        var minute = 0;
+
+        if (tail.Contains('半'))
+        {
+            minute = 30;
+        }
+        else if (tail.Contains("一刻"))
+        {
+            minute = 15;
+        }
+        else
+        {
+            var minuteMatch = Regex.Match(tail, @"(\d{1,2})\s*分");
+            if (minuteMatch.Success)
+            {
+                minute = int.Parse(minuteMatch.Groups[1].Value);
+            }
+        }
+
+        // 下午/晚上/傍晚/夜里 +12。上午/早上/凌晨保持原样。
+        // 已经大于 12 的说明它自己带了 24 小时制的数（"下午15点"），不再加。
+        foreach (var (word, shift) in MeridiemWords)
+        {
+            if (shift > 0 && hour < 12 && text.Contains(word))
+            {
+                hour += shift;
+                break;
+            }
+        }
+
+        return hour > 23 || minute > 59 ? null : new TimeSpan(hour, minute, 0);
+    }
+
+    /// <summary>口语里表示时段的词，以及对应的小时偏移。</summary>
+    private static readonly (string Word, int Shift)[] MeridiemWords =
+    {
+        ("下午", 12), ("傍晚", 12), ("晚上", 12), ("夜里", 12), ("半夜", 0),
+        ("中午", 0), ("上午", 0), ("早上", 0), ("凌晨", 0)
+    };
+
+    private static int SpokenNumber(string text) => text switch
+    {
+        "一" => 1, "两" => 2, "二" => 2, "三" => 3, "四" => 4, "五" => 5,
+        "六" => 6, "七" => 7, "八" => 8, "九" => 9, "十" => 10,
+        "十一" => 11, "十二" => 12,
+        _ => -1
+    };
 
     private static ItemStatus? ParseStatus(string? text)
     {
