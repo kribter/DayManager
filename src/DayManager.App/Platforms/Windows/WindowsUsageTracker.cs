@@ -97,6 +97,16 @@ public sealed class WindowsUsageTracker : ICurrentUsageSource, IDisposable
     private readonly UsageRepository _usage;
 
     /// <summary>
+    /// 手动标记过的应用。开会话时要问它一句才知道这算不算娱乐。
+    ///
+    /// 【为什么只在这里注入，而不让它参与别的事】
+    /// 它就是一张"这个应用是什么性质"的名单，采集端唯一的用途就是决定
+    /// 这条会话该被记成什么。真正的时间统计早就改成按当前标记实时判定了，
+    /// 这一列现在只是留给将来查历史用。
+    /// </summary>
+    private readonly AppRuleRepository _rules;
+
+    /// <summary>
     /// 音频信号：看视频、听歌时人是不碰键鼠的，光靠输入判断会把这段时间全丢掉。
     /// 它只在"已经空闲超时"时才被问一次，频率很低，开销可以忽略。
     /// </summary>
@@ -146,9 +156,10 @@ public sealed class WindowsUsageTracker : ICurrentUsageSource, IDisposable
     /// </summary>
     private volatile bool _stopped;
 
-    public WindowsUsageTracker(UsageRepository usage)
+    public WindowsUsageTracker(UsageRepository usage, AppRuleRepository rules)
     {
         _usage = usage;
+        _rules = rules;
 
         // 音频那边的话也走同一条日志通道。它失败时是静默的
         // （界面上表现就是"时间页少了一块"），必须能看见原因。
@@ -354,7 +365,7 @@ public sealed class WindowsUsageTracker : ICurrentUsageSource, IDisposable
             info.AppId,
             info.AppName,
             info.Title,
-            DayManager.Core.Intervention.EntertainmentApps.IsEntertainment(info.AppId),
+            await KindOfAsync(info.AppId) == AppKind.Entertainment,
             at);
 
         _currentSessionId = session.Id;
@@ -367,6 +378,29 @@ public sealed class WindowsUsageTracker : ICurrentUsageSource, IDisposable
         _current = new CurrentUsageSnapshot(info.AppId, info.AppName, at, info.Title);
 
         Say($"开始记录 {info.AppName}（{info.AppId}）{(string.IsNullOrWhiteSpace(info.Title) ? "" : "：" + info.Title)}");
+    }
+
+    /// <summary>
+    /// 这个应用现在被标记成什么；没标过就是 Neutral（交给内置名单说话）。
+    ///
+    /// 【为什么查一次库，而不是起一个缓存】
+    /// 开会话的频率是"切一次应用一次"，一天也就几百次，
+    /// 而缓存要处理"用户刚在设置页改了标记"的失效时机——那是条更容易出错的路。
+    /// 标记不该自适应得那么快，没有理由为此加一层状态。
+    /// </summary>
+    private async Task<AppKind> KindOfAsync(string appId)
+    {
+        try
+        {
+            var rule = await _rules.GetAsync(appId);
+            return rule?.Kind ?? AppKind.Neutral;
+        }
+        catch (Exception ex)
+        {
+            // 查不出来就当没标过：宁可少记一次娱乐，也不能让采集卡在这里断掉。
+            Say($"读应用标记失败：{ex.Message}");
+            return AppKind.Neutral;
+        }
     }
 
     /// <summary>把当前这段收口。传进来的时刻是"最后一次确认人在用"的时刻，不是关窗那一刻。</summary>

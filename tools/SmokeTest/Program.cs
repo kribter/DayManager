@@ -956,6 +956,50 @@ Check("日统计和区间统计口径一致（同一段数据，两个入口同�
     $"{(await usage.GetDaySummaryAsync(rDay)).TotalSeconds} vs {rRange.TotalSeconds}");
 
 Console.WriteLine();
+Console.WriteLine("=== 19b. 娱乐时长：手动标记追认历史，名单不改写过去 ===");
+
+/*
+ * 这两条断言是为了把一处设计决定固定住。
+ *
+ * 手动标记（app_rules）和内置名单是两种性质完全不同的"认知"：
+ *   - 手动标记是**追认**。人去标记一个应用，多半发生在"刷了很久终于承认"的那一刻，
+ *     标记之前那几个小时恰恰是最该被看见的——所以它对全部历史生效。
+ *   - 名单会更新。下个月把某个新游戏补进名单，那是系统在改主意，
+ *     不该回过头去改写上周的数字。所以没手动标过的，沿用记录当时的判断。
+ * 改任一条都要先想清楚：只按快照算，是在惩罚诚实；全实时算，历史会被版本更新悄悄篡改。
+ */
+
+// 这段会话写进去的时候没被记成娱乐：比如它那会儿还没进名单。
+// 时间取往前五天，免得干扰上面那些区间的断言。
+var pBase = uBase.AddDays(-5);
+DateTimeOffset P(double hours) => pBase.AddHours(hours);
+var pDay = DateOnly.FromDateTime(pBase.DateTime);
+
+var probe = await usage.StartAsync(DevicePlatform.Windows, "smokeprobe", "Probe App", null, false, P(9));
+await usage.AddActiveSecondsAsync(probe.Id, 600, P(9.2));
+
+Check("没手动标过：沿用记录当时的判断（还不算娱乐）",
+    (await usage.GetRangeAsync(pDay, pDay.AddDays(1))).EntertainmentSeconds == 0);
+
+await using (var pdb = factory.CreateDbContext())
+{
+    pdb.AppRules.Add(new AppRule
+    {
+        Id = Guid.NewGuid(),
+        AppId = "smokeprobe",
+        AppName = "Probe App",
+        Kind = AppKind.Entertainment,
+    });
+    await pdb.SaveChangesAsync();
+}
+
+var pRange = await usage.GetRangeAsync(pDay, pDay.AddDays(1));
+Check("手动标成娱乐：连标记之前那段也补算进来（标记是追认，不是从今开始）",
+    pRange.EntertainmentSeconds == 600, $"{pRange.EntertainmentSeconds}");
+Check("这个应用自己也被标成娱乐了",
+    pRange.Apps.FirstOrDefault(x => x.AppId == "smokeprobe")?.IsEntertainment == true);
+
+Console.WriteLine();
 Console.WriteLine("=== 20. 干预引擎：什么时候该说话、说给谁听 ===");
 
 var policyRepo = new PolicyRepository(factory);

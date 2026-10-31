@@ -1,5 +1,6 @@
 using DayManager.Core.Entities;
 using DayManager.Core.Enums;
+using DayManager.Core.Intervention;
 using Microsoft.EntityFrameworkCore;
 
 namespace DayManager.Data.Repositories;
@@ -234,6 +235,46 @@ public class UsageRepository
             return UsageRange.Empty;
         }
 
+        /*
+         * 【娱乐时长怎么判：手动标记的追认到全部历史，没标过的按当时那一算】
+         *
+         * 之前纯看会话表上那个 IsEntertainment 快照列，后果有两层：
+         *   1. 你把 Chrome 标成"算娱乐"之前那几个小时一律不算——
+         *      而人去标记一个应用，基本都是"刷了很久终于承认"的时候，
+         *      最该被看见的恰恰是标记之前那段；
+         *   2. 时间页每个应用那枚徽章走的是实时判定，明细写着娱乐、
+         *      汇总却说"娱乐 5 分钟"，同一个页面自己打架，
+         *      而 AI 做正反馈时读的也是这个错数。
+         *
+         * 于是这里改成：你自己手动标过的，按标记说话，且对全部历史生效。
+         * 但**没手动标过的**，仍然沿用记录那一刻的结论。这一半为什么要留着：
+         * 内置名单是会补的（下个月把某个新游戏加进去），那是系统在改认知，
+         * 不该回过头去改写你过去几天的记录——否则"上周娱乐 30 分钟"这个数字
+         * 会因为一次版本更新自己变大，历史就不再是历史了。
+         *
+         * 代价要写明白：手动标记因此丢掉了时间维度。某应用上半年确实是工具、
+         * 下半年才变成摸鱼，一旦标成娱乐，历史会被一并算进来。
+         * 要保住这个维度得给规则加"生效时间"，那是高一档的工作量，
+         * 对现在这个单人自用的阶段不值。
+         */
+        var kinds = (await db.AppRules.AsNoTracking()
+                .Where(x => x.DeletedAt == null)
+                .Select(x => new { x.AppId, x.Kind })
+                .ToListAsync(ct))
+            .ToDictionary(x => x.AppId, x => x.Kind, StringComparer.OrdinalIgnoreCase);
+
+        bool IsFun(string appId, bool recordedAsFun)
+        {
+            // 手动表过态的：他说了算，不分标记前后。
+            if (kinds.TryGetValue(appId, out var marked) && marked != AppKind.Neutral)
+            {
+                return marked == AppKind.Entertainment;
+            }
+
+            // 没表过态的：以这条会话当时记下来的为准。
+            return recordedAsFun;
+        }
+
         // 【分组前必须先转本地时间】库里是 UTC 毫秒，读回来偏移是 0。
         // 不转的话，晚上 8 点以后的使用会被算到"第二天"——跨天统计全错位。
         var days = rows
@@ -241,7 +282,7 @@ public class UsageRepository
             .Select(g => new UsageSlice(
                 g.Key,
                 g.Sum(x => x.DurationSeconds),
-                g.Where(x => x.IsEntertainment).Sum(x => x.DurationSeconds),
+                g.Where(x => IsFun(x.AppId, x.IsEntertainment)).Sum(x => x.DurationSeconds),
                 g.Count()))
             .OrderBy(x => x.Day)
             .ToList();
@@ -258,14 +299,14 @@ public class UsageRepository
                     g.Key,
                     string.IsNullOrWhiteSpace(latestName) ? g.Key : latestName!,
                     g.Sum(x => x.DurationSeconds),
-                    g.Any(x => x.IsEntertainment));
+                    g.Any(x => IsFun(x.AppId, x.IsEntertainment)));
             })
             .OrderByDescending(x => x.Seconds)
             .ToList();
 
         return new UsageRange(
             TotalSeconds: rows.Sum(x => x.DurationSeconds),
-            EntertainmentSeconds: rows.Where(x => x.IsEntertainment).Sum(x => x.DurationSeconds),
+            EntertainmentSeconds: rows.Where(x => IsFun(x.AppId, x.IsEntertainment)).Sum(x => x.DurationSeconds),
             SessionCount: rows.Count,
             // 同样是 UTC 转本地：末次活跃要当成"几点睡的"，差 8 小时就是另一个故事了。
             FirstAt: rows.Min(x => x.StartAt).ToLocalTime(),
