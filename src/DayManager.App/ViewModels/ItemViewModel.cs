@@ -154,6 +154,91 @@ public partial class ItemViewModel : ObservableObject
     public partial TextDecorations TitleDecorations { get; set; }
 
     /// <summary>
+    /// 这一条现在是不是正在走表。
+    ///
+    /// 【为什么判定必须把"进行中"和"StartedAt 有值"两个数一起看】
+    /// 因为暂停是用"把 StartedAt 清空"来表示的（见 ItemRepository.ToggleStartPauseAsync）：
+    /// 状态照样是进行中，只是这会儿没在计时。
+    /// 只看状态的话，暂停中的条目会被当成"正在计时"，于是继续往上加时间。
+    /// </summary>
+    public bool IsCounting =>
+        _item.Status == ItemStatus.InProgress && _item.StartedAt is not null;
+
+    /// <summary>是不是"开始过、但现在停着"。</summary>
+    public bool IsPaused =>
+        _item.Status == ItemStatus.InProgress && _item.StartedAt is null;
+
+    /// <summary>
+    /// 启动按钮上写什么：启动 / 暂停 / 继续。
+    ///
+    /// 【为什么按钮要换字而不是换个图标】
+    /// 同一个位置在两种时刻做两件事，靠图标区分要人先记住图标的含义；
+    /// 换成字，"点下去会发生什么"就写在那儿了——这也是把二级菜单挪出来的前提：
+    /// 挪出来之后每个按钮都得自己说清楚自己是干什么的。
+    /// </summary>
+    public string StartButtonText =>
+        IsCounting ? "暂停" : IsPaused ? "继续" : "启动";
+
+    /// <summary>
+    /// 这一条还能不能点启动。
+    ///
+    /// 完成和「不做了」不给按钮：那两件都已经了结，再给个开始是自相矛盾。
+    /// </summary>
+    public bool CanStartPause =>
+        _item.Status is ItemStatus.Pending or ItemStatus.Skipped or ItemStatus.InProgress;
+
+    /// <summary>
+    /// 到目前为止累计花了多少分钟。
+    ///
+    /// 【为什么不把它存成一个固定值，而是每次问都重算】
+    /// 正在计时的时候这个值每分钟都在变，
+    /// 存下来就得配一套机制去同步它——不如随问随算，永远不会过期。
+    /// 算法在 Core 里，跟暂停结算、完成回填共用同一份（见 Core/Planning/Elapsed）。
+    ///
+    /// 【为什么做完之后要拿 CompletedAt 当截止】
+    /// 做完之后 StartedAt 还留着（那是有价值的历史），
+    /// 还拿"现在"去算的话，这条的用时会随着你放得越久越长——
+    /// 昨天做完的事，今天看能用了一天。
+    /// </summary>
+    public int ElapsedMinutes =>
+        Elapsed.TotalMinutes(
+            _item.ActualMinutes,
+            _item.StartedAt,
+            _item.Status == ItemStatus.Done && _item.CompletedAt is not null
+                ? _item.CompletedAt.Value
+                : DateTimeOffset.Now);
+
+    /// <summary>
+    /// 只把"走表相关的几个值"通知界面刷新一次。
+    ///
+    /// 【为什么这些 computed 属性要手动发通知】
+    /// 它们是每次取值都重新算一遍的只读属性，底下没有存值的字段，
+    /// 所以框架无从知道"什么时候变了"。Refresh 之后、每次走字之后都得叫一次，
+    /// 否则界面上那句"已进行 12 分钟"会一直停在第一次显示的数字上。
+    /// </summary>
+    private void NotifyTiming()
+    {
+        OnPropertyChanged(nameof(ElapsedMinutes));
+        OnPropertyChanged(nameof(IsCounting));
+        OnPropertyChanged(nameof(IsPaused));
+        OnPropertyChanged(nameof(StartButtonText));
+        OnPropertyChanged(nameof(CanStartPause));
+    }
+
+    /// <summary>
+    /// 每过一小会儿叫一次：重算那句"已进行几分钟"，值变了就让绑定自己刷新。
+    ///
+    /// 【为什么不等用户操作再刷】
+    /// 计时数字存在的全部意义就是"它在走"。
+    /// 一个不会自己动的秒表等于没有计时，人只会去别处看时间。
+    /// </summary>
+    public void RefreshElapsed()
+    {
+        Subtitle = BuildSubtitle();
+        NotifyTiming();
+    }
+
+    /// <summary>
     /// 用新的数据替换内部实体，并重算所有展示用的属性。
     /// 状态改变后调用它，界面上对应的那一行就会自动更新。
     /// </summary>
@@ -272,6 +357,10 @@ public partial class ItemViewModel : ObservableObject
 
         CanFocus = _item.Status
             is ItemStatus.Pending or ItemStatus.Skipped or ItemStatus.InProgress;
+
+        // 上面那几个 derived 属性（用时、按钮文案）底层没有存值字段，
+        // 换了新实体之后必须自己喊一声，否则按钮上的字还停在上一轮。
+        NotifyTiming();
     }
 
     /// <summary>
@@ -306,18 +395,41 @@ public partial class ItemViewModel : ObservableObject
         var startLocal = _item.StartAt?.ToLocalTime();
         var dueLocal = _item.DueAt?.ToLocalTime();
         var completedLocal = _item.CompletedAt?.ToLocalTime();
-        var startedLocal = _item.StartedAt?.ToLocalTime();
 
-        if (_item.Status == ItemStatus.Done && completedLocal.HasValue)
+        if (_item.Status == ItemStatus.Done)
         {
-            parts.Add($"完成于 {completedLocal.Value:HH:mm}");
+            // 【为什么做完的事一定要把实际用时写出来】
+            // 这是"你做事到底要花多久"的唯一现场记录，也是 AI 下次排程的唯一依据
+            // （没有它，AI 只能照你的乐观估计排，于是天天排不下）。
+            // 上一版这里只有"完成于 16:43"，做完之后连自己花了多久都不知道。
+            if (_item.ActualMinutes is > 0)
+            {
+                parts.Add($"用了 {DurationText.Format(_item.ActualMinutes.Value)}");
+            }
+
+            if (completedLocal.HasValue)
+            {
+                parts.Add($"完成于 {completedLocal.Value:HH:mm}");
+            }
         }
-        else if (_item.Status == ItemStatus.InProgress && startedLocal.HasValue)
+        else if (_item.Status == ItemStatus.InProgress)
         {
-            // "已经开始多久了"比"还剩多久"更能让人想继续做完
-            // （两个 DateTimeOffset 相减得到 TimeSpan，相减本身与时区无关，不涉及 UTC 问题）
-            var elapsed = DateTimeOffset.Now - _item.StartedAt!.Value;
-            parts.Add($"已进行 {(int)elapsed.TotalMinutes} 分钟");
+            // 【为什么已经在做的事要写出"走了多久"】
+            // "已经开了头"这件事本身就值钱：它把最难的"要不要开始"
+            // 变成了"要不要停下"。数字在那儿自己变大，
+            // 半途而废的代价不用谁提醒，自己看得见。
+            var elapsed = ElapsedMinutes;
+
+            if (IsCounting)
+            {
+                parts.Add(elapsed > 0 ? $"已进行 {elapsed} 分钟" : "刚开始");
+            }
+            else
+            {
+                // 暂停态：表停了，但之前各段都还在。
+                // 只写"已暂停"会让人以为前面那段白做了，所以把累计也带上。
+                parts.Add(elapsed > 0 ? $"已暂停 · 累计 {elapsed} 分钟" : "已暂停");
+            }
         }
 
         if (startLocal.HasValue)

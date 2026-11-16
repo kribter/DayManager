@@ -1,5 +1,6 @@
 using DayManager.Core.Entities;
 using DayManager.Core.Enums;
+using DayManager.Core.Planning;
 using Microsoft.EntityFrameworkCore;
 
 namespace DayManager.Data.Repositories;
@@ -398,6 +399,7 @@ public class ItemRepository
             case ItemStatus.InProgress:
                 item.Status = ItemStatus.InProgress;
                 item.StartedAt ??= now;
+                await OpenSegmentAsync(db, id, now, ct);
                 break;
 
             case ItemStatus.Done:
@@ -406,6 +408,7 @@ public class ItemRepository
                 // 这时 StartedAt 也不能空着，否则这一条的启动延迟数据就丢了。
                 item.StartedAt ??= now;
                 item.CompletedAt = now;
+                await CloseSegmentsAsync(db, id, now, ct);
                 break;
 
             case ItemStatus.Pending:
@@ -415,6 +418,7 @@ public class ItemRepository
                 // SkippedAt 也保留：它记录的是"最近一次跳过的时刻"，
                 // 清掉就再也看不出这条被跳过过了（SkipCount 还在，但时间没了）。
                 item.CompletedAt = null;
+                await CloseSegmentsAsync(db, id, now, ct);
                 break;
 
             case ItemStatus.Skipped:
@@ -423,6 +427,7 @@ public class ItemRepository
                 item.SkipCount++;
                 item.SkipReason = string.IsNullOrWhiteSpace(skipReason) ? null : skipReason.Trim();
                 item.CompletedAt = null;
+                await CloseSegmentsAsync(db, id, now, ct);
                 break;
 
             case ItemStatus.Abandoned:
@@ -432,7 +437,173 @@ public class ItemRepository
                 // SkipCount 保留——那些次跳过是真实发生过的历史。
                 item.SkippedAt = null;
                 item.SkipReason = null;
+                await CloseSegmentsAsync(db, id, now, ct);
                 break;
+        }
+
+        await db.SaveChangesAsync(ct);
+        return item;
+    }
+
+    /// <summary>
+    /// 按下计时器：给这条任务开一段计时。
+    ///
+    /// 【为什么已经有 ActualMinutes 还要另开一段】
+    /// ActualMinutes 最后只留一个总数，看不出那些分钟落在几点。
+    /// 而时间账要拿"他在做事的时段"和"电脑前待着的时段"做并集，
+    /// 没有起止时刻就做不成——这正是 WorkSegment 存在的理由。
+    ///
+    /// 【为什么已经在走就直接返回，而不是再开一段】
+    /// 一条任务同一时刻只可能有一个计时器在走。
+    /// 重复开会留下两段重叠的区间，并集时互相吃掉，
+    /// 表面看只是数字不对，实质是"同一段时间被记了两次"这个错误被藏起来了。
+    /// </summary>
+    private static async Task OpenSegmentAsync(
+        AppDbContext db, Guid itemId, DateTimeOffset at, CancellationToken ct)
+    {
+        var running = await db.WorkSegments
+            .AnyAsync(x => x.ItemId == itemId && x.EndAt == null, ct);
+
+        if (running)
+        {
+            return;
+        }
+
+        db.WorkSegments.Add(new WorkSegment { ItemId = itemId, StartAt = at });
+    }
+
+    /// <summary>
+    /// 停表：把这条任务所有还在走的段收尾。
+    ///
+    /// 【为什么收"所有"而不是"最后一条"】
+    /// 正常只有一段在走。但被强杀、走了异常路径都可能留下不止一段，
+    /// 只收最后一条就会永远剩一条没有结束时刻的段——
+    /// 它的右端被当成"现在"，于是每查一次就多算一截，分母越滚越大。
+    /// 一律收干净，代价只是多一次查询。
+    /// </summary>
+    private static async Task CloseSegmentsAsync(
+        AppDbContext db, Guid itemId, DateTimeOffset at, CancellationToken ct)
+    {
+        var open = await db.WorkSegments
+            .Where(x => x.ItemId == itemId && x.EndAt == null)
+            .ToListAsync(ct);
+
+        foreach (var segment in open)
+        {
+            // 时钟被往回拨过时 at 可能早于开始时刻，写进去就是一段倒挂的区间。
+            // 并集会把它丢掉（见 TimeInterval.IsEmpty），
+            // 但留一条永远闭不上的段更糟，所以照写。
+            segment.EndAt = at;
+        }
+    }
+
+    /// <summary>
+    /// 启动 ↔ 暂停 来回切。
+    ///
+    /// 【暂停怎么表示：状态不动，只把 StartedAt 清空】
+    /// 进行中用两个字段的组合表达两种子状态，两个都能说出来：
+    ///   进行中 + StartedAt 有值  → 正在计时
+    ///   进行中 + StartedAt 为空  → 暂停中（之前各段已经结进 ActualMinutes）
+    /// 好处是"这件事已经开始了"这个事实不会因为暂停而丢失——
+    /// 用一堆额外状态表达暂停的话，"曾经动过手"这条线索就被绕过去了。
+    ///
+    /// 【为什么借用 ActualMinutes 当累计器，而不是新加一列】
+    /// 它本来就是"这条实际花了多久"，而暂停结清进去的那段正是已经花掉的时间，
+    /// 语义严丝合缝。新加一列要每台机器跑一次迁移，换来的是同一个意思的第二列。
+    ///
+    /// 【为什么分钟取整会丢掉零头】
+    /// 一次暂停丢不到一分钟。这不是精度问题，是取舍：
+    /// 记秒得再加一列粒度更细的字段，而 AI 排程从来不用比分钟更细的时间。
+    /// 丢掉的是零头，换来的是不用迁移。
+    /// </summary>
+    public async Task<Item?> ToggleStartPauseAsync(Guid id, CancellationToken ct = default)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var item = await db.Items.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (item is null)
+        {
+            return null;
+        }
+
+        // 已经了结的事不再开表。原样返回，界面那边本来也不给它显示这个按钮。
+        if (item.Status is ItemStatus.Done or ItemStatus.Abandoned)
+        {
+            return item;
+        }
+
+        if (item.Status == ItemStatus.InProgress && item.StartedAt is not null)
+        {
+            // 暂停：把这一段结清，然后停表。
+            var banked = Elapsed.TotalMinutes(
+                item.ActualMinutes, item.StartedAt, DateTimeOffset.Now);
+
+            item.ActualMinutes = Elapsed.OrNullIfZero(banked);
+            item.StartedAt = null;
+
+            await CloseSegmentsAsync(db, id, DateTimeOffset.Now, ct);
+        }
+        else
+        {
+            // 启动 / 继续：重新按表。
+            //
+            // 【为什么这里可以直接赋值，不怕覆盖】
+            // 走到这条分支时 StartedAt 一定是空的（要么没开始过，要么上一句刚清掉），
+            // 所以不存在"覆盖了真正的首次开始时间"的风险——那是 SetStatusAsync
+            // 用 ??= 守着的事，这里用不上。
+            item.Status = ItemStatus.InProgress;
+            item.StartedAt = DateTimeOffset.Now;
+
+            await OpenSegmentAsync(db, id, item.StartedAt.Value, ct);
+        }
+
+        await db.SaveChangesAsync(ct);
+        return item;
+    }
+
+    /// <summary>
+    /// 勾完成 / 取消完成，并且把这一轮计时结算进 ActualMinutes。
+    ///
+    /// 【为什么不直接用 SetStatusAsync】
+    /// SetStatusAsync 不知道"暂停累计"这回事，
+    /// 用它写完成，ActualMinutes 会停在上次暂停时的数，
+    /// 后面那一段干活的时间就蒸发了。这个字段是 AI 判断"你做事要花多久"的唯一依据，
+    /// 少记一段，它下次排程还是照你的乐观估计来排。
+    /// </summary>
+    public async Task<Item?> ToggleDoneAsync(Guid id, CancellationToken ct = default)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var item = await db.Items.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (item is null)
+        {
+            return null;
+        }
+
+        var now = DateTimeOffset.Now;
+
+        if (item.Status == ItemStatus.Done)
+        {
+            // 取消完成：只摘掉"做完了"这个结论。
+            // StartedAt 和 ActualMinutes 都留着——你确实动过手、确实花了时间，
+            // 被撤销的是结论，那段历史依然是历史。
+            item.Status = ItemStatus.Pending;
+            item.CompletedAt = null;
+        }
+        else
+        {
+            item.Status = ItemStatus.Done;
+            item.StartedAt ??= now;
+            item.CompletedAt = now;
+
+            // 只有走过计时才回填。没点过启动就勾完成的，StartedAt 是这一刻补的、
+            // 间隔 0，写进去等于编一个 0 出来——那会让 AI 读成"这件事不用花时间"。
+            var total = Elapsed.TotalMinutes(
+                item.ActualMinutes, item.StartedAt, item.CompletedAt.Value);
+
+            item.ActualMinutes = Elapsed.OrNullIfZero(total);
+
+            await CloseSegmentsAsync(db, id, now, ct);
         }
 
         await db.SaveChangesAsync(ct);

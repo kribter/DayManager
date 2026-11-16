@@ -1,7 +1,10 @@
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Messaging;
+using DayManager.App.Messages;
 using DayManager.Core.Entities;
 using DayManager.Core.Enums;
 using DayManager.Core.Intervention;
+using DayManager.Core.Proactive;
 using DayManager.Data.Repositories;
 using Microsoft.Maui.Dispatching;
 
@@ -36,15 +39,26 @@ public sealed partial class FocusSessionService : ObservableObject, IDisposable
 {
     private readonly ItemRepository _items;
     private readonly IInterventionNotifier _notifier;
+    private readonly ChatRepository _chat;
+    private readonly ProactiveDraftService _drafts;
 
     private IDispatcherTimer? _timer;
     private DateTimeOffset _endsAt;
     private int _minutes;
 
-    public FocusSessionService(ItemRepository items, IInterventionNotifier notifier)
+    /// <summary>这一轮的预热只发一次。</summary>
+    private bool _warmedUp;
+
+    public FocusSessionService(
+        ItemRepository items,
+        IInterventionNotifier notifier,
+        ChatRepository chat,
+        ProactiveDraftService drafts)
     {
         _items = items;
         _notifier = notifier;
+        _chat = chat;
+        _drafts = drafts;
     }
 
     /// <summary>
@@ -96,6 +110,7 @@ public sealed partial class FocusSessionService : ObservableObject, IDisposable
     public async Task<Item?> StartAsync(Guid id, string title, int minutes = DefaultMinutes)
     {
         StopTimer();
+        _warmedUp = false;
 
         //
         // 【为什么开始计时就要把任务置成"进行中"】
@@ -176,11 +191,38 @@ public sealed partial class FocusSessionService : ObservableObject, IDisposable
         if (remaining > TimeSpan.Zero)
         {
             UpdateRemainingText(remaining);
+
+            // 到点前一分钟，先把那句话要过来：AI 说一句要十几秒，
+            // 等到点再问，通知会晚；AI 一慢就只能退回模板，那条链路等于白接。
+            if (!_warmedUp && remaining <= TimeSpan.FromMinutes(ProactiveDraftService.WarmupMinutes))
+            {
+                _warmedUp = true;
+                WarmUpDraft();
+            }
+
             return;
         }
 
         Finish();
     }
+
+    /// <summary>向 AI 要一句收尾的话，存进共享草稿箱。</summary>
+    private void WarmUpDraft()
+    {
+        var today = DateOnly.FromDateTime(DateTime.Now);
+        var elapsed = _minutes - (int)Math.Ceiling((_endsAt - DateTimeOffset.Now).TotalMinutes);
+
+        _drafts.WarmUp(
+            DraftKey(),
+            ProactiveKind.Focus,
+            ItemId,
+            today,
+            ItemTitle,
+            elapsed < 0 ? 0 : elapsed,
+            _minutes);
+    }
+
+    private string DraftKey() => "focus." + ItemId.ToString("N");
 
     private void Finish()
     {
@@ -195,8 +237,38 @@ public sealed partial class FocusSessionService : ObservableObject, IDisposable
         // 顺序固定为：**先承认已经做了，再给下一步，而且"没做完"也要算做到了**。
         // 人最难的是开头，开头过了就是真的过了。
         //
-        PromptText = $"「{ItemTitle}」已经做了 {_minutes} 分钟。"
-                     + "做完了就去打个勾，没做完也已经开了头 —— 最难的就是开头那一下。";
+        // 【为什么这句也交给 AI】
+        // 一个软件里出现两种"它主动说的话"是分裂的：
+        // 干预那句会看今天的清单、会按人设说话，这句却永远是同一行字。
+        // 所以让它也走同一条路（ProactiveDraftService），
+        // 只有 AI 没说出来的时候才退回下面这句本地模板——
+        // 模板是底，不是默认。
+        //
+        PromptText = _drafts.Take(DraftKey(), Array.Empty<DayManager.Core.Entities.Item>())
+                     ?? $"「{ItemTitle}」已经做了 {_minutes} 分钟。"
+                       + "做完了就去打个勾，没做完也已经开了头 —— 最难的就是开头那一下。";
+
+        // 通知之前先落进对话：通知会滑走，对话不会。
+        // 写不进去就这一轮不弹——"弹了却在对话里找不到"比不弹更糟。
+        try
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await _chat.AddAsync(DayManager.Core.Entities.ChatMessage.RoleAssistant, PromptText);
+                    WeakReferenceMessenger.Default.Send(new DayManager.App.Messages.ProactiveSpokeMessage());
+                }
+                catch (Exception ex)
+                {
+                    CrashLogger.Write("保存专注到点那句话", ex);
+                }
+            });
+        }
+        catch (Exception)
+        {
+            // 落库这一步失败不影响提醒本身：该弹的还是弹。
+        }
 
         _notifier.Show(
             NoticeAppId,

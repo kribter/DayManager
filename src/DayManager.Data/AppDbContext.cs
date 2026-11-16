@@ -48,6 +48,12 @@ public class AppDbContext : DbContext
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
 
     /// <summary>
+    /// 任务计时段：从点下启动到暂停/完成的每一段真实起止。
+    /// 时间账的分母要靠它补上"没开电脑也在做事"的那部分，见 WorkSegment 的说明。
+    /// </summary>
+    public DbSet<WorkSegment> WorkSegments => Set<WorkSegment>();
+
+    /// <summary>
     /// 构造函数接收 options，由调用方决定连哪个库（客户端连本机 SQLite，服务端连服务器上的库）。
     /// 这种写法叫依赖注入：DbContext 自己不关心连哪，交给外部配置。
     /// </summary>
@@ -71,6 +77,7 @@ public class AppDbContext : DbContext
         ConfigurePolicySetting(modelBuilder.Entity<PolicySetting>());
         ConfigureAppRule(modelBuilder.Entity<AppRule>());
         ConfigureChatMessage(modelBuilder.Entity<ChatMessage>());
+        ConfigureWorkSegment(modelBuilder.Entity<WorkSegment>());
 
         ApplyTimeConverters(modelBuilder);
     }
@@ -247,6 +254,22 @@ public class AppDbContext : DbContext
         b.HasIndex(x => new { x.StartAt, x.EndAt });
         b.HasIndex(x => x.AppId);
         b.HasIndex(x => x.IsEntertainment);   // 快速算出今天娱乐了多久
+
+        b.HasQueryFilter(x => x.DeletedAt == null);
+    }
+
+    private static void ConfigureWorkSegment(Microsoft.EntityFrameworkCore.Metadata.Builders.EntityTypeBuilder<WorkSegment> b)
+    {
+        b.ToTable("work_segments");
+        b.HasKey(x => x.Id);
+
+        // 【典型查询是"某一段时间里有哪些段"，所以索引在起止时刻上】
+        // 时间账要拿这些段和电脑使用记录做区间并集，
+        // 两边都按时间范围取，没有索引的话统计每次刷新都要全表扫。
+        b.HasIndex(x => new { x.StartAt, x.EndAt });
+
+        // 同一条任务的若干段要能一次取出来（比如"这件事一共分了几段做完"）。
+        b.HasIndex(x => x.ItemId);
 
         b.HasQueryFilter(x => x.DeletedAt == null);
     }

@@ -161,9 +161,37 @@ public partial class ProjectDetailViewModel : ObservableObject
     {
         try
         {
-            var updated = await _items.SetStatusAsync(
-                item.Id,
-                item.IsDone ? ItemStatus.Pending : ItemStatus.Done);
+            // 跟日程页走同一个方法（ToggleDoneAsync）：
+            // 勾完成的那一刻要把这段计时结算进 ActualMinutes，
+            // 否则大任务页里做完的事就没有实际用时，AI 排程还是照你的乐观估计来。
+            var updated = await _items.ToggleDoneAsync(item.Id);
+
+            if (updated is not null)
+            {
+                item.Update(updated);
+                UpdateProgress();
+            }
+        }
+        catch (Exception ex)
+        {
+            await ReportErrorAsync(ex);
+        }
+    }
+
+    /// <summary>
+    /// 启动 / 暂停。
+    ///
+    /// 【为什么详情页也要有这个按钮】
+    /// 在这儿看大任务进度的人，下一步往往就是"开工做一条"。
+    /// 还要切回日程页才能开始的话，这一趟切换本身就是拖延的温床。
+    /// 命令的实现跟日程页指向同一个仓库方法，行为必然一致。
+    /// </summary>
+    [RelayCommand]
+    private async Task ToggleStartPauseAsync(ItemViewModel item)
+    {
+        try
+        {
+            var updated = await _items.ToggleStartPauseAsync(item.Id);
 
             if (updated is not null)
             {

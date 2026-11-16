@@ -92,6 +92,45 @@ public partial class MainViewModel : ObservableObject
         WeakReferenceMessenger.Default.Register<ThemeChangedMessage>(
             this,
             (_, _) => _ = LoadCommand.ExecuteAsync(null));
+
+        StartElapsedTicker();
+    }
+
+    /// <summary>
+    /// 每 20 秒把所有正在走表的条目的"已进行 N 分钟"刷一遍。
+    ///
+    /// 【为什么非要有这个节拍】
+    /// 一个不会自己走的数字不是计时，只是快照。
+    /// 它存在的意义是让"已经投入了多少"随时可见——要人自己去点一下
+    /// 才更新，那就等于没有。
+    ///
+    /// 【为什么是 20 秒而不是每秒】
+    /// 这个数字人的眼睛读到的是"二十几分钟"这种量级，
+    /// 每秒刷要平白重排六十倍的布局；二十秒最慢也就差二十秒，看不出来。
+    ///
+    /// 【为什么只看 IsCounting 的那几条】
+    /// 暂停中的、没开始的，它们的值不会自己变，重算是白算。
+    ///
+    /// 【为什么用 Application 的 Dispatcher 起，而不是 new Timer】
+    /// Dispatcher.StartTimer 是在 UI 线程上调回来的，
+    /// 改那些被绑定的属性是安全的；普通 Timer 的回调在线程池里，
+    /// 直接改 ObservableCollection 绑定的属性会炸。缺点是程序一关它就停了，
+    /// 而这正好是我们要的——它本来只服务于屏幕上的那个数字。
+    /// </summary>
+    private void StartElapsedTicker()
+    {
+        Application.Current?.Dispatcher.StartTimer(
+            TimeSpan.FromSeconds(20),
+            () =>
+            {
+                foreach (var item in TodayItems.Where(x => x.IsCounting).ToList())
+                {
+                    item.RefreshElapsed();
+                }
+
+                // 返回 true = 还要下一次；返回 false 这个定时器就结束了。
+                return true;
+            });
     }
 
     /// <summary>
@@ -334,9 +373,40 @@ public partial class MainViewModel : ObservableObject
     {
         try
         {
-            var updated = await _itemRepository.SetStatusAsync(
-                item.Id,
-                item.IsDone ? ItemStatus.Pending : ItemStatus.Done);
+            // 为什么这里不能用 SetStatusAsync：勾完成的那一刻要顺手把
+            // 这段计时结算成 ActualMinutes，那是 AI 判断"你做事要花多久"的唯一依据。
+            var updated = await _itemRepository.ToggleDoneAsync(item.Id);
+
+            if (updated is not null)
+            {
+                item.Update(updated);
+                UpdateSummary();
+            }
+        }
+        catch (Exception ex)
+        {
+            await ReportErrorAsync(ex);
+        }
+    }
+
+    /// <summary>
+    /// 启动 / 暂停：一个按钮来回切。
+    ///
+    /// 【为什么这条要把二级菜单里的东西挪出来】
+    /// "开始做"是这个软件最重要的一次点击——
+    /// 整个产品要解决的其实就是"启动不了"这一件事。
+    /// 把它埋在菜单里第二层，等于给最重要的一步加了两下操作。
+    ///
+    /// 【为什么按下之后就地更新这一行，而不是整页重载】
+    /// 点完立刻看到"暂停"两个字和走起来的数字，人才相信刚才那一下生效了。
+    /// 而且整页重建会把滚动位置扔回顶部——连着点几条时它就会一直跟你作对。
+    /// </summary>
+    [RelayCommand]
+    private async Task ToggleStartPauseAsync(ItemViewModel item)
+    {
+        try
+        {
+            var updated = await _itemRepository.ToggleStartPauseAsync(item.Id);
 
             if (updated is not null)
             {

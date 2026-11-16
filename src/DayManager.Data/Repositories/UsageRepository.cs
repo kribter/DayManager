@@ -1,6 +1,7 @@
 using DayManager.Core.Entities;
 using DayManager.Core.Enums;
 using DayManager.Core.Intervention;
+using DayManager.Core.Planning;
 using Microsoft.EntityFrameworkCore;
 
 namespace DayManager.Data.Repositories;
@@ -16,9 +17,22 @@ public class UsageRepository
 {
     private readonly IDbContextFactory<AppDbContext> _factory;
 
-    public UsageRepository(IDbContextFactory<AppDbContext> factory)
+    /// <summary>
+    /// 任务计时段。**时间账的另一半分母**。
+    ///
+    /// 【为什么设备使用统计要去读它】
+    /// 只算坐在屏幕前的时间，分母天然偏小：
+    /// 你在纸上做题、看纸质书、出门办事的两小时，在这张表里等于不存在，
+    /// 于是"娱乐占多少"被系统性高估，AI 会说出"你今天都在玩"这种冤枉人的话。
+    /// 两路数据必须合起来看，合的地方就是这里——只此一处，
+    /// 分开各算一遍迟早出现"时间页说 3 小时、AI 说 2 小时"这种对不上的情况。
+    /// </summary>
+    private readonly WorkSegmentRepository _work;
+
+    public UsageRepository(IDbContextFactory<AppDbContext> factory, WorkSegmentRepository work)
     {
         _factory = factory;
+        _work = work;
     }
 
     /// <summary>
@@ -187,6 +201,8 @@ public class UsageRepository
         return new DayUsageSummary(
             range.TotalSeconds,
             range.EntertainmentSeconds,
+            range.WorkSeconds,
+            range.AccountedSeconds,
             range.FirstAt,
             range.LastAt,
             range.SessionCount);
@@ -230,7 +246,14 @@ public class UsageRepository
             })
             .ToListAsync(ct);
 
-        if (rows.Count == 0)
+        // 还在走的那一段，右端在仓储里已经补成"现在"：
+        // 他此刻可能正在纸上做题，那段正是要补进分母的部分。
+        var segments = await _work.GetOverlappingAsync(start, end, ct);
+
+        // 【为什么两边都空才返回空】
+        // 一整天没开电脑、但计了时的日子，在这张表里一行都没有，
+        // 却确实是"有记录的一天"。只按设备记录判断的话，那天会凭空消失。
+        if (rows.Count == 0 && segments.Count == 0)
         {
             return UsageRange.Empty;
         }
@@ -275,16 +298,60 @@ public class UsageRepository
             return recordedAsFun;
         }
 
+        /*
+         * 【时间账 = 屏幕前 ∪ 计了时的，重叠只算一次】
+         *
+         * 两路数据说的是同一段时间的两个侧面：
+         * 一路来自"前台在用什么"，一路来自"他按下了启动"。
+         * 在电脑上边做事边计时的时候，同一个钟头两路都会记下——
+         * 直接相加就是把它数了两遍，分母虚高，娱乐占比低得离谱，
+         * AI 反而不开口了。所以必须求并集。
+         *
+         * 【设备这一路有个已知的近似】
+         * 一条会话存了两套时间：净活跃秒数（DurationSeconds）和起止时刻。
+         * 做区间并集只能用后者——秒数没有位置信息，拼不进区间里。
+         * 偏差来自会话内部不足三分钟的小空档（超过三分钟采集器会直接切段），
+         * 方向是偏大：分母偏大、娱乐占比偏低。宁可少责备，不要冤枉人。
+         */
+        var deviceIntervals = rows
+            .Select(r => IntervalUnion.Clip(new TimeInterval(r.StartAt, r.EndAt), start, end))
+            .Where(x => x is not null)
+            .Select(x => x!.Value);
+
+        var workIntervals = segments
+            .Select(s => IntervalUnion.Clip(
+                new TimeInterval(s.StartAt, s.EndAt ?? DateTimeOffset.Now), start, end))
+            .Where(x => x is not null)
+            .Select(x => x!.Value)
+            .ToList();
+
+        var all = deviceIntervals.Concat(workIntervals).ToList();
+        var accountedSeconds = IntervalUnion.TotalSeconds(all);
+        var workSeconds = IntervalUnion.TotalSeconds(workIntervals);
+        var accountedByDay = IntervalUnion.SecondsByDay(all);
+
         // 【分组前必须先转本地时间】库里是 UTC 毫秒，读回来偏移是 0。
         // 不转的话，晚上 8 点以后的使用会被算到"第二天"——跨天统计全错位。
-        var days = rows
+        var usageByDay = rows
             .GroupBy(r => DateOnly.FromDateTime(r.StartAt.ToLocalTime().DateTime))
-            .Select(g => new UsageSlice(
-                g.Key,
-                g.Sum(x => x.DurationSeconds),
-                g.Where(x => IsFun(x.AppId, x.IsEntertainment)).Sum(x => x.DurationSeconds),
-                g.Count()))
-            .OrderBy(x => x.Day)
+            .ToDictionary(
+                g => g.Key,
+                g => (
+                    Total: g.Sum(x => x.DurationSeconds),
+                    Fun: g.Where(x => IsFun(x.AppId, x.IsEntertainment)).Sum(x => x.DurationSeconds),
+                    Count: g.Count()));
+
+        // 天数取两边的并集（理由见上面那段"两边都空才返回空"）。
+        var days = usageByDay.Keys
+            .Concat(accountedByDay.Keys)
+            .Distinct()
+            .OrderBy(x => x)
+            .Select(d => new UsageSlice(
+                d,
+                usageByDay.TryGetValue(d, out var u) ? u.Total : 0,
+                usageByDay.TryGetValue(d, out var u2) ? u2.Fun : 0,
+                usageByDay.TryGetValue(d, out var u3) ? u3.Count : 0,
+                accountedByDay.GetValueOrDefault(d)))
             .ToList();
 
         // 【为什么按 AppId 分组，显示名却取最近一次的那个】
@@ -307,6 +374,8 @@ public class UsageRepository
         return new UsageRange(
             TotalSeconds: rows.Sum(x => x.DurationSeconds),
             EntertainmentSeconds: rows.Where(x => IsFun(x.AppId, x.IsEntertainment)).Sum(x => x.DurationSeconds),
+            WorkSeconds: workSeconds,
+            AccountedSeconds: accountedSeconds,
             SessionCount: rows.Count,
             // 同样是 UTC 转本地：末次活跃要当成"几点睡的"，差 8 小时就是另一个故事了。
             FirstAt: rows.Min(x => x.StartAt).ToLocalTime(),
@@ -403,13 +472,35 @@ public class UsageRepository
 /// <summary>一个应用在一天里用了多久。</summary>
 public record AppUsage(string AppId, string DisplayName, int Seconds, bool IsEntertainment);
 
-/// <summary>一天（或某个时间桶）里的使用情况。</summary>
-public record UsageSlice(DateOnly Day, int TotalSeconds, int EntertainmentSeconds, int SessionCount);
+/// <summary>
+/// 一天（或某个时间桶）里的使用情况。
+///
+/// TotalSeconds 只是"坐在屏幕前的秒数"；
+/// 要看"这一天有多少时间是有着落的"得用 AccountedSeconds——
+/// 它把没开电脑但计了时的那部分也算了进来（见 UsageRepository.GetRangeAsync）。
+/// </summary>
+public record UsageSlice(
+    DateOnly Day,
+    int TotalSeconds,
+    int EntertainmentSeconds,
+    int SessionCount,
+    int AccountedSeconds);
 
-/// <summary>一段时间里的全部统计。时间页的四张图都从这一份数据里出。</summary>
+/// <summary>
+/// 一段时间里的全部统计。时间页的四张图都从这一份数据里出。
+///
+/// 【TotalSeconds 和 AccountedSeconds 有什么区别】
+///   TotalSeconds      —— 设备前的净使用时长。它回答"坐在屏幕前多久"。
+///   AccountedSeconds  —— 再加上"没开电脑但计了时的"那部分，重叠只算一次。
+///                        它回答"这一天有多少时间是有着落的"。
+/// 判断"他是不是在逃避"要看后者：只看前者的话，
+/// 他做纸上练习的两小时在统计里等于不存在，娱乐占比必然被高估。
+/// </summary>
 public record UsageRange(
     int TotalSeconds,
     int EntertainmentSeconds,
+    int WorkSeconds,
+    int AccountedSeconds,
     int SessionCount,
     DateTimeOffset? FirstAt,
     DateTimeOffset? LastAt,
@@ -417,13 +508,23 @@ public record UsageRange(
     IReadOnlyList<AppUsage> Apps)
 {
     public static UsageRange Empty { get; } = new(
-        0, 0, 0, null, null, Array.Empty<UsageSlice>(), Array.Empty<AppUsage>());
+        0, 0, 0, 0, 0, null, null, Array.Empty<UsageSlice>(), Array.Empty<AppUsage>());
 }
 
-/// <summary>一天的汇总。</summary>
+/// <summary>
+/// 一天的汇总。
+///
+/// 【为什么分成三个时长，而不是只给一个"总计"】
+/// 只给一个总数，读它的人（AI）无从判断这个数覆盖了他一天的多少，
+/// 于是会拿娱乐时长去除以它、得出"他今天一半时间在玩"这种结论。
+/// 把"屏幕前"和"计了时的"分开给，盲区就是明摆着的：
+/// 两个都不覆盖的时间（吃饭、睡觉、出门）系统本来就看不见。
+/// </summary>
 public record DayUsageSummary(
     int TotalSeconds,
     int EntertainmentSeconds,
+    int WorkSeconds,
+    int AccountedSeconds,
     DateTimeOffset? FirstAt,
     DateTimeOffset? LastAt,
     int SessionCount);

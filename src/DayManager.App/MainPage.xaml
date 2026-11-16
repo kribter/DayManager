@@ -191,8 +191,8 @@
                       扫视时相邻两条的说明文字容易看成同一条的。
                       这个软件的清单是要"扫一眼就知道还剩什么"的，行距是功能不是装饰。
                     -->
-                    <Grid ColumnDefinitions="Auto,*,Auto,Auto"
-                          ColumnSpacing="10"
+                    <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto"
+                          ColumnSpacing="8"
                           Padding="6,10">
                         <!-- 左边的打勾按钮。
                              Command 需要绑到"页面级"的命令（ToggleCompleteCommand
@@ -274,7 +274,33 @@
                           已完成 / 已放弃的条目不显示（CanFocus）：
                           那是已经了结的事，再给一个"开始"是自相矛盾。
                         -->
+                        <!--
+                          启动 / 暂停 / 继续。
+
+                          【为什么这个按钮直接摆在条目上】
+                          「开始做」是这个软件最重要的一次点击：
+                          它要解决的正是"知道该做但启动不了"。
+                          把它收进菜单里等于给最需要省步骤的一步多加两下。
+
+                          【为什么它会换字：启动 / 暂停 / 继续】
+                          同一个位置在两种时刻做两件事。靠图标区分要人先记住图标的含义；
+                          直接写成字，"点下去会发生什么"就写在按钮上，
+                          不用猜也不用二次确认。
+
+                          【为什么完成之后它就不见了】
+                          已经了结的事再给一个"开始"是自相矛盾
+                          （CanStartPause 只在待办/跳过/进行中为真）。
+                        -->
                         <Button Grid.Column="2"
+                                Text="{Binding StartButtonText}"
+                                Style="{StaticResource ChipButton}"
+                                WidthRequest="52"
+                                IsVisible="{Binding CanStartPause}"
+                                ToolTipProperties.Text="点上就正式开始计时，再点一下暂停"
+                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=ToggleStartPauseCommand}"
+                                CommandParameter="{Binding .}" />
+
+                        <Button Grid.Column="3"
                                 Text="10 分钟"
                                 Style="{StaticResource ChipButton}"
                                 WidthRequest="60"
@@ -283,7 +309,7 @@
                                 Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=StartFocusCommand}"
                                 CommandParameter="{Binding .}" />
 
-                        <Button Grid.Column="3"
+                        <Button Grid.Column="4"
                                 Text="更多"
                                 Style="{StaticResource ChipButton}"
                                 WidthRequest="46"

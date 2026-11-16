@@ -218,6 +218,9 @@ namespace DayManager.Data.Migrations
                     b.Property<int>("PlannedCount")
                         .HasColumnType("INTEGER");
 
+                    b.Property<long?>("RolledUpAt")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long>("UpdatedAt")
                         .HasColumnType("INTEGER");
 
@@ -536,6 +539,45 @@ namespace DayManager.Data.Migrations
                     b.ToTable("usage_sessions", (string)null);
                 });
 
+            modelBuilder.Entity("DayManager.Core.Entities.WorkSegment", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("DeletedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DeviceId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("EndAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("ItemId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("StartAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Version")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ItemId");
+
+                    b.HasIndex("StartAt", "EndAt");
+
+                    b.ToTable("work_segments", (string)null);
+                });
+
             modelBuilder.Entity("DayManager.Core.Entities.Item", b =>
                 {
                     b.HasOne("DayManager.Core.Entities.Project", "Project")
@@ -548,6 +590,17 @@ namespace DayManager.Data.Migrations
                         .HasForeignKey("RecurrenceParentId");
 
                     b.Navigation("Project");
+                });
+
+            modelBuilder.Entity("DayManager.Core.Entities.WorkSegment", b =>
+                {
+                    b.HasOne("DayManager.Core.Entities.Item", "Item")
+                        .WithMany()
+                        .HasForeignKey("ItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Item");
                 });
 
             modelBuilder.Entity("DayManager.Core.Entities.Project", b =>
