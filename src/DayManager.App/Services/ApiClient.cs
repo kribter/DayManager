@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using DayManager.Core.Proactive;
 
 namespace DayManager.App.Services;
 
@@ -234,13 +235,17 @@ public sealed class ApiClient
     /// <summary>
     /// 让 AI 主动说一句话。**没有人提问**，是客户端判断"该开口了"之后调的。
     /// </summary>
-    /// <param name="kind">场合：morning / before / evening / lowrate。</param>
+    /// <param name="kind">场合：morning / before / evening / lowrate / nudge / focus。</param>
     /// <param name="itemId">场合为 before 时，是那一条的 id。</param>
     /// <param name="today">你正看着哪一天。</param>
+    /// <param name="nudge">场合为 nudge（娱乐干预）时的现场：在刷什么、这一段刷了多久。</param>
+    /// <param name="focus">场合为 focus（专注到点）时的现场：刚做了哪一件、这一轮多长。</param>
     public async Task<ProactiveReply> ProactiveAsync(
         string kind,
         Guid? itemId,
         DateOnly? today,
+        NudgeRequest? nudge = null,
+        FocusFinishRequest? focus = null,
         CancellationToken cancellationToken = default)
     {
         var payload = new
@@ -248,6 +253,10 @@ public sealed class ApiClient
             kind,
             itemId,
             today = today?.ToString("yyyy-MM-dd"),
+            appName = nudge?.AppName,
+            continuousMinutes = nudge?.ContinuousMinutes,
+            focusTitle = focus?.ItemTitle,
+            focusMinutes = focus?.Minutes,
             ai = AiPayload()
         };
 
@@ -293,6 +302,8 @@ public sealed class ApiClient
                 Ok = ok,
                 Title = root.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "",
                 Text = root.TryGetProperty("text", out var x) ? x.GetString() ?? "" : "",
+                ItemId = root.TryGetProperty("itemId", out var p) && p.ValueKind == JsonValueKind.String
+                    && Guid.TryParse(p.GetString(), out var picked) ? picked : null,
                 Error = root.TryGetProperty("error", out var e) ? e.GetString() : null
             };
         }
@@ -526,6 +537,16 @@ public sealed class ProactiveReply
     public string Title { get; init; } = string.Empty;
     public string Text { get; init; } = string.Empty;
     public string? Error { get; init; }
+
+    /// <summary>
+    /// 场合为 nudge 时，AI 选中了哪一件事（可能为空——它决定不点名）。
+    ///
+    /// 【为什么客户端要这个 id 而不是只要有句话就行】
+    /// 通知是提前备好的，中间隔了快一分钟；到真要弹的那一刻，
+    /// 那人可能已经把这件事做完了。拿着 id 才能在弹出前再核一次，
+    /// 别谢谢他去"接着做"一件刚刚已经做完的事。
+    /// </summary>
+    public Guid? ItemId { get; init; }
 
     public static ProactiveReply Fail(string error) => new() { Ok = false, Error = error };
 }

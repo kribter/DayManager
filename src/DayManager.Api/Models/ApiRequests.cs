@@ -25,7 +25,7 @@ public sealed class AgentChatRequest
 public sealed class ProactiveRequest
 {
     /// <summary>
-    /// 场合：morning / before / evening / lowrate。
+    /// 场合：morning / before / evening / lowrate / nudge / focus。
     ///
     /// 【为什么用字符串而不是枚举】
     /// 这个值要跨进程传，用字符串在网络上和日志里都一眼可读；
@@ -38,6 +38,29 @@ public sealed class ProactiveRequest
 
     /// <summary>"今天"是哪一天（yyyy-MM-dd）。可空，默认服务端当天。</summary>
     public DateOnly? Today { get; set; }
+
+    /// <summary>
+    /// 场合为 nudge（娱乐超时干预）时的现场：他正在刷哪个应用。
+    ///
+    /// 【为什么这两个字段只有 nudge 用得上，却放在这个共用请求里】
+    /// 它们描述的是"客户端此刻看到的事"——后端是另一个进程，它守着数据库，
+    /// 但看不见屏幕。除了这两样之外 AI 需要的一切后端都能自己查，
+    /// 所以只传这两样：多传一样，就多一处两边各写一份、迟早不一致的地方。
+    /// </summary>
+    public string? AppName { get; set; }
+
+    /// <summary>场合为 nudge 时，**这一段**连续用了多少分钟。</summary>
+    public int? ContinuousMinutes { get; set; }
+
+    /// <summary>
+    /// 场合为 focus（专注到点）时的现场：他刚做的那件事叫什么。
+    /// 同样是"客户端在现场才知道"的信息——后端看得到日程表，
+    /// 但不知道他刚才对着哪一条坐了十分钟。
+    /// </summary>
+    public string? FocusTitle { get; set; }
+
+    /// <summary>场合为 focus 时，这一轮计时有多长（分钟）。</summary>
+    public int? FocusMinutes { get; set; }
 
     /// <summary>本次请求自带的密钥 / 接口地址 / 模型。见 <see cref="AiOverride"/> 的说明。</summary>
     public AiOverride? Ai { get; set; }

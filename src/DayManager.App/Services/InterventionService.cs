@@ -1,8 +1,12 @@
 using System.Collections.Concurrent;
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Messaging;
+using DayManager.App.Messages;
+using DayManager.Core.Entities;
 using DayManager.Core.Enums;
 using DayManager.Core.Intervention;
 using DayManager.Core.Planning;
+using DayManager.Core.Proactive;
 using DayManager.Data.Repositories;
 
 namespace DayManager.App.Services;
@@ -31,6 +35,17 @@ public partial class InterventionService : ObservableObject, IDisposable
     private readonly PolicyRepository _policy;
     private readonly AppRuleRepository _rules;
     private readonly IInterventionNotifier _notifier;
+    private readonly ChatRepository _chat;
+
+    /// <summary>
+    /// 提前备好的那句话。
+    ///
+    /// 【为什么是从外面传进来的，而不是自己攒一份】
+    /// 专注计时到点也要说一句（那是他刚做完的收尾），
+    /// 两处的节奏完全一样：到点前先要、到点直接用、用之前核一遍过没过期。
+    /// 共用一个草稿箱，才不会出现"干预那句看着清单、专注那句永远是模板"的分裂。
+    /// </summary>
+    private readonly ProactiveDraftService _drafts;
 
     /// <summary>
     /// 每个应用上一次提醒的时刻。
@@ -42,6 +57,11 @@ public partial class InterventionService : ObservableObject, IDisposable
     /// </summary>
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastNotified =
         new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>提前多久开口向 AI 要这句话。见 <see cref="ProactiveDraftService.WarmupMinutes"/>。</summary>
+    public const int WarmupMinutes = ProactiveDraftService.WarmupMinutes;
+
+    private readonly CancellationTokenSource _cts = new();
 
     private Timer? _timer;
 
@@ -55,13 +75,17 @@ public partial class InterventionService : ObservableObject, IDisposable
         ItemRepository items,
         PolicyRepository policy,
         AppRuleRepository rules,
-        IInterventionNotifier notifier)
+        IInterventionNotifier notifier,
+        ChatRepository chat,
+        ProactiveDraftService drafts)
     {
         _usage = usage;
         _items = items;
         _policy = policy;
         _rules = rules;
         _notifier = notifier;
+        _chat = chat;
+        _drafts = drafts;
 
         // 点通知上的按钮会从这里回来。切到 UI 线程处理，
         // 因为要改的状态最后会显示在时间页上。
@@ -168,7 +192,11 @@ public partial class InterventionService : ObservableObject, IDisposable
             return;
         }
 
-        var context = await BuildContextAsync(current, kind, today, now);
+        var (context, remaining) = await BuildContextAsync(current, kind, today, now);
+        // 快到阈值了才去要。早了是浪费（他多半马上就切走了），
+        // 晚了就没了意义——这一分钟是留给 AI 抖动的那点富余。
+        MaybeWarmUp(current, context, today);
+
         var decision = InterventionDecider.Decide(context);
 
         StatusText = Describe(context, decision);
@@ -178,7 +206,34 @@ public partial class InterventionService : ObservableObject, IDisposable
             return;
         }
 
-        if (!_notifier.Show(decision.Notice.AppId, decision.Notice.Title, decision.Notice.Body))
+        // 本地模板是底：AI 那句没备好、过期了、或者说的那件事刚被做完，
+        // 都用本地这句。它是唯一不依赖网络、不依赖 AI 的一条路。
+        var body = TakeDraftBody(current.AppId, remaining) ?? decision.Notice.Body;
+
+        // ---------- 先落进对话，再弹通知 ----------
+        //
+        // 【为什么提醒也要进聊天记录】
+        // 通知会滑走。滑走之后这句话就彻底消失了——
+        // 他不记得它什么时候说过、说了什么，更没法对着它回一句。
+        // 落进对话，它就成了这段对话里真实发生的一句：
+        // 打开对话页看得见，能接着往下聊，也能删掉。
+        //
+        // 【为什么是这个顺序】
+        // 和主动开口（ProactiveNudgeService）同一个口径：先写库，再弹通知。
+        // 反过来会出现"通知弹了、打开对话页却找不到这句话"——
+        // 那会让人以为自己记错了，还不如这一轮干脆不打扰。
+        try
+        {
+            await _chat.AddAsync(ChatMessage.RoleAssistant, body);
+        }
+        catch (Exception ex)
+        {
+            CrashLogger.Write("保存娱乐干预提醒", ex);
+            StatusText = "想提醒，但没能存进对话（这一轮先不打扰）";
+            return;
+        }
+
+        if (!_notifier.Show(decision.Notice.AppId, decision.Notice.Title, body))
         {
             StatusText = "想提醒但通知发不出去";
             return;
@@ -186,13 +241,18 @@ public partial class InterventionService : ObservableObject, IDisposable
 
         _lastNotified[current.AppId] = now;
         StatusText = $"已经提醒过：{decision.Notice.Title}";
+
+        // 通知对话页：跨 Tab 刷新不能依赖 OnAppearing（Shell 切 Tab 不保证触发）。
+        WeakReferenceMessenger.Default.Send(new ProactiveSpokeMessage());
     }
 
-    private async Task<InterventionContext> BuildContextAsync(
-        CurrentUsageSnapshot current,
-        AppKind kind,
-        DateOnly today,
-        DateTimeOffset now)
+    private async
+        Task<(InterventionContext Context, IReadOnlyList<DayManager.Core.Entities.Item> Remaining)>
+        BuildContextAsync(
+            CurrentUsageSnapshot current,
+            AppKind kind,
+            DateOnly today,
+            DateTimeOffset now)
     {
         var items = await _items.GetDayListAsync(today);
 
@@ -202,20 +262,53 @@ public partial class InterventionService : ObservableObject, IDisposable
             .Where(x => x.Status is ItemStatus.Pending or ItemStatus.InProgress)
             .ToList();
 
-        return new InterventionContext(
+        // 返回值连清单一起带出去：到点那一瞬间要用它核对 AI 点的那件事还在不在。
+        return (
+            new InterventionContext(
+                current.AppId,
+                current.AppName,
+                current.MinutesSince(now),
+                kind,
+                Enabled: true,
+                ThresholdMinutes: await _policy.GetIntAsync(PolicyKeys.ThresholdMinutes, 30),
+                CooldownMinutes: await _policy.GetIntAsync(PolicyKeys.CooldownMinutes, 30),
+                LastNotifiedAt: _lastNotified.TryGetValue(current.AppId, out var last) ? last : null,
+                SnoozedOn: await _policy.GetSnoozeDateAsync(current.AppId),
+                Today: today,
+                RemainingCount: remaining.Count,
+                // 点名之前先过一遍 NudgeTargetPicker：现在动不了手的事（比如排到半夜才开始的那件）
+                // 不点名。挑选不出来时这里就是 null，文案会退回"挑一件，就 10 分钟"那句。
+                FirstRemainingTitle: Core.Intervention.NudgeTargetPicker.Pick(remaining, now)?.Title,
+                Now: now),
+            remaining);
+    }
+
+    /// <summary>
+    /// 到阈值之前一分钟，先去问 AI 要一句话备着。
+    ///
+    /// 【为什么交给 ProactiveDraftService】
+    /// 专注计时到点也要说一句（那时候是他刚做完的收尾），
+    /// 两处的节奏完全一样：到点前先要、到点直接用、用之前核一遍过没过期。
+    /// 这层准备好的东西放在一处，两边才不会各自长出一套口径。
+    /// </summary>
+    private void MaybeWarmUp(CurrentUsageSnapshot current, InterventionContext context, DateOnly today)
+    {
+        _drafts.WarmUp(
             current.AppId,
+            ProactiveKind.Nudge,
+            null,
+            today,
             current.AppName,
-            current.MinutesSince(now),
-            kind,
-            Enabled: true,
-            ThresholdMinutes: await _policy.GetIntAsync(PolicyKeys.ThresholdMinutes, 30),
-            CooldownMinutes: await _policy.GetIntAsync(PolicyKeys.CooldownMinutes, 30),
-            LastNotifiedAt: _lastNotified.TryGetValue(current.AppId, out var last) ? last : null,
-            SnoozedOn: await _policy.GetSnoozeDateAsync(current.AppId),
-            Today: today,
-            RemainingCount: remaining.Count,
-            FirstRemainingTitle: remaining.FirstOrDefault()?.Title,
-            Now: now);
+            context.ContinuousMinutes,
+            context.ThresholdMinutes);
+    }
+
+    /// <summary>
+    /// 取走提前备好的那句话（过期或点名的事已经不在清单里就作废，退回本地模板）。
+    /// </summary>
+    private string? TakeDraftBody(string appId, IReadOnlyList<DayManager.Core.Entities.Item> remaining)
+    {
+        return _drafts.Take(appId, remaining);
     }
 
     /// <summary>把判定结果写成人话，显示在时间页上。</summary>
@@ -307,5 +400,10 @@ public partial class InterventionService : ObservableObject, IDisposable
         _timer?.Dispose();
         _timer = null;
         _notifier.Invoked -= OnInvoked;
+
+        // 还在半路上的那次 AI 请求一并掐掉：服务都要停了，
+        // 它的结果也没人用了（草稿只能落到已经 Dispose 的对象手里）。
+        _cts.Cancel();
+        _cts.Dispose();
     }
 }

@@ -2,7 +2,10 @@ using System.Text.Json;
 using DayManager.Api.Models;
 using DayManager.Core.Ai;
 using DayManager.Core.Entities;
+using DayManager.Core.Enums;
+using DayManager.Core.Intervention;
 using DayManager.Core.Proactive;
+using DayManager.Core.Profile;
 using DayManager.Data;
 using DayManager.Data.Repositories;
 using Microsoft.EntityFrameworkCore;
@@ -18,7 +21,15 @@ namespace DayManager.Api.Services;
 /// <param name="Title">通知标题，一行、很短。</param>
 /// <param name="Text">要说的话。</param>
 /// <param name="Error">失败原因。成功时为空。</param>
-public sealed record ProactiveResult(bool Ok, string Title, string Text, string? Error)
+/// <param name="ItemId">
+/// 场合为「娱乐干预」时，模型选中了哪一件事（可以为 null，表示它决定不点名）。
+///
+/// 【为什么模型只回一个 id，而不是把话说完】
+/// 让它自己把标题写进句子里，它就会改写——"12点前躺下来着"这种半句话
+/// 听着还行，但列表里那件叫另一个名字时，人会对不上是哪件。
+/// 所以它给 id，文案里写占位符，标题由我们按库里的原样替换回去。
+/// </param>
+public sealed record ProactiveResult(bool Ok, string Title, string Text, string? Error, Guid? ItemId = null)
 {
     public static ProactiveResult Fail(string error) => new(false, string.Empty, string.Empty, error);
 }
@@ -46,6 +57,7 @@ public sealed class ProactiveService
     private readonly ChatRepository _chat;
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
     private readonly PolicyRepository _policy;
+    private readonly ProfileService _profile;
     private readonly ILogger<ProactiveService> _logger;
 
     /// <summary>解析模型输出用的宽松选项：字段名大小写不一致时也能认。</summary>
@@ -61,6 +73,7 @@ public sealed class ProactiveService
         ChatRepository chat,
         IDbContextFactory<AppDbContext> dbFactory,
         PolicyRepository policy,
+        ProfileService profile,
         ILogger<ProactiveService> logger)
     {
         _proxy = proxy;
@@ -69,6 +82,7 @@ public sealed class ProactiveService
         _chat = chat;
         _dbFactory = dbFactory;
         _policy = policy;
+        _profile = profile;
         _logger = logger;
     }
 
@@ -78,11 +92,15 @@ public sealed class ProactiveService
     /// <param name="kind">场合。</param>
     /// <param name="itemId">场合为「日程前提醒」时那一条的 id。</param>
     /// <param name="today">"今天"是哪天。</param>
+    /// <param name="nudge">场合为「娱乐干预」时的现场情况：他在刷什么、刷了多久。</param>
+    /// <param name="focus">场合为「专注到点」时的现场情况：他刚做了哪一件、这一轮多长。</param>
     public async Task<ProactiveResult> SpeakAsync(
         ProactiveKind kind,
         Guid? itemId,
         DateOnly today,
         AiOverride? ai = null,
+        NudgeRequest? nudge = null,
+        FocusFinishRequest? focus = null,
         CancellationToken ct = default)
     {
         // ---------- ① 把"它该知道的"查出来 ----------
@@ -118,7 +136,14 @@ public sealed class ProactiveService
 
         var messages = new List<ChatMessage>
         {
-            new() { Role = "system", Content = await BuildSystemPrompt(kind, today, now, items, stats, usage, recent, target, ct) }
+            new()
+            {
+                Role = "system",
+                Content = await BuildSystemPrompt(
+                    kind, today, now, items, stats, usage, recent, target,
+                    await _profile.BuildAsync(today, ct),
+                    nudge, focus, ct)
+            }
         };
 
         foreach (var m in history.Skip(Math.Max(0, history.Count - 8)))
@@ -184,9 +209,34 @@ public sealed class ProactiveService
             return ProactiveResult.Fail("AI 这次没说出话来");
         }
 
-        var (title, text) = parsed.Value;
+        var (title, text, pickedId) = parsed.Value;
 
-        // ---------- ④ 晚间总结顺便存进当天上下文 ----------
+        // ---------- ④ 娱乐干预：把占位符换回库里那个原名 ----------
+
+        // 【为什么要替换，而不是让模型直接写句子】
+        // 模型写标题会改写：多一个字少一个字、把「交房租」写成「房租」，
+        // 人看到通知要愣一下才对上是哪件——这一愣就抵消了"点名"的全部好处。
+        // 所以它只负责 Sentence 的语气，标题这个词由我们原样嵌回去。
+        // 顺带堵死另一种错：模型有时会挑一件清单外的事，id 对不上就当它没挑。
+        Guid? resolvedId = null;
+        if (kind == ProactiveKind.Nudge)
+        {
+            var picked = pickedId is { } pid ? items.FirstOrDefault(x => x.Id == pid) : null;
+
+            if (picked is null)
+            {
+                // 它用了占位符却给不出能对上的 id：降级成不点名的说法，
+                // 而不是让 {任务} 这种东西出现在通知里。
+                text = text.Replace(NudgePlaceholder, "那件事");
+            }
+            else
+            {
+                text = text.Replace(NudgePlaceholder, picked.Title);
+                resolvedId = picked.Id;
+            }
+        }
+
+        // ---------- ⑤ 晚间总结顺便存进当天上下文 ----------
 
         // 【为什么要存】
         // 明天的 AI 要能看到"昨晚说过什么"，否则它每天早上重新认识你一遍，
@@ -197,7 +247,7 @@ public sealed class ProactiveService
             await SaveDailySummaryAsync(today, text, ct);
         }
 
-        return new ProactiveResult(true, title, text, null);
+        return new ProactiveResult(true, title, text, null, resolvedId);
     }
 
     /// <summary>
@@ -228,7 +278,7 @@ public sealed class ProactiveService
     }
 
     /// <summary>从上游响应里取出模型说的话。</summary>
-    private static (string Title, string Text)? TryParse(string body)
+    private static (string Title, string Text, Guid? ItemId)? TryParse(string body)
     {
         if (string.IsNullOrWhiteSpace(body))
         {
@@ -254,7 +304,8 @@ public sealed class ProactiveService
                     var inner = JsonSerializer.Deserialize<ProactiveReply>(content, ParseOpts);
                     if (inner is not null && !string.IsNullOrWhiteSpace(inner.Text))
                     {
-                        return (TrimTitle(inner.Title), inner.Text.Trim());
+                        Guid.TryParse(inner.ItemId, out var picked);
+                        return (TrimTitle(inner.Title), inner.Text.Trim(), picked == Guid.Empty ? null : picked);
                     }
                 }
             }
@@ -294,12 +345,134 @@ public sealed class ProactiveService
         public string? Think { get; set; }
         public string? Title { get; set; }
         public string? Text { get; set; }
+
+        /// <summary>娱乐干预时选中的那一件事的 id。其余场合不返回。</summary>
+        public string? ItemId { get; set; }
+    }
+
+    /// <summary>模型在文案里指代"它选中那一件事"的占位符。通知发出去之前会被换成真标题。</summary>
+    public const string NudgePlaceholder = "{任务}";
+
+    /// <summary>
+    /// 娱乐干预那句话的要求。
+    ///
+    /// 【为什么这几条约束必须写死，而不是"说得有道理就行"】
+    /// 干预是唯一一句**在他正做别的事时抢进来**的话。它要短、要具体到一件事、
+    /// 不能出现他已经在系统别处看到的数字（通知标题上就是"XX 已经 30 分钟"，
+    /// 正文再报一遍等于把同一句话说两遍）。所以这里对篇幅和数字的约束比别的场合都硬。
+    ///
+    /// 【为什么候选清单在这里单独给一份（带 id）】
+    /// 上半段那份清单给的是"今天有什么"，是不带 id 的概览；
+    /// 而挑一件点名必须能**指到具体那一条**，所以这里再给一份可引用的候选。
+    /// 它同时充当"不许编"的边界：清单外的 id 一律当作没挑。
+    /// </summary>
+    private static IEnumerable<string> NudgeLines(
+        IReadOnlyList<Item> items,
+        DateTimeOffset now,
+        NudgeRequest? nudge)
+    {
+        var spent = nudge?.ContinuousMinutes ?? 0;
+        var app = string.IsNullOrWhiteSpace(nudge?.AppName) ? "某个应用" : nudge!.AppName;
+
+        yield return "";
+        yield return "【这次要说：娱乐超时干预】";
+        yield return $"- 他现在正在 {app} 上，**这一段已经连续 {spent} 分钟**（这是刚才连续刷的这一段的时长，不是今天累计）。";
+        yield return "- 这句话会在他正刷着的时候「抢」进屏幕。它不是请他聊两句，是要他动起来。";
+        yield return "";
+        yield return "【你可以点名一件事，也可以不点名】";
+
+        // Actionable：把"现在能动手"的那几件都给它挑，而不是我只替它挑好一件。
+        var candidates = NudgeTargetPicker.Actionable(
+            items.Where(x => x.Status is ItemStatus.Pending or ItemStatus.InProgress).ToList(),
+            now);
+
+        if (candidates.Count == 0)
+        {
+            // 一件都挑不出来：通常是清单空了，或者剩下的都还没到做的时候
+            // （比如排到半夜的那件事在下午被抓出来，就是之前闹过一次笑话的那种）。
+            // 这时候把点名这条路明确关掉，比让它自己瞎猜强。
+            yield return "- 现在**没有任何一件事是适合马上动手的**（清单可能是空的，";
+            yield return "  或者剩下的都还没到做的时候）。这种情况下不要点名任何事，";
+            yield return "  说一句让他自己挑一件就行。";
+        }
+        else
+        {
+            yield return "- 下面这些事现在能动手。你可以挑一件点名，也可以都不点名：";
+
+            foreach (var c in candidates)
+            {
+                var hint = c.MinimalStep is { } s && s.Length > 0 ? $"（它的第一步：{s}）" : "";
+                yield return $"  - id={c.Id}：{c.Title}{hint}";
+            }
+
+            yield return $"- 点名时不要在 text 里写标题本身，写占位符 {NudgePlaceholder}（系统会换成原名）；";
+            yield return "  并在 JSON 的 itemId 字段给出那一件的 id。不点名就不要写这个占位符。";
+        }
+
+        yield return "";
+        yield return "【这一句怎么写】";
+        yield return "- 给他一个**小到不需要下决心**的入口。他的问题从来不是不知道该做，是启动不了。";
+        yield return "  所以别讲道理、别提「你应该」，直接给那一步做什么。";
+        yield return "- **不许出现任何数字**：分钟数、件数、百分比都不要写。";
+        yield return "  那些数系统已经替你写在通知标题上了，正文再报一遍只会显得啰嗦，而且容易算错。";
+        yield return "- 不许说教，不许翻旧账，不许用「别刷了」「又在玩」这类话开头。";
+        yield return "  他被提醒这件事本身已经知道自己在拖延了，你再指出来只是让他把通知划走。";
+        yield return "- **默认 40 字以内。**这是抢注意力的一句话，长了他一眼不看就划走。";
+        yield return "  例外：他的人设明确要求多说几句时最多 80 字。";
+        yield return "- 就算一件都不点名，也要说得像句人话，不要写成「请注意休息」。";
+    }
+
+    /// <summary>
+    /// 专注计时到点那句话的要求。
+    ///
+    /// 【为什么这一句最难写】
+    /// 它出现在一个微妙的时刻：他刚坐下来做了十分钟，正在决定"要不要继续"。
+    /// 写成"还差多少没做完"，这十分钟就成了考核，下次他连开始都不愿意；
+    /// 写成"你真棒"，他知道自己只是坐着十分钟，夸得虚。
+    /// 所以顺序固定：**先承认已经动了，再给下一步，而且明说"没做完也算"**。
+    /// 这个软件要对抗的正是"做不到就干脆别开始"。
+    ///
+    /// 【为什么不用数字】
+    /// 和干预那句同一个规矩：分钟数已经写在通知标题上了，
+    /// 正文再报一遍等于把同一句话说两遍，而且容易算错。
+    /// </summary>
+    private static IEnumerable<string> FocusLines(
+        IReadOnlyList<Item> items,
+        DateTimeOffset now,
+        Item? target,
+        FocusFinishRequest? focus)
+    {
+        var title = focus?.ItemTitle ?? target?.Title ?? string.Empty;
+        var minutes = focus?.Minutes ?? 0;
+        var step = target?.MinimalStep;
+
+        yield return "";
+        yield return "【这次要说：专注到点】";
+        yield return minutes > 0
+            ? $"- 他刚刚对着「{title}」坐了 {minutes} 分钟，计时器到点了。"
+            : $"- 他刚刚在「{title}」上做了一轮，计时器到点了。";
+
+        yield return "";
+        yield return "【这一句怎么写】";
+        yield return "- **第一句必须是承认已经做了**：他是真的坐下来了，这十分钟是真的。";
+        yield return "- 第二句是下一步：做完了就去打个勾，没做完就再来一轮或者先停在这。";
+        yield return "- **明说「没做完也算」**：最难的就是开头那一下，开头过了就是过了。";
+        yield return "- 不许写成考核：不许出现「还剩」「还没做完」「进度」这类字眼。";
+        yield return "- **不许出现任何数字**：分钟数、件数、百分比都不要写，标题上已经有了。";
+        yield return "- **默认 40 字以内。** 这是一句收尾的话，不是总结。";
+        yield return "  例外：他的人设要求多说几句时最多 80 字。";
+
+        if (step is { Length: > 0 })
+        {
+            yield return "";
+            yield return $"- 如果顺着说下去，可以提到它的第一步是「{step}」。";
+        }
     }
 
     /// <summary>
     /// 按场合拼系统提示。
     ///
-    /// 【为什么四种场合共用前半段、只换最后的要求】
+    /// 【为什么几种场合共用前半段、只换最后的要求】
     /// 前半段是"你是谁、他是什么状态"，这对四种场合都成立；
     /// 换了只会让模型在早晨和晚上表现得像两个人。
     /// 真正不同的是"这一句要达成什么"，所以只有最后一段分开写。
@@ -313,6 +486,9 @@ public sealed class ProactiveService
         DayUsageSummary usage,
         IReadOnlyList<(DateOnly Day, int Total, int Done)> recent,
         Item? target,
+        UserProfile profile,
+        NudgeRequest? nudge,
+        FocusFinishRequest? focus,
         CancellationToken ct)
     {
         // 和对话页共用同一份语气档：两边各写一套的话，
@@ -346,12 +522,22 @@ public sealed class ProactiveService
                 (stats.SkippedToday > 0 ? $"，跳过 {stats.SkippedToday} 条" : ""),
             listText,
             "",
-            "【他今天在电脑/手机上待了多久】",
-            $"合计 {usage.TotalSeconds / 60} 分钟，其中娱乐 {usage.EntertainmentSeconds / 60} 分钟",
+            "【他今天的时间账】",
+            $"坐在屏幕前 {usage.TotalSeconds / 60} 分钟，其中娱乐 {usage.EntertainmentSeconds / 60} 分钟",
+            $"另有一段没开电脑、但他在任务上按了启动的 {usage.WorkSeconds / 60} 分钟",
+            $"有记录的时间合计 {usage.AccountedSeconds / 60} 分钟（上面两类重叠的部分只算一次）",
+            "",
+            "【这几个数是怎么来的——理解错了就会冤枉他】",
+            "统计只覆盖两类时间：屏幕前的设备使用，和他自己按下启动到暂停/完成的任务计时。",
+            "吃饭、睡觉、出门、走神这些既没开电脑也没计时的时段，不在这几个数里。",
+            "所以他很可能有一段时间是在纸上做题、看纸质书、或者出门办事，只是系统看不见。",
+            "不要拿娱乐时长去说他「今天都在玩」——那些没被记录的时间里他可能在做事。",
+            "要判断这一天过得怎么样，先看上面的清单完成了几条，再看这几个数。",
             "",
             "【最近几天】",
             recentText,
             "",
+            ProfileLines.ToPrompt(profile),
             "【说话方式】"
         };
 
@@ -480,6 +666,14 @@ public sealed class ProactiveService
                     "- **默认 70 字以内。** 严肃的话更忌长，长了就变成说教。",
                     "  例外：他的人设要求更长的口吻时最多 130 字。"
                 });
+                break;
+
+            case ProactiveKind.Nudge:
+                lines.AddRange(NudgeLines(items, now, nudge));
+                break;
+
+            case ProactiveKind.Focus:
+                lines.AddRange(FocusLines(items, now, target, focus));
                 break;
         }
 

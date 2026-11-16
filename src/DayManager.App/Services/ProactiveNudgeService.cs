@@ -383,6 +383,9 @@ public sealed class ProactiveNudgeService : IDisposable
         ProactiveKind.Before => "日程前提醒",
         ProactiveKind.Evening => "晚间总结",
         ProactiveKind.LowRate => "最近有点卡",
+        // 娱乐干预目前不走这个服务（它有自己的通知通道），
+        // 但名字先写死在这：万一以后合并，标题不会退化成"主动开口"。
+        ProactiveKind.Nudge => "娱乐干预",
         _ => "主动开口"
     };
 
