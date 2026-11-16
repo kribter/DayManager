@@ -70,7 +70,9 @@ public sealed class ServerSettings
     /// </summary>
     private void ApplySeedFile()
     {
-        var seed = SeedFileReader.TryRead(SeedFileReader.DefaultPath);
+        // 先找 exe 旁边那份（打包发给别人时只有它），找不到再回本机仓库里的固定位置。
+        var seed = SeedFileReader.TryRead(SeedFileReader.PortablePath)
+                   ?? SeedFileReader.TryRead(SeedFileReader.DefaultPath);
 
         if (seed is null)
         {

@@ -78,6 +78,16 @@ builder.Services.AddHttpClient();
 // 这里换成服务端自己的库 + 同步，接口不变。
 // ------------------------------------------------------------------
 var dbPath = ResolveDbPath(builder.Configuration);
+
+// 目录不存在就先建出来。
+// 便携版的库放在 %LOCALAPPDATA%\DayManager 下，第一次跑的时候那个目录还没有，
+// 不建的话 SQLite 直接报「找不到路径」，而界面上只会看到一句"连不上"。
+var dbDirectory = Path.GetDirectoryName(dbPath);
+if (!string.IsNullOrEmpty(dbDirectory) && !Directory.Exists(dbDirectory))
+{
+    Directory.CreateDirectory(dbDirectory);
+}
+
 builder.Logging.AddFilter("Microsoft.EntityFrameworkCore.Database.Command", LogLevel.Warning);
 
 builder.Services.AddDbContextFactory<DayManager.Data.AppDbContext>(options =>
@@ -87,6 +97,9 @@ builder.Services.AddDbContextFactory<DayManager.Data.AppDbContext>(options =>
 builder.Services.AddSingleton<DayManager.Data.Repositories.ItemRepository>();
 builder.Services.AddSingleton<DayManager.Data.Repositories.ActionLogRepository>();
 builder.Services.AddSingleton<DayManager.Data.Repositories.UsageRepository>();
+
+// 任务计时段。时间账的另一半分母——它在 UsageRepository 里并进统计。
+builder.Services.AddSingleton<DayManager.Data.Repositories.WorkSegmentRepository>();
 builder.Services.AddSingleton<DayManager.Data.Repositories.ChatRepository>();
 
 // AI 说话的语气和自定义人设存在这张表里（时间页改，后端读）。
@@ -94,6 +107,11 @@ builder.Services.AddSingleton<DayManager.Data.Repositories.PolicyRepository>();
 
 // AI 主动开口：它要自己读今天排了什么、做了多少、娱乐多久、昨天聊过什么。
 builder.Services.AddSingleton<ProactiveService>();
+
+// 画像：主动开口和对话页都要读它，所以注册成单例让两边共用一次计算结果。
+// 数据装配在共享层（时间页也用同一份），这里只注册。
+builder.Services.AddSingleton<DayManager.Data.Repositories.ProfileRepository>();
+builder.Services.AddSingleton<ProfileService>();
 
 // AI 建任务时要能把它挂到项目下（否则大任务页永远是空的）。
 builder.Services.AddSingleton<DayManager.Data.Repositories.ProjectRepository>();
@@ -260,13 +278,30 @@ app.MapPost("/api/ai/proactive", async Task<IResult> (
     }
 
     var today = request.Today ?? DateOnly.FromDateTime(DateTime.Now);
-    var result = await proactive.SpeakAsync(kind, request.ItemId, today, request.Ai, cancellationToken);
+
+    // nudge（娱乐干预）才需要现场信息；其余四种场合传 null，
+    // 让 SpeakAsync 里的分支自己空着，省得这里替它判断。
+    var nudge = kind == DayManager.Core.Proactive.ProactiveKind.Nudge
+        ? new DayManager.Core.Proactive.NudgeRequest(
+            request.AppName ?? string.Empty,
+            request.ContinuousMinutes ?? 0)
+        : null;
+
+    // focus（专注到点）同理：只有"他在做哪一件"是后端查不出来的。
+    var focus = kind == DayManager.Core.Proactive.ProactiveKind.Focus
+        ? new DayManager.Core.Proactive.FocusFinishRequest(
+            request.FocusTitle ?? string.Empty,
+            request.FocusMinutes ?? 0)
+        : null;
+
+    var result = await proactive.SpeakAsync(kind, request.ItemId, today, request.Ai, nudge, focus, cancellationToken);
 
     // 【为什么失败也返回 200】
     // 和 /api/ai/agent 同一个道理：说不出话是"这次没说"，不是网络故障。
     // 客户端拿到 ok=false 安静跳过就行，没必要弹一个错误给用户——
     // 他根本没主动请求过这句话，凭什么给他看一个报错。
-    return Results.Ok(new { ok = result.Ok, title = result.Title, text = result.Text, error = result.Error });
+    return Results.Ok(new { ok = result.Ok, title = result.Title, text = result.Text,
+        itemId = result.ItemId, error = result.Error });
 });
 
 // ------------------------------------------------------------------
@@ -372,7 +407,10 @@ static string ResolveDbPath(IConfiguration configuration)
     var configured = configuration["Data:DbPath"];
     if (!string.IsNullOrWhiteSpace(configured))
     {
-        return configured;
+        // 允许写 %LOCALAPPDATA% 这类占位符。
+        // 为什么：打包给别人时不知道对方的用户名，
+        // 库的位置只能写成"系统给我定的那个目录"，到这里再展开成真实路径。
+        return Environment.ExpandEnvironmentVariables(configured);
     }
 
     var dir = new DirectoryInfo(AppContext.BaseDirectory);

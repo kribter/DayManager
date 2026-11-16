@@ -37,6 +37,20 @@ public static class SeedFileReader
         Path.Combine(RepoRoot, "data", "client.json");
 
     /// <summary>
+    /// 随包发布时放在 exe 旁边的那一份（<c>seed.json</c>）。
+    ///
+    /// 【为什么要有第二个位置】
+    /// 把程序打包发给别人时，对方电脑上没有 F:\DayManager，
+    /// 于是 DefaultPath 读不到 → token 是空 → 后端每一次请求都 401，
+    /// 而界面只会说"连不上"，看不出真正原因是没读到口令。
+    /// 便携版把这一份直接放在 exe 旁边，谁拿到都能用。
+    ///
+    /// 两个位置都存在时以便携版为准（打包产物里只有它）。
+    /// </summary>
+    public static readonly string PortablePath =
+        Path.Combine(AppContext.BaseDirectory, "seed.json");
+
+    /// <summary>
     /// 后端地址的默认值。
     ///
     /// 【为什么这个常量放在这里，而不是放在 ServerSettings 里】

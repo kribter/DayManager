@@ -30,16 +30,32 @@ public sealed class BackendLauncher
     private readonly string _projectDirectory;
     private readonly string _projectPath;
 
+    /// <summary>
+    /// 随包发布时自带的后端 exe（客户端 exe 旁边的 <c>backend\DayManager.Api.exe</c>）。
+    /// 没有打包给别人时它是 null。
+    ///
+    /// 【为什么必须支持这条路径】
+    /// 对方机器上既没有源码目录，也没有 dotnet SDK —— 下面那套
+    /// "找到 csproj 跑 dotnet run" 在别人电脑上一律不成立，
+    /// 结果就是界面一进来挂着「连不上服务器」，而对方只会以为程序是坏的。
+    /// </summary>
+    private readonly string? _portableExe;
+    private readonly string? _portableDirectory;
+
     private BackendLauncher(
         IPAddress address,
         int port,
         string projectDirectory,
-        bool canAutoStart)
+        bool canAutoStart,
+        string? portableExe,
+        string? portableDirectory)
     {
         _address = address;
         _port = port;
         _projectDirectory = projectDirectory;
         _projectPath = Path.Combine(projectDirectory, "DayManager.Api.csproj");
+        _portableExe = portableExe;
+        _portableDirectory = portableDirectory;
         CanAutoStart = canAutoStart;
     }
 
@@ -69,16 +85,31 @@ public sealed class BackendLauncher
 
         var projectDirectory = Path.Combine(repoRoot, "src", "DayManager.Api");
 
+        // 随包发布时，后端就在客户端 exe 旁边的 backend\ 目录下，是一个已经 publish 好的独立程序。
+        // 这种情况优先走它：对方机器上没有源码、没有 SDK，只有这个 exe 能跑。
+        var portableDirectory = Path.Combine(AppContext.BaseDirectory, "backend");
+        string? portableExe = null;
+
+        if (Directory.Exists(portableDirectory))
+        {
+            var candidate = Path.Combine(portableDirectory, "DayManager.Api.exe");
+            if (File.Exists(candidate))
+            {
+                portableExe = candidate;
+            }
+        }
+
         // 下面两个条件不满足时，实例仍然存在但 CanAutoStart = false，
         // 这样调用方不用判空，也不会有"注册了个 null 进 DI"这种别扭写法。
         var canAutoStart =
             OperatingSystem.IsWindows()
             && address is not null
             && IPAddress.IsLoopback(address)
-            && Directory.Exists(projectDirectory);
+            && (portableExe is not null || Directory.Exists(projectDirectory));
 
         return new BackendLauncher(
-            address ?? IPAddress.Loopback, port, projectDirectory, canAutoStart);
+            address ?? IPAddress.Loopback, port, projectDirectory, canAutoStart,
+            portableExe, portableDirectory);
     }
 
     /// <summary>
@@ -143,6 +174,40 @@ public sealed class BackendLauncher
         {
             error = "自动启动不可用（不是 Windows，或后端地址不是本机地址）。";
             return false;
+        }
+
+        //
+        // 【随包后端优先】
+        // 有 publish 出来的 exe 就直接跑它：不需要 dotnet，不需要源码，
+        // 这也是发给别人用时唯一能跑起来的方式。
+        //
+        if (_portableExe is not null)
+        {
+            var portable = new ProcessStartInfo
+            {
+                FileName = _portableExe,
+
+                // 工作目录必须是 backend 目录本身：后端从这里读 appsettings.Local.json
+                // （里面放着访问口令和数据库位置）。设错了表现为"后端起来了但 AI 没配好"。
+                WorkingDirectory = _portableDirectory,
+
+                UseShellExecute = true,
+
+                // 后端是控制台程序，不隐藏会闪一个黑窗口出来。
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+
+            try
+            {
+                Process.Start(portable);
+                error = null;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = $"{ex.GetType().Name}: {ex.Message}";
+                return false;
+            }
         }
 
         var dotnet = FindDotnet();
@@ -227,23 +292,30 @@ public sealed class BackendLauncher
     /// 与怎么启动无关。真实的客户端是 GUI 程序，没有控制台可被回收，
     /// 关掉客户端时后端是否留存，需要在真机上确认，这里测不出来。
     ///
-    /// 【为什么不写死 bin\Debug\net10.0】
-    /// 目标框架会随着 .NET 大版本升级而变（net10.0 → net11.0），
-    /// 写死路径的话，哪天升级完它就开始报"找不到文件"，而报错还发生在启动后端这种边角地方。
-    /// 直接在 bin\Debug 下面按名字找，版本号变了照样能找到。
+    /// 【为什么在整个 bin 下面找，而不是写死 bin\Debug\net10.0】
+    /// 两个原因，第二个是踩出来的：
+    /// 一是目标框架会随着 .NET 大版本升级而变（net10.0 → net11.0），
+    ///   写死路径的话，哪天升级完它就开始报"找不到文件"，
+    ///   而报错偏偏发生在"启动后端"这种最不好排查的地方。
+    /// 二是 Debug/Release 两套产物都在 bin 下面。写死 Debug 出过一次真事：
+    ///   改动用 -c Release 编译，产物落在 bin\Release，而这里永远只认 bin\Debug 里那份旧的，
+    ///   于是新代码一次都没真正跑起来。它的表现特别隐蔽——进程在跑、接口全都 200，
+    ///   只有一个新加的枚举值不存在，请求一路走到 400，
+    ///   客户端那边安静降级，日志里什么都不留。
+    ///   与其要求"每次记得用 Debug 编译"，不如两边都找、挑最新改过的那一份。
     /// </summary>
     private string? ResolveBuiltAssembly()
     {
-        var binDebug = Path.Combine(_projectDirectory, "bin", "Debug");
+        var binDirectory = Path.Combine(_projectDirectory, "bin");
 
-        if (!Directory.Exists(binDebug))
+        if (!Directory.Exists(binDirectory))
         {
             return null;
         }
 
         // 有多个就取最近改过的那个，避免拿到过期产物。
         return Directory
-            .GetFiles(binDebug, "DayManager.Api.dll", SearchOption.AllDirectories)
+            .GetFiles(binDirectory, "DayManager.Api.dll", SearchOption.AllDirectories)
             .OrderByDescending(path => File.GetLastWriteTimeUtc(path))
             .FirstOrDefault();
     }

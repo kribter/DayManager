@@ -28,15 +28,55 @@ public static class CrashLogger
     private static readonly object Gate = new();
     private static string? _dir;
 
-    /// <summary>日志目录。界面上「打开日志」的入口会用同一个路径。</summary>
-    public static string LogDirectory =>
-        _dir ??= OperatingSystem.IsWindows()
-            ? @"F:\DayManager\logs"
-            : FileSystem.AppDataDirectory;
+    /// <summary>
+    /// 日志目录。界面上「打开日志」的入口会用同一个路径。
+    ///
+    /// 【为什么不能写死仓库路径——2026-11-16 的事故】
+    /// 这里曾写死 F:\DayManager\logs，结果发给别人（对方机器没有 F 盘）后，
+    /// Init() 里 CreateDirectory 直接抛异常，而它又是 CreateMauiApp 的第一句、
+    /// 早于窗口创建——表现为「双击毫无反应、任务管理器里也没有」。
+    /// 修复模式照抄 MauiProgram 里数据库路径的做法：仓库根在（= 本机开发）
+    /// 就用仓库 logs；不在（= 发给别人）就落到 %LOCALAPPDATA%\DayManager\logs。
+    /// </summary>
+    public static string LogDirectory
+    {
+        get
+        {
+            if (_dir is null)
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    // 仓库根在（= 本机开发）→ 用仓库 logs，习惯不变；
+                    // 不在（= 发给别人）→ 和数据库的便携目录同一个家。
+                    _dir = Directory.Exists(SeedFileReader.RepoRoot)
+                        ? Path.Combine(SeedFileReader.RepoRoot, "logs")
+                        : Path.Combine(
+                            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                            "DayManager", "logs");
+                }
+                else
+                {
+                    _dir = FileSystem.AppDataDirectory;
+                }
+            }
+
+            return _dir;
+        }
+    }
 
     public static void Init()
     {
-        Directory.CreateDirectory(LogDirectory);
+        // 【兜底者自己绝不能成为崩溃源】
+        // 创建目录失败（权限、异常环境）时宁可没有日志，也不能让日志器
+        // 在 CreateMauiApp 的第一句话里把整个进程带走——Write() 里本来就是
+        // "写失败就吞掉"的态度，初始化对齐同一条。
+        try
+        {
+            Directory.CreateDirectory(LogDirectory);
+        }
+        catch
+        {
+        }
 
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
             Write("未处理异常", e.ExceptionObject as Exception, e.IsTerminating);
