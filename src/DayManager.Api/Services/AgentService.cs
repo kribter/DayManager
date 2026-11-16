@@ -5,6 +5,7 @@ using DayManager.Api.Models;
 using DayManager.Core.Ai;
 using DayManager.Core.Enums;
 using DayManager.Core.Planning;
+using DayManager.Core.Profile;
 using DayManager.Data.Repositories;
 
 namespace DayManager.Api.Services;
@@ -30,6 +31,7 @@ public sealed class AgentService
     private readonly ItemTools _tools;
     private readonly ItemRepository _items;
     private readonly PolicyRepository _policy;
+    private readonly ProfileService _profile;
     private readonly ILogger<AgentService> _logger;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -81,12 +83,14 @@ public sealed class AgentService
         ItemTools tools,
         ItemRepository items,
         PolicyRepository policy,
+        ProfileService profile,
         ILogger<AgentService> logger)
     {
         _proxy = proxy;
         _tools = tools;
         _items = items;
         _policy = policy;
+        _profile = profile;
         _logger = logger;
     }
 
@@ -338,6 +342,7 @@ public sealed class AgentService
             ? "（今天还没有安排）"
             : string.Join('\n', items.Select(x =>
                 $"- id={x.Id} | {x.Title} | {StatusName(x.Status)}" +
+                (x.ActualMinutes is > 0 ? $" | 实际 {x.ActualMinutes} 分钟" : "") +
                 (x.EstimateMinutes is > 0 ? $" | 预计 {x.EstimateMinutes} 分钟" : "")));
 
         // 未来几天。
@@ -360,6 +365,7 @@ public sealed class AgentService
                 ? $"{head}：空"
                 : head + "\n" + string.Join('\n', x.Items.Select(i =>
                     $"  - id={i.Id} | {i.Title} | {StatusName(i.Status)}" +
+                    (i.ActualMinutes is > 0 ? $" | 实际 {i.ActualMinutes} 分钟" : "") +
                     (i.EstimateMinutes is > 0 ? $" | 预计 {i.EstimateMinutes} 分钟" : "")));
         }));
 
@@ -368,6 +374,10 @@ public sealed class AgentService
         // 一旦括号层数对不上就是编译错误，改起来很烦。
         // 拆成一行一个字符串之后，示例 JSON 就是它本来的样子，不用转义，读起来也对。
         var skippedNote = stats.SkippedToday > 0 ? $"，今天跳过 {stats.SkippedToday} 条" : "";
+
+        // 画像：从最近的行为里算出来的几行事实。
+        // 排程时它能让 AI 敢说"你常规只有两小时"这种话——那正是它该做的事。
+        var profileText = ProfileLines.ToPrompt(await _profile.BuildAsync(day, ct));
 
         var lines = new List<string>
         {
@@ -379,6 +389,18 @@ public sealed class AgentService
             $"【今天的清单】共 {stats.Total} 条，已完成 {stats.Done} 条{skippedNote}",
             listText,
             "",
+            // 【为什么"实际"要解释一遍】
+            // 不解释的话，它容易被读成"这类事就该花这么久"，
+            // 于是 AI 拿这个数去填别人的预计——而那一次可能只是他边做边走神。
+            // 另外它只在"他按过启动"时才存在，没按过的没有这个数字，不能靠猜补上。
+            "清单里「实际」是他按下启动到点完成的时长，只有计过时的才会有；没写的就是没计时，别猜。",
+            "拿它估同类的事要留余地：那一次可能中途被打断过，也可能他当时状态特别好。",
+            "",
+            // 画像和主动开口那边共用同一段（ProfileLines），
+            // 两边才会用同一副口径说他。这里额外多一句：
+            // 对话里他随时会问"你觉得我怎么样"，那时候才可以说，
+            // 平时不许主动报数字——被念出来会变成被盯着。
+            profileText,
             $"【接下来 {UpcomingDays} 天已排的】",
             // 【为什么必须把"你看不到什么"也写清楚】
             // 不给边界，模型就会补全——问"下个月有什么"，它宁可编几条也不说不知道，
@@ -453,7 +475,23 @@ public sealed class AgentService
             "- rename     改标题。参数：id（必填）、title（必填）",
             "- delete     删除。参数：id（必填）",
             "",
-            "【他把一件模糊的大事交给你时，要拆开再排】",
+            "【先判断：这是一件事，还是一条日程】",
+            "- 判据只有一条：**能不能一次坐下来做完**。",
+            "  能——它就是一条日程，直接建，**不要拆、不要带 project**。",
+            "  不能——范围含糊、步骤不明、一看就得摊好几天——才轮到拆开再排。",
+            "- 一趟就能办完的事，无论听上去多大，都不是大事：",
+            "  「下午三点取快递」「今天把作业写了」「看两节网课」「交房租」。",
+            "  把这些判成大事再拆成五条，他会看到一堆本来就不需要存在的东西。",
+            "- 拿不准就**按不拆**排，然后在 reply 里问一句「要不要拆成几天」。",
+            "  这两个方向错起来的代价不对等：他没要求拆你却拆了，他要自己去删；",
+            "  你没拆但他想拆，他回一句「拆开」就行。",
+            "",
+            "【他说不用拆、或者改口说不拆了：先把上一批清干净】",
+            "- 你已经按错的方案建过一批，就得把那批删掉（用 delete），再按新要求重建。",
+            "- **不要只是「不再提」。**那些东西是真的落在库里了，他在界面上看得见，",
+            "  你假装没发生过，他只能自己一条条删。",
+            "",
+            "【确认要拆的时候，怎么拆】",
             "- 拆成 3~8 条能一次坐下来做完的子任务，每条控制在 25~90 分钟。",
             "  短于 25 分钟做完没有成就感，打勾变成走过场；",
             "  长于 90 分钟的事一看就不想开始——那就等于没排。",
@@ -468,13 +506,17 @@ public sealed class AgentService
             "- 用多条 create 表达，每条带自己的 date。系统会把它们分别放到该在的那天。",
             "- 第一条默认排今天：刚规划完的那一刻启动意愿最强，推到明天等于给了一晚上反悔时间。",
             "",
-            "【拆一件事时，必须给这批 create 带上同一个 project】",
+            "【project 只属于「拆出来的多条」】",
+            "- **只有你真的把一个大事拆成了多条，才给这批 create 带上同一个 project。**",
+            "  只建一条、或者建几条彼此独立的事，project 一律留空。",
+            "- 必须留空的理由很直接：给「取快递」也建一个 project，",
+            "  他的大任务页会多出一个只有一条任务的空壳——那不是进度，是噪声。",
             "- project 写这件事本身的名字（比如「开题报告」「数据结构期末复习」），不要写「任务1」这种。",
             "- 同一件事拆出来的每条都用**同一个** project 名字，系统会把它们归到一起；",
             "  名字相同的项目会被复用，不会每拆一次多建一个。",
             "- projectTarget 写整件事的截止日，只在第一条上给一次就够。",
             "",
-            "【为什么这条不能省】",
+            "【拆的时候为什么非要带 project】",
             "他要的不是一串散在日历里的条目，而是能看见「这件事做到哪了」。",
             "不带 project 的后果具体是这样的：你拆了八条，它们各自出现在那八天的清单里，",
             "但没有任何一个地方显示「开题报告 已完成 3/8」——",

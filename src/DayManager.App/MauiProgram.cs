@@ -1,4 +1,5 @@
 ﻿using DayManager.App.Services;
+using DayManager.App.Controls;
 using DayManager.App.ViewModels;
 using DayManager.Core.Intervention;
 using DayManager.Data;
@@ -51,10 +52,15 @@ public static class MauiProgram
 			.ConfigureFonts(fonts =>
 			{
 				fonts.AddFont("OpenSans-Regular.ttf", "OpenSansRegular");
-				fonts.AddFont("OpenSans-Semibold.ttf", "OpenSansSemibold");
-			});
+			fonts.AddFont("OpenSans-Semibold.ttf", "OpenSansSemibold");
+		});
 
-		// ================= 数据库注册 =================
+	// 对话里的文字要能拖选复制（ Ctrl+C ）。
+	// 这是原生控件的开关（WinUI TextBlock / Android TextView），
+	// 注册一次之后每个 Label 都走得通，页面里不用再做任何事。
+	SelectableLabelMapper.Register();
+
+	// ================= 数据库注册 =================
 
 		// 【Windows 端固定放在项目下的 data\，手机端走系统标准目录】
 		//
@@ -73,8 +79,19 @@ public static class MauiProgram
 		//
 		// 为什么用运行时判断而不是 #if WINDOWS：编译符号的名字容易记错，
 		// 写错了不会报错，只会静默走错分支——运行时判断没有这个风险。
+		//
+		// 【为什么这里多了一个"老目录还在不在"的判断】
+		// 打包发给别人时，对方电脑上当然没有 F:\DayManager\data，
+		// 写死的结果是：要么建目录失败直接崩，要么往人家 F 盘里乱写东西。
+		// 所以老目录在（也就是还在本机开发）就沿用，不在就落到系统给的应用数据目录
+		// ——这样同一份代码，自己跑和发给别人跑都不会走错。
+		var legacyDir = Path.Combine(SeedFileReader.RepoRoot, "data");
+		var portableDir = Path.Combine(
+			Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+			"DayManager");
+
 		var dataDir = OperatingSystem.IsWindows()
-			? @"F:\DayManager\data"
+			? (Directory.Exists(legacyDir) ? legacyDir : portableDir)
 			: FileSystem.AppDataDirectory;
 
 		// 目录不存在就先建出来，避免 SQLite 报「找不到路径」这种低级错误
@@ -117,10 +134,23 @@ public static class MauiProgram
 		// 设备使用时长（M7）：读写与统计都在共享代码里，两端以后一起用。
 		builder.Services.AddSingleton<UsageRepository>();
 
+		// 任务计时段：时间账的另一半分母。
+		// 没开电脑也在做事的那些时间要靠它补，否则娱乐占比被系统性高估。
+		builder.Services.AddSingleton<WorkSegmentRepository>();
+
 		// 干预参数与"今天别再提了"（M9）。参数存库是因为它要能被 AI 动态校准，
 		// 而且改完必须跨重启有效——只放内存的话，"今天别再提"过一夜又忘了。
 		builder.Services.AddSingleton<PolicyRepository>();
 		builder.Services.AddSingleton<AppRuleRepository>();
+
+		// 每日上下文：画像的日结层。以前只有后端写它（存晚间总结一句话），
+		// 现在客户端也要读要写（日结 + 趋势），所以放进共享的仓储。
+		builder.Services.AddSingleton<DailyContextRepository>();
+
+		// 画像：从明细里装配样本，交给 Core 的纯函数算。
+		// 后端用的是同一个类——时间页给用户看的数字和 AI 拿到的那份
+		// 必须出自同一段装配，否则两边迟早各说各的。
+		builder.Services.AddSingleton<ProfileRepository>();
 
 #if WINDOWS
 		// 采集器只有 Windows 一份实现（全靠 user32.dll）。
@@ -139,9 +169,13 @@ public static class MauiProgram
 		builder.Services.AddSingleton<IInterventionNotifier>(sp =>
 			sp.GetRequiredService<WindowsNotifier>());
 
-		// 干预引擎。只在有采集器和通知的平台上注册——
-		// 它的两个输入缺一个，功能就只能是个空转的定时器。
-		builder.Services.AddSingleton<InterventionService>();
+	// 主动开口的草稿箱：干预和专注到点共用它，
+	// 两边才会是同一副语气、同一套降级。
+	builder.Services.AddSingleton<ProactiveDraftService>();
+
+	// 干预引擎。只在有采集器和通知的平台上注册——
+	// 它的两个输入缺一个，功能就只能是个空转的定时器。
+	builder.Services.AddSingleton<InterventionService>();
 
 		// AI 主动开口：定时判断"该不该说话"，说出去之前会自己把后端拉起来。
 		builder.Services.AddSingleton<ProactiveNudgeService>();
@@ -161,6 +195,11 @@ public static class MauiProgram
 		// 所以它是单例（自己不存任何状态，只拿着仓储）。
 		builder.Services.AddSingleton<ItemActionService>();
 		builder.Services.AddTransient<MainViewModel>();
+
+		// 日结：把每天的客观情况固化成 daily_contexts 一行。
+		// 它不依赖任何平台能力，所以放在跨平台这一段——
+		// 将来 Android 上同一份代码直接就能跑。
+		builder.Services.AddSingleton<DailyRollupService>();
 
 		// ================= 后端访问 =================
 
@@ -264,6 +303,8 @@ public static class MauiProgram
 		WarmUpBackend(app.Services);
 #endif
 
+		StartDailyRollup(app.Services);
+
 		return app;
 	}
 
@@ -333,6 +374,32 @@ public static class MauiProgram
 			catch (Exception ex)
 			{
 				CrashLogger.Write("后端预热失败", ex);
+			}
+		});
+	}
+
+	/// <summary>
+	/// 启动时补算还没结算过的那些天。
+	///
+	/// 【为什么放在启动路径上，而不是做成定时任务】
+	/// 定时任务要求程序一直开着，而它经常被关掉。
+	/// 启动时补算天然就是"每天至少一次"，而且只在缺的时候才动。
+	///
+	/// 【为什么扔后台线程且不抛错】
+	/// 日结要扫库，放在启动路径上会让窗口晚出来。
+	/// 它失败了最多是趋势缺一天，不该挡着程序起来。
+	/// </summary>
+	private static void StartDailyRollup(IServiceProvider services)
+	{
+		_ = Task.Run(async () =>
+		{
+			try
+			{
+				await services.GetRequiredService<DailyRollupService>().RollupMissingAsync();
+			}
+			catch (Exception ex)
+			{
+				CrashLogger.Write("日结失败", ex);
 			}
 		});
 	}

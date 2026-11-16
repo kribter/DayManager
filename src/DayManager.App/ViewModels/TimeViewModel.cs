@@ -5,6 +5,8 @@ using DayManager.App.Services;
 using DayManager.Core.Ai;
 using DayManager.Core.Enums;
 using DayManager.Core.Intervention;
+using DayManager.Core.Planning;
+using DayManager.Core.Profile;
 using DayManager.Data.Repositories;
 
 namespace DayManager.App.ViewModels;
@@ -59,6 +61,18 @@ public partial class TimeViewModel : ObservableObject
     private readonly ProactiveNudgeService? _proactive;
 
     /// <summary>
+    /// 每日上下文。趋势从这里读——它是已经固化下来的历史，
+    /// 不会因为后来改了一条旧任务就自己变。
+    /// </summary>
+    private readonly DailyContextRepository _contexts;
+
+    /// <summary>
+    /// 画像。和后端用的是同一个装配（<see cref="ProfileRepository"/>），
+    /// 所以页面上这几个数就是 AI 手里那几个数，不会各说各的。
+    /// </summary>
+    private readonly ProfileRepository _profiles;
+
+    /// <summary>
     /// 自动刷新间隔。
     ///
     /// 【为什么是 20 秒，而不是跟着采集的 5 秒】
@@ -74,6 +88,20 @@ public partial class TimeViewModel : ObservableObject
     private readonly CancellationTokenSource _autoRefreshCts = new();
     private bool _autoRefreshStarted;
 
+    /// <summary>
+    /// 画像多久重算一次。
+    ///
+    /// 【为什么不跟着 20 秒的刷新跑】
+    /// 上面的数字（用了多久、谁占大头）是分钟级的，值得常刷；
+    /// 画像看的是最近 30 天，一天最多变一层。每 20 秒重算一遍，
+    /// 等于每 20 秒把一千多条屏幕会话读出来再加权，白花的力气。
+    /// 十分钟一次，够它跟上"我今天用了一会儿"的变化。
+    /// </summary>
+    private static readonly TimeSpan ProfileRefreshInterval = TimeSpan.FromMinutes(10);
+
+    /// <summary>上次算画像的时刻。默认值表示还没算过，第一次一定算。</summary>
+    private DateTime _profileLoadedAt = DateTime.MinValue;
+
     /// <summary>当前看的是哪一天。周/月/年都从它推出来。</summary>
     private DateOnly _anchor = DateOnly.FromDateTime(DateTime.Today);
 
@@ -81,12 +109,16 @@ public partial class TimeViewModel : ObservableObject
         UsageRepository usage,
         PolicyRepository policy,
         AppRuleRepository rules,
+        DailyContextRepository contexts,
+        ProfileRepository profiles,
         InterventionService? intervention = null,
         ProactiveNudgeService? proactive = null)
     {
         _usage = usage;
         _policy = policy;
         _rules = rules;
+        _contexts = contexts;
+        _profiles = profiles;
         _intervention = intervention;
         _proactive = proactive;
 
@@ -171,6 +203,142 @@ public partial class TimeViewModel : ObservableObject
     /// 刷新一次。`quiet` 表示"后台自动刷的"，出错也不弹框——
     /// 每 20 秒弹一个错误框，比数字暂时停留在旧值烦人得多。
     /// </summary>
+    /// <summary>
+    /// 刷新「我是什么样」和趋势这两块。
+    ///
+    /// 【为什么以前只有趋势，现在加了画像】
+    /// 画像算出来只喂给 AI 的时候，用户自己是看不到的——
+    /// 而"看见自己真实的样子"这件事本身就有用，不必等它变成一句建议。
+    /// 现在这几行和 AI 手里那几条出自同一个装配（ProfileRepository）。
+    ///
+    /// 【为什么直接从库里读，而不是绕后端】
+    /// 算法和数据都在本地。绕后端要多一次网络往返，
+    /// 还要处理它没起来时的降级——没有理由。
+    ///
+    /// 【为什么失败要静默】
+    /// 它跑在刷新路径上。失败了最多是这一块空着，
+    /// 抛上去会把整个时间页的刷新打断，那才是真的坏了。
+    /// </summary>
+    private async Task LoadProfileAsync(bool force = false)
+    {
+        try
+        {
+            // "今天"用日结那套边界（凌晨 5 点算新一天），
+            // 否则凌晨一点活跃的这段时间会被算到第二天去。
+            var today = DayBoundary.Resolve(DateTimeOffset.Now);
+
+            await LoadSelfFactsAsync(today, force);
+            await LoadTrendAsync(today);
+        }
+        catch (Exception ex)
+        {
+            Services.CrashLogger.Write("画像/趋势加载失败", ex);
+        }
+    }
+
+    /// <summary>
+    /// 「我是什么样」那几行。
+    ///
+    /// 【为什么没攒够的那条也要显示】
+    /// 一个整块空着的功能等于不存在。说清"再记 2 次就有"，
+    /// 他才知道这些数字是从哪儿长出来的。
+    /// 但只挑最接近攒够的那一条——整块都写成"还差几次"，
+    /// 就变成进度条了，那不是画像。
+    /// </summary>
+    private async Task LoadSelfFactsAsync(DateOnly today, bool force)
+    {
+        if (!force && DateTime.Now - _profileLoadedAt < ProfileRefreshInterval)
+        {
+            return;
+        }
+
+        var profile = await _profiles.BuildAsync(today);
+        var facts = ProfileLines.DescribeForSelf(profile);
+
+        var known = facts.Where(x => !x.IsPending).Take(3).ToList();
+        var closest = facts
+            .Where(x => x.IsPending)
+            .OrderBy(x => x.Remaining)
+            .FirstOrDefault();
+
+        ProfileRows.Clear();
+
+        foreach (var fact in known)
+        {
+            ProfileRows.Add(new TrendRow(fact.Label, fact.Text));
+        }
+
+        if (closest is not null && known.Count < 3)
+        {
+            ProfileRows.Add(new TrendRow(closest.Label, closest.Text));
+        }
+
+        HasProfile = ProfileRows.Count > 0;
+        _profileLoadedAt = DateTime.Now;
+    }
+
+    /// <summary>
+    /// 最近七天对比前七天；两个周期凑不齐时，改成把最近七天的事实说出来。
+    ///
+    /// 【为什么凑不齐也要有内容】
+    /// 这个对比要求两个周期各有三天以上有安排。刚开始用的那两周，
+    /// 前一个周期一天都没有——于是这一块只能写"还在攒"，
+    /// 而且**必然要空等一周**（日结是今天才开始写的）。
+    /// 与其摆一个注定空着的区块，不如先把这一周到底怎么样说出来。
+    /// </summary>
+    private async Task LoadTrendAsync(DateOnly today)
+    {
+        var span = TrendCalculator.PeriodDays;
+
+        var thisEnd = today.AddDays(-1);
+        var thisStart = thisEnd.AddDays(-(span - 1));
+        var lastEnd = thisStart.AddDays(-1);
+        var lastStart = lastEnd.AddDays(-(span - 1));
+
+        var rows = await _contexts.ListAsync(lastStart, thisEnd);
+
+        var rollups = rows
+            .Where(x => x.RolledUpAt is not null)
+            .Select(x => new DailyRollupRow(
+                x.Date,
+                x.PlannedCount,
+                x.CompletedCount,
+                x.AverageStartDelayMinutes,
+                x.FocusMinutes))
+            .ToList();
+
+        var before = TrendCalculator.BuildPeriod(
+            lastStart, rollups.Where(x => x.Day >= lastStart && x.Day <= lastEnd).ToList());
+
+        var after = TrendCalculator.BuildPeriod(
+            thisStart, rollups.Where(x => x.Day >= thisStart && x.Day <= thisEnd).ToList());
+
+        var items = TrendCalculator.Compare(before, after);
+
+        TrendRows.Clear();
+
+        if (items.Any(x => x.EnoughData))
+        {
+            // 有变化的排前面。这一块的意义是"看见自己在动"，
+            // 排在第一行的应该是能给人正反馈的那条。
+            foreach (var item in items.OrderByDescending(x => x.Improved))
+            {
+                TrendRows.Add(new TrendRow(item.Label, ProfileLines.DescribeForUser(item)));
+            }
+
+            IsTrendCompared = true;
+        }
+        else
+        {
+            // 凑不齐对比：一行说清这七天。此时不再另起小标题——
+            // 这一行自己就带着"最近七天"的标签，否则页面上会连着出现两个"最近七天"。
+            TrendRows.Add(new TrendRow("最近七天", ProfileLines.DescribeRecentWeek(after)));
+            IsTrendCompared = false;
+        }
+
+        HasTrend = TrendRows.Count > 0;
+    }
+
     private async Task RefreshAsync(bool quiet)
     {
         // 已经有刷新在跑就直接跳过：这次错过没关系，20 秒后还有一轮。
@@ -190,6 +358,29 @@ public partial class TimeViewModel : ObservableObject
     }
 
     public ObservableCollection<AppUsageRow> Apps { get; } = new();
+
+    /// <summary>
+    /// 「我是什么样」：从自己记录里算出来的几行事实。
+    ///
+    /// 【为什么和 TrendRows 分成两个集合】
+    /// 一个是"我现在是什么样"，一个是"我在往哪走"。前者看最近 30 天，
+    /// 后者是两周对两周的对比——数据来源和更新节奏都不一样，
+    /// 塞进同一个集合就得靠标记位去区分，反而更难维护。
+    /// </summary>
+    public ObservableCollection<TrendRow> ProfileRows { get; } = new();
+
+    /// <summary>
+    /// 「看着自己的变化」：最近七天对比前七天。
+    ///
+    /// 【为什么这一块放在时间页，而不是单独开一个"我的"页面】
+    /// 它是"我这段时间怎么样"的答案，跟使用时长是同一个问题的两面；
+    /// 单独开一页的话，人要专门想起来去看它，那就等于没有。
+    /// </summary>
+    public ObservableCollection<TrendRow> TrendRows { get; } = new();
+
+    /// <summary>「我是什么样」有没有内容（一行都没有时整块不占地方）。</summary>
+    [ObservableProperty]
+    public partial bool HasProfile { get; set; }
 
     [ObservableProperty]
     public partial UsageSpan Span { get; set; } = UsageSpan.Day;
@@ -231,6 +422,20 @@ public partial class TimeViewModel : ObservableObject
 
     [ObservableProperty]
     public partial bool HasApps { get; set; }
+
+    /// <summary>「看着自己的变化」这一块有没有内容。</summary>
+    [ObservableProperty]
+    public partial bool HasTrend { get; set; }
+
+    /// <summary>
+    /// 趋势是不是真的在对比（两个周期都攒够了）。
+    ///
+    /// 【为什么要单独记这一位】
+    /// 没攒够时那一行自己写着"最近七天"；这时再显示"最近七天对前七天"的小标题，
+    /// 页面上就会连着两个"最近七天"，读起来像坏掉了。
+    /// </summary>
+    [ObservableProperty]
+    public partial bool IsTrendCompared { get; set; }
 
     // ================= 干预设置（M9） =================
 
@@ -621,17 +826,31 @@ public partial class TimeViewModel : ObservableObject
             _kindByApp = (await _rules.GetAllAsync())
                 .ToDictionary(x => x.AppId, x => x.Kind, StringComparer.OrdinalIgnoreCase);
 
-            TotalText = FormatDuration(range.TotalSeconds);
-            IsEmpty = range.TotalSeconds == 0;
+            // 【为什么总时长看的是 AccountedSeconds，不是 TotalSeconds】
+            // TotalSeconds 只统计"坐在屏幕前"的时间。
+            // 你在纸上做题、出门办事的那两小时在它里面等于不存在，
+            // 于是分母偏小、娱乐占比被系统性高估——
+            // 明明做了事，却被算成"今天都在玩"。
+            // AccountedSeconds 把"没开电脑但计了时的"那部分也算进来（重叠只算一次），
+            // 这才是"这一天有多少时间是有着落的"。
+            TotalText = FormatDuration(range.AccountedSeconds);
+            IsEmpty = range.AccountedSeconds == 0;
 
             NoteText = range.SessionCount == 0
                 ? string.Empty
                 : $"记录 {range.SessionCount} 段 · {range.FirstAt:HH:mm} 开始 · {range.LastAt:HH:mm} 结束";
 
-            EntertainmentText = range.TotalSeconds == 0
+            // 总时长里有一部分是"没开电脑也在做"的，说清楚它有多少，
+            // 否则明细里各应用加起来对不上总数，看着像算错了。
+            if (range.WorkSeconds > 0)
+            {
+                NoteText += $" · 任务计时 {FormatDuration(range.WorkSeconds)}";
+            }
+
+            EntertainmentText = range.AccountedSeconds == 0
                 ? string.Empty
                 : $"娱乐 {FormatDuration(range.EntertainmentSeconds)}"
-                  + $"（占 {range.EntertainmentSeconds * 100 / range.TotalSeconds}%）";
+                  + $"（占有记录时间的 {range.EntertainmentSeconds * 100 / range.AccountedSeconds}%）";
 
             Apps.Clear();
             foreach (var row in BuildAppRows(range, _kindByApp))
@@ -652,6 +871,11 @@ public partial class TimeViewModel : ObservableObject
                 UsageSpan.Month => "按天",
                 _ => "按月"
             };
+
+            // 画像和趋势跟"当前跨度"无关：它们永远是最近一段时间的。
+            // 翻到上个月看历史时，这一块不该跟着变成上个月的对比——
+            // 它是"我现在怎么样"，不是"那时候怎么样"。
+            await LoadProfileAsync();
         }
         catch (Exception ex)
         {
@@ -767,7 +991,10 @@ public partial class TimeViewModel : ObservableObject
     /// </summary>
     private IReadOnlyList<BarItem> BuildDayBars(UsageRange range, DateOnly from, DateOnly to)
     {
-        var byDay = range.Days.ToDictionary(x => x.Day, x => x.TotalSeconds);
+        // 柱子画的也是"有着落的时间"，和上面的总时长同一个口径：
+        // 否则某天只做了纸质作业、没开电脑，柱子上会是 0，
+        // 看着像那天什么都没干。
+        var byDay = range.Days.ToDictionary(x => x.Day, x => x.AccountedSeconds);
 
         if (Span == UsageSpan.Year)
         {
@@ -776,7 +1003,7 @@ public partial class TimeViewModel : ObservableObject
             {
                 var seconds = range.Days
                     .Where(x => x.Day.Month == month)
-                    .Sum(x => x.TotalSeconds);
+                    .Sum(x => x.AccountedSeconds);
 
                 months.Add(new BarItem($"{month}", seconds));
             }
@@ -941,3 +1168,12 @@ public record AppUsageRow(string AppId, string Name, string DurationText, double
 
 /// <summary>柱状图里的一根柱子。</summary>
 public record BarItem(string Label, int Seconds);
+
+/// <summary>
+/// "看着自己的变化"里的一行。
+///
+/// 【为什么只有 Label 和 Text 两个字段，没有颜色/图标】
+/// 这一块最怕做成成绩单。不带颜色、不带箭头、不带符号，
+/// 就只是一句"20 分钟 → 15 分钟，快了"——陈述方向，不打分。
+/// </summary>
+public record TrendRow(string Label, string Text);

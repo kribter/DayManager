@@ -28,6 +28,27 @@
       ============================================================
     -->
 
+    <ContentPage.Resources>
+        <!--
+          一行事实：左边一个小标签，右边一句人话。
+          画像（我是什么样）和趋势（最近七天）两处共用同一个模板——
+          它们长得一样，改一处忘另一处的话，两块会越来越不像。
+        -->
+        <DataTemplate x:Key="FactRowTemplate" x:DataType="vm:TrendRow">
+            <Grid ColumnDefinitions="88,*" ColumnSpacing="10">
+                <Label Text="{Binding Label}"
+                       FontSize="12"
+                       TextColor="{StaticResource MutedText}"
+                       VerticalOptions="Center" />
+
+                <Label Grid.Column="1"
+                       Text="{Binding Text}"
+                       FontSize="13"
+                       VerticalOptions="Center" />
+            </Grid>
+        </DataTemplate>
+    </ContentPage.Resources>
+
     <Grid RowDefinitions="Auto,Auto,*"
           Padding="18,14,18,0"
           RowSpacing="12">
@@ -252,6 +273,60 @@
                                 </DataTemplate>
                             </BindableLayout.ItemTemplate>
                         </VerticalStackLayout>
+                    </VerticalStackLayout>
+                </Border>
+
+                <!-- ================= 我是什么样 / 看着自己的变化 =================
+                     【为什么这两块合成一张卡，而不是各占一块】
+                     它们回答的是同一个问题的两半：
+                     上面是"我现在是什么样"，下面是"我在往哪走"。
+                     分开放的话，用户要先在两块之间做一次心理切换；
+                     连在一起读，才是"哦，我最近是这样，而且在动"。
+
+                     【为什么不写成"你的性格分析"】
+                     画像只回答"这段时间你的记录长什么样"，不回答"你是什么样的人"。
+                     后者一旦说错就很刺耳，说出口就成了贴在自己身上的标签。
+
+                     【为什么不做成退步排行榜】
+                     这个软件是帮他启动的，不是给他打分的。
+                     进步排在前面是为了让第一眼看到的是"我在动"；
+                     退步也显示（藏起来就成了粉饰），但不给它颜色、不排在最前面。
+
+                     【为什么这张卡没有 IsVisible】
+                     数据不够时里面会显示"再记 2 次就有结论"这类进度话。
+                     整张卡随数据消失的话，他会以为这个功能坏了或者不存在。
+                -->
+                <Border Style="{StaticResource CardStyle}">
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="14" />
+                    </Border.StrokeShape>
+
+                    <VerticalStackLayout Spacing="12">
+                        <Label Text="我是什么样"
+                               Style="{StaticResource CardTitle}" />
+
+                        <Label Text="从你自己的记录里算出来的，不是猜的"
+                               Style="{StaticResource Caption}" />
+
+                        <!-- 画像的几行事实。一行都没有时不占位置。 -->
+                        <VerticalStackLayout Spacing="8"
+                                             IsVisible="{Binding HasProfile}"
+                                             BindableLayout.ItemsSource="{Binding ProfileRows}"
+                                             BindableLayout.ItemTemplate="{StaticResource FactRowTemplate}" />
+
+                        <!-- 分隔线：上面是"现在什么样"，下面是"在往哪走"。 -->
+                        <BoxView HeightRequest="1"
+                                 IsVisible="{Binding HasTrend}"
+                                 Color="{AppThemeBinding Light={StaticResource CardBorderLight}, Dark={StaticResource CardBorderDark}}" />
+
+                        <Label Text="最近七天对前七天"
+                               Style="{StaticResource Caption}"
+                               IsVisible="{Binding IsTrendCompared}" />
+
+                        <VerticalStackLayout Spacing="8"
+                                             IsVisible="{Binding HasTrend}"
+                                             BindableLayout.ItemsSource="{Binding TrendRows}"
+                                             BindableLayout.ItemTemplate="{StaticResource FactRowTemplate}" />
                     </VerticalStackLayout>
                 </Border>
 
