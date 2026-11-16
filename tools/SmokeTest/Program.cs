@@ -7,10 +7,12 @@ using DayManager.Core.Enums;
 using DayManager.Core.Intervention;
 using DayManager.Core.Planning;
 using DayManager.Core.Proactive;
+using DayManager.Core.Profile;
 using DayManager.Data;
 using DayManager.Data.Repositories;
 using DayManager.Data.Snapshots;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 
 var dbFile = Path.Combine(Path.GetTempPath(), $"dm-smoke-{Guid.NewGuid():N}.db");
@@ -30,6 +32,40 @@ void Check(string name, bool ok, string? detail = null)
 {
     Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {name}{(detail is null ? "" : "  -> " + detail)}");
     if (ok) passed++; else failed++;
+}
+
+/// <summary>
+/// 找到仓库里的 src 目录。
+///
+/// 【为什么要往上找，而不是写死相对路径】
+/// 这个程序有时从项目目录跑（dotnet run），有时直接跑编译出来的 exe，
+/// 两种情况下"当前目录"的含义不一样。从自己所在的位置一层层往上找
+/// 到带 src/DayManager.App 的那一层，两种都能对。
+/// </summary>
+string? FindSrcRoot()
+{
+    var start = new[]
+    {
+        AppContext.BaseDirectory,
+        Directory.GetCurrentDirectory()
+    };
+
+    foreach (var root in start)
+    {
+        var dir = new DirectoryInfo(root);
+        while (dir is not null)
+        {
+            var src = Path.Combine(dir.FullName, "src");
+            if (Directory.Exists(Path.Combine(src, "DayManager.App")))
+            {
+                return src;
+            }
+
+            dir = dir.Parent;
+        }
+    }
+
+    return null;
 }
 
 var now = DateTimeOffset.Now;
@@ -847,7 +883,8 @@ Check("模型没给这个字段时返回 null", SuggestionCleaner.Clean(null) is
 Console.WriteLine();
 Console.WriteLine("=== 18. 使用时长：记的是「人真的在用」，不是「钟走了多久」 ===");
 
-var usage = new UsageRepository(factory);
+var workRepo = new WorkSegmentRepository(factory);
+var usage = new UsageRepository(factory, workRepo);
 var uDay = DateOnly.FromDateTime(DateTime.Today);
 var uBase = new DateTimeOffset(
     uDay.ToDateTime(TimeOnly.MinValue),
@@ -916,6 +953,114 @@ await using (var db = factory.CreateDbContext())
 {
     var keptRows = await db.UsageSessions.IgnoreQueryFilters().CountAsync(x => x.AppId == "chrome");
     Check("删除是软删：记录还在（同步时别的设备才知道这些被删了）", keptRows == 1, $"kept={keptRows}");
+}
+
+// —— 任务计时进分母：没开电脑但在做事的时间也要算进时间账 ——
+//
+// 【为什么这一段必须有】
+// 它测的就是这次要修的毛病本身：只统计屏幕前的时间，
+// 他做纸上练习的两小时在统计里等于不存在，分母偏小，
+// 于是"娱乐占比"被系统性高估，明明做了事却被说成"今天都在玩"。
+// 加完再软删掉，免得影响后面那些按绝对值写的断言。
+var beforeWork = await usage.GetDaySummaryAsync(uDay);
+var segOffline = Guid.Empty;
+var segOverlap = Guid.Empty;
+
+await using (var db = factory.CreateDbContext())
+{
+    var paper = new Item { Title = "纸上做一套题", DueAt = uBase.AddDays(1) };
+    db.Items.Add(paper);
+    await db.SaveChangesAsync();
+
+    // 13:00-15:00：这两个钟头他没碰电脑，设备那一路一条记录都没有。
+    var offline = new WorkSegment { ItemId = paper.Id, StartAt = U(13), EndAt = U(15) };
+    // 11:00-11:30：和 Edge 那段完全重叠——在电脑上边做事边计时的典型情形。
+    var overlap = new WorkSegment { ItemId = paper.Id, StartAt = U(11), EndAt = U(11.5) };
+
+    db.WorkSegments.AddRange(offline, overlap);
+    await db.SaveChangesAsync();
+
+    segOffline = offline.Id;
+    segOverlap = overlap.Id;
+}
+
+var afterWork = await usage.GetDaySummaryAsync(uDay);
+Check("任务计时单独统计得出来（界面上要能说明总数里有多少是它）",
+    afterWork.WorkSeconds == 7200 + 1800, $"{afterWork.WorkSeconds}");
+Check("没开电脑的那两小时把分母撑大了两小时",
+    afterWork.AccountedSeconds == beforeWork.AccountedSeconds + 7200,
+    $"{afterWork.AccountedSeconds} vs {beforeWork.AccountedSeconds}");
+Check("和屏幕前重叠的那半小时不再重复计数（求并集的意义就在这）",
+    afterWork.AccountedSeconds < beforeWork.AccountedSeconds + 7200 + 1800,
+    $"{afterWork.AccountedSeconds}");
+Check("娱乐时长不受影响：它只来自设备记录",
+    afterWork.EntertainmentSeconds == beforeWork.EntertainmentSeconds);
+Check("屏幕前的总时长也不受影响（两路各记各的）",
+    afterWork.TotalSeconds == beforeWork.TotalSeconds);
+
+await using (var db = factory.CreateDbContext())
+{
+    var rows = await db.WorkSegments.Where(x => x.Id == segOffline || x.Id == segOverlap).ToListAsync();
+    foreach (var r in rows)
+    {
+        r.DeletedAt = DateTimeOffset.Now;
+    }
+
+    await db.SaveChangesAsync();
+}
+
+Check("软删之后这两段退出统计（墓碑留着，同步时别的设备才知道）",
+    (await usage.GetDaySummaryAsync(uDay)).AccountedSeconds == beforeWork.AccountedSeconds);
+
+// —— 走一遍真实路径：点启动会开一段，再点一下会闭上 ——
+//
+// 【为什么还要再验一遍】
+// 上面是直接往表里插记录，验的只是统计那一侧；
+// 这里验的是界面上那两个按钮到底有没有接上这张新表。
+// 接不上的表现非常静默：计时照走、勾也照打、界面上一个字都不报错，
+// 只是时间账的分母永远少那一块，占比一直偏高——而这种偏差没人会去查。
+var timed = await repo.AddAsync("端到端：走一遍启动和暂停");
+
+await repo.ToggleStartPauseAsync(timed.Id);
+Check("点了启动，表里就多出一段在走",
+    await workRepo.CountSegmentsAsync(timed.Id) == 1);
+
+await using (var db = factory.CreateDbContext())
+{
+    var open = await db.WorkSegments.SingleAsync(x => x.ItemId == timed.Id);
+    Check("这段还没有结束时刻（计时器正在走）", open.EndAt is null);
+}
+
+await repo.ToggleStartPauseAsync(timed.Id);   // 再点一下 = 暂停
+await using (var db = factory.CreateDbContext())
+{
+    var closed = await db.WorkSegments.SingleAsync(x => x.ItemId == timed.Id);
+    Check("暂停之后这段被收尾", closed.EndAt is not null);
+    Check("结束时刻不早于开始时刻", closed.EndAt >= closed.StartAt);
+}
+
+// 勾完成也要收尾：否则"边做边勾"留下一条永远走着的段，
+// 它的右端被当成"现在"，每查一次就多算一截。
+await repo.ToggleStartPauseAsync(timed.Id);   // 继续
+await repo.ToggleDoneAsync(timed.Id);         // 完成
+await using (var db = factory.CreateDbContext())
+{
+    var left = await db.WorkSegments.CountAsync(x => x.ItemId == timed.Id && x.EndAt == null);
+    Check("勾完成之后没有还在走的段", left == 0, $"left={left}");
+}
+
+await using (var db = factory.CreateDbContext())
+{
+    var it = await db.Items.SingleAsync(x => x.Id == timed.Id);
+    it.DeletedAt = DateTimeOffset.Now;
+
+    var segs = await db.WorkSegments.Where(x => x.ItemId == timed.Id).ToListAsync();
+    foreach (var s in segs)
+    {
+        s.DeletedAt = DateTimeOffset.Now;
+    }
+
+    await db.SaveChangesAsync();
 }
 
 Console.WriteLine();
@@ -1097,6 +1242,94 @@ Check("冷却过了可以再提",
 Check("阈值配成 0 不会变成疯狂弹窗",
     InterventionDecider.Decide(Ctx("bilibili", "B 站", 60, threshold: 0)).Reason
         == InterventionSkipReason.BelowThreshold);
+
+// ---- 点名之前先看看那件事现在能不能动手 ----
+//
+// 这几条来自 2026-10-31 傍晚的一次真实提醒：当时把「12点前躺下，手机放到够不着」
+// 当成下午该先做十分钟的事点了名，而它排的其实是大半夜才开始。
+// 所以挑选这一步要有自己的断言——干预不仅要"该弹的时候弹了"，还得"说的是人话"。
+
+// Item 有二十来个字段，这里只写和"能不能现在动手"有关的几个。
+Item It(string title, DateTimeOffset? startAt = null, bool allDay = false,
+        ItemStatus status = ItemStatus.Pending, DateTimeOffset? startedAt = null)
+    => new() { Title = title, StartAt = startAt, IsAllDay = allDay, Status = status, StartedAt = startedAt };
+
+Check("排到半夜才开始的事，下午不会被点名",
+    NudgeTargetPicker.Pick(
+        new[] { It("12点前躺下，手机放到够不着的地方", startAt: iNow.Date.AddHours(23).AddMinutes(59)) },
+        iNow) is null,
+    "这条就是当时的真实数据：它在那天清單里排第一，直接被点名了");
+
+Check("没排时间的纯待办随时可以点名",
+    NudgeTargetPicker.Pick(new[] { It("写开题报告") }, iNow)?.Title == "写开题报告");
+
+Check("全天事件不算'还没到点'",
+    NudgeTargetPicker.Pick(new[] { It("交房租", allDay: true) }, iNow) is not null);
+
+Check("排过了时间还没做的事可以点名（它早该做了）",
+    NudgeTargetPicker.Pick(
+        new[] { It("改论文", startAt: iNow.AddHours(-3)) },
+        iNow) is not null);
+
+Check("已经开了头的优先于还没动的",
+    NudgeTargetPicker.Pick(
+        new[]
+        {
+            It("排在前面的待办"),
+            It("昨天没写完的那节", status: ItemStatus.InProgress)
+        },
+        iNow)?.Title == "昨天没写完的那节",
+    "接着做比重新开始容易得多，这正是这个功能要蹭的那一点");
+
+Check("几分钟后就要开始的事不算太早",
+    NudgeTargetPicker.Pick(
+        new[] { It("18:05 的会", startAt: iNow.AddMinutes(NudgeTargetPicker.GraceMinutes - 1)) },
+        iNow) is not null,
+    "留缓冲是为了让'先把东西摆开'这种提醒还能说出口");
+
+Check("半小时后才开始的事现在不该点名",
+    NudgeTargetPicker.Pick(
+        new[] { It("18:30 的会", startAt: iNow.AddMinutes(30)) },
+        iNow) is null);
+
+Check("一件都挑不出来时明确返回 null，而不是硬抓第一条",
+    NudgeTargetPicker.Pick(
+        new[] { It("睡前那件", startAt: iNow.AddHours(6)) },
+        iNow) is null,
+    "退回不点名的文案，比说一句现在做不了的胡话好");
+
+Check("清单是空的时候不炸",
+    NudgeTargetPicker.Pick(Array.Empty<Item>(), iNow) is null);
+
+// ---- 实际用时：AI 排得多不多，全靠这个数 ----
+
+var tStart = new DateTimeOffset(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);
+var tResume = tStart.AddMinutes(25);
+
+Check("没开始也没累计：0 分钟",
+    Elapsed.TotalMinutes(null, null, tStart) == 0);
+
+Check("正在走表：从启动那一秒算起",
+    Elapsed.TotalMinutes(null, tStart, tResume) == 25);
+
+Check("暂停之后只算结清过的部分，多问几次也不会重复累加",
+    Elapsed.TotalMinutes(25, null, tResume.AddMinutes(90)) == 25,
+    "暂停时 StartedAt 是空的，这时再把当前这一段加上去就是凭空多一段时间");
+
+Check("暂停又继续：结清的加上当前这一段",
+    Elapsed.TotalMinutes(25, tResume, tResume.AddMinutes(10)) == 35);
+
+Check("时钟被往回调过：按积累值算，不出现负数",
+    Elapsed.TotalMinutes(25, tStart, tStart.AddMinutes(-30)) == 25);
+
+Check("不到一分钟的一段按 0 记，但不会把已经有的积累值吃掉",
+    Elapsed.TotalMinutes(25, tStart, tStart.AddSeconds(40)) == 25);
+
+Check("没点过启动就勾完成：留空，不替用户编一个 0",
+    Elapsed.OrNullIfZero(0) is null,
+    "写个 0 进去，AI 会读成这件事不用花时间，比没有数据更糟");
+
+Check("有数据才回填实际用时", Elapsed.OrNullIfZero(125) == 125);
 
 // ---- 落库 ----
 
@@ -1368,6 +1601,479 @@ Console.WriteLine("=== 22. AI 主动开口：什么时候该说话 ===");
     Check("超过上限会被截断而不是报错",
         AiTone.NormalizePersona(new string('字', AiTone.MaxPersonaLength + 200))!.Length
             == AiTone.MaxPersonaLength);
+}
+
+// ---- 主动开口的场合名 ----
+//
+// 【为什么这几条值得测】
+// 客户端把场合当**字符串**传给后端，后端用 Enum.TryParse 认回来。
+// 这条路上没有任何编译期保护：枚举项删了、名字改了，两边都不报错，
+// 表现只是"这一路永远退回本地模板"——看起来功能在，其实 AI 从没说过话。
+// 这是上次踩过的坑（Release/Debug 那份不动的 dll），
+// 所以在这里把「字符串 → 场合」的对应关系钉住。
+{
+    Check("focus 认得出来",
+        Enum.TryParse<ProactiveKind>("focus", ignoreCase: true, out var fk) && fk == ProactiveKind.Focus);
+
+    Check("nudge 认得出来",
+        Enum.TryParse<ProactiveKind>("nudge", ignoreCase: true, out var nk) && nk == ProactiveKind.Nudge);
+
+    Check("morning / before / evening / lowrate 都认得出来",
+        Enum.TryParse<ProactiveKind>("morning", ignoreCase: true, out var mk) && mk == ProactiveKind.Morning
+        && Enum.TryParse<ProactiveKind>("before", ignoreCase: true, out var bk) && bk == ProactiveKind.Before
+        && Enum.TryParse<ProactiveKind>("evening", ignoreCase: true, out var ek) && ek == ProactiveKind.Evening
+        && Enum.TryParse<ProactiveKind>("lowrate", ignoreCase: true, out var lk) && lk == ProactiveKind.LowRate);
+
+    Check("认不出来的场合不会被当成默认场合",
+        !Enum.TryParse<ProactiveKind>("瞎写的", ignoreCase: true, out var bad) || bad == ProactiveKind.None);
+}
+
+// ---- 时间账：设备使用与任务计时求并集 ----
+//
+// 【为什么这几条值得测】
+// 娱乐占比的分母现在是"屏幕前 ∪ 计了时的"，两边是各自独立记下来的。
+// 重叠的部分数两遍 → 分母虚高、占比虚低，AI 反而不开口；
+// 漏掉某一路 → 分母退回"只算屏幕前"，那正是这次要修的老毛病
+// （他做纸上练习的两小时在统计里等于不存在，于是被说成"今天都在玩"）。
+// 边界情况（紧邻、倒挂、跨午夜、窗口外）又都堆在最容易写错的地方，所以钉住它们。
+{
+    // 用本机真实的时区偏移构造：SecondsByDay 是按本地的"天"切的，
+    // 写死 +8 的话换个时区跑就全错。
+    var offset = TimeZoneInfo.Local.GetUtcOffset(new DateTime(2026, 11, 1, 10, 0, 0));
+    var at = new DateTimeOffset(2026, 11, 1, 10, 0, 0, offset);
+
+    var overlapped = new[]
+    {
+        new TimeInterval(at, at.AddHours(1)),
+        new TimeInterval(at.AddMinutes(30), at.AddHours(2))
+    };
+
+    Check("重叠的区间合并成一段", IntervalUnion.Merge(overlapped).Count == 1);
+    Check("重叠的那半小时只算一次（2 小时，不是 2.5）",
+        IntervalUnion.TotalSeconds(overlapped) == 2 * 3600);
+
+    var adjacent = new[]
+    {
+        new TimeInterval(at, at.AddHours(1)),
+        new TimeInterval(at.AddHours(1), at.AddHours(2))
+    };
+    Check("首尾相接合成一段", IntervalUnion.Merge(adjacent).Count == 1);
+
+    var separate = new[]
+    {
+        new TimeInterval(at, at.AddHours(1)),
+        new TimeInterval(at.AddHours(3), at.AddHours(4))
+    };
+    Check("中间有空档就还是两段", IntervalUnion.Merge(separate).Count == 2);
+    Check("空档不算进总时长", IntervalUnion.TotalSeconds(separate) == 2 * 3600);
+
+    Check("倒挂的区间被丢掉",
+        IntervalUnion.TotalSeconds(new[] { new TimeInterval(at.AddHours(1), at) }) == 0);
+
+    Check("不按时间顺序给也一样",
+        IntervalUnion.TotalSeconds(new[]
+        {
+            new TimeInterval(at.AddHours(3), at.AddHours(4)),
+            new TimeInterval(at, at.AddHours(1))
+        }) == 2 * 3600);
+
+    // 跨午夜：23:30 做到凌晨 0:30，两边各半小时。
+    var late = new DateTimeOffset(2026, 11, 1, 23, 30, 0, offset);
+    var byDay = IntervalUnion.SecondsByDay(new[] { new TimeInterval(late, late.AddHours(1)) });
+
+    Check("跨午夜的那一段被拆进两天",
+        byDay[new DateOnly(2026, 11, 1)] == 30 * 60
+        && byDay[new DateOnly(2026, 11, 2)] == 30 * 60);
+
+    Check("裁到窗口里：只留窗口内的那一小时",
+        IntervalUnion.Clip(new TimeInterval(at, at.AddHours(5)), at.AddHours(1), at.AddHours(2))!
+            .Value.Seconds == 3600);
+
+    Check("完全在窗口外的裁完是空",
+        IntervalUnion.Clip(new TimeInterval(at, at.AddHours(1)), at.AddHours(2), at.AddHours(3)) is null);
+}
+
+// ============================================================
+// 22. 「一天」的边界：凌晨那几个小时归前一天
+// ============================================================
+Console.WriteLine("=== 22. 一天的边界（跨午夜连续使用时不能把一天切断） ===");
+
+{
+    var fiveAm = new DateTimeOffset(2026, 11, 2, 5, 0, 0, TimeSpan.FromHours(8));
+    var fourAm = new DateTimeOffset(2026, 11, 2, 4, 59, 0, TimeSpan.FromHours(8));
+
+    Check("起点那一刻算新的一天",
+        DayBoundary.Resolve(fiveAm) == new DateOnly(2026, 11, 2));
+
+    Check("起点前一分钟仍归前一天（这是它存在的全部理由）",
+        DayBoundary.Resolve(fourAm) == new DateOnly(2026, 11, 1));
+
+    Check("下午当然是当天",
+        DayBoundary.Resolve(new DateTimeOffset(2026, 11, 2, 14, 0, 0, TimeSpan.FromHours(8)))
+            == new DateOnly(2026, 11, 2));
+
+    Check("起点小时传了非法值不会把日期算飞",
+        DayBoundary.Resolve(fourAm, 99) == new DateOnly(2026, 11, 1));
+
+    var (start, end) = DayBoundary.RangeOf(new DateOnly(2026, 11, 1));
+
+    Check("一天的区间是起点到次日起点，整 24 小时",
+        (end - start).TotalHours == 24 && start.Hour == DayBoundary.DefaultStartHour);
+}
+
+// ============================================================
+// 23. 画像：只出事实，样本不够就闭嘴
+// ============================================================
+Console.WriteLine();
+Console.WriteLine("=== 23. 画像（样本不足必须返回空，不能让 AI 拿三次行为说「你总是」） ===");
+
+{
+    var at = new DateTimeOffset(2026, 11, 1, 9, 0, 0, TimeSpan.FromHours(8));
+    var day = new DateOnly(2026, 11, 1);
+
+    // 造一批样本：启动延迟 10 分钟，实际是估的两倍。
+    WorkSample Sample(int delayMinutes, int? estimate = 30, int? actual = 60, bool skipped = false, string? reason = null) =>
+        new(at, at.AddMinutes(delayMinutes), estimate, actual, at.AddMinutes(actual ?? 0), skipped, reason);
+
+    var few = Enumerable.Range(0, 3).Select(_ => Sample(10)).ToList();
+
+    Check("只有三次样本时启动延迟不出结论",
+        ProfileCalculator.Build(few, new List<DayRate>(), new List<ActiveSpan>()).StartDelay is null);
+
+    var enough = Enumerable.Range(0, 6).Select(_ => Sample(10)).ToList();
+    var profile = ProfileCalculator.Build(enough, new List<DayRate>(), new List<ActiveSpan>());
+
+    Check("够五次就出结论", profile.StartDelay is not null);
+    Check("延迟算对了（计划 9:00，实际 9:10 启动）", profile.StartDelay!.MedianMinutes == 10);
+    Check("结论带着样本数，好让 AI 知道这话有多重", profile.StartDelay.SampleCount == 6);
+    Check("估时偏差：估 30 实际 60 就是 2.0", Math.Abs(profile.Estimation!.ActualOverEstimate - 2.0) < 0.001);
+
+    // 提前开始（负数）不该被算成延迟。
+    var early = Enumerable.Range(0, 6).Select(_ => new WorkSample(at, at.AddMinutes(-5), 30, 60, null, false, null)).ToList();
+    Check("提前开始不算拖延，也不进延迟统计",
+        ProfileCalculator.Build(early, new List<DayRate>(), new List<ActiveSpan>()).StartDelay is null);
+
+    // 没定时间的任务谈不上"延迟"。
+    var noPlan = Enumerable.Range(0, 6)
+        .Select(_ => new WorkSample(null, at, 30, 60, null, false, null)).ToList();
+    Check("没定时间的任务不计入启动延迟",
+        ProfileCalculator.Build(noPlan, new List<DayRate>(), new List<ActiveSpan>()).StartDelay is null);
+
+    // 跳过原因要能聚出来。
+    var withSkips = Enumerable.Range(0, 6).Select(_ => Sample(10)).ToList();
+    withSkips.AddRange(Enumerable.Range(0, 4).Select(_ => Sample(0, null, null, skipped: true, reason: "太难")));
+    var skipProfile = ProfileCalculator.Build(withSkips, new List<DayRate>(), new List<ActiveSpan>());
+
+    Check("没做成的原因被聚出来了",
+        skipProfile.SkipReasons.Count == 1 && skipProfile.SkipReasons[0].Reason == "太难");
+    Check("跳过次数对得上", skipProfile.SkipReasons[0].Count == 4);
+
+    Check("什么都没有的时候是空画像",
+        ProfileCalculator.Build(new List<WorkSample>(), new List<DayRate>(), new List<ActiveSpan>())
+            .StartDelay is null);
+}
+
+// ============================================================
+// 24. 活跃小时：跨小时的段必须劈开算
+// ============================================================
+Console.WriteLine();
+Console.WriteLine("=== 24. 哪个小时他在动（跨小时的那一段要劈开，不能整段记在起点上） ===");
+
+{
+    var start = new DateTimeOffset(2026, 11, 1, 13, 30, 0, TimeSpan.FromHours(8));
+
+    var spans = new List<ActiveSpan>
+    {
+        new(start, start.AddMinutes(100))   // 13:30 → 15:10
+    };
+
+    var profile = ProfileCalculator.Build(
+        new List<WorkSample>(), new List<DayRate>(), spans);
+
+    Check("累计不到两小时就不谈时段规律",
+        profile.ActiveHours.Count == 0);
+
+    var longer = new List<ActiveSpan>
+    {
+        new(start, start.AddMinutes(200))   // 13:30 → 16:50
+    };
+
+    var hours = ProfileCalculator
+        .Build(new List<WorkSample>(), new List<DayRate>(), longer)
+        .ActiveHours;
+
+    Check("够两小时了就给时段", hours.Count > 0);
+    Check("13 点那半小时算在 13 点上", hours.First(x => x.Hour == 13).Minutes == 30);
+    Check("14 点整小时算满 60", hours.First(x => x.Hour == 14).Minutes == 60);
+    Check("16 点只算了 50 分钟（到 16:50 为止）", hours.First(x => x.Hour == 16).Minutes == 50);
+}
+
+// ============================================================
+// 25. 趋势：方向不能搞反
+// ============================================================
+Console.WriteLine();
+Console.WriteLine("=== 25. 趋势（进步的方向各指标不一样，不能一律按「变大就是好」） ===");
+
+{
+    var lastWeek = new PeriodStat(new DateOnly(2026, 10, 20), 5, 40, 0.5, 300, 10, 5);
+    var thisWeek = new PeriodStat(new DateOnly(2026, 10, 27), 5, 15, 0.6, 400, 10, 6);
+
+    var items = TrendCalculator.Compare(lastWeek, thisWeek);
+    var delay = items.First(x => x.Label == "启动要多久");
+    var rate = items.First(x => x.Label == "完成率");
+    var active = items.First(x => x.Label == "做事时长");
+
+    Check("启动变短是进步", delay.Improved);
+    Check("完成率变高是进步", rate.Improved);
+    Check("做事时长变长是进步", active.Improved);
+
+    Check("给 AI 的画像段在没数据时整段不出现",
+        ProfileLines.ToPrompt(UserProfile.Empty) == string.Empty);
+
+    var someProfile = ProfileCalculator.Build(
+        Enumerable.Range(0, 6)
+            .Select(_ => new WorkSample(
+                new DateTimeOffset(2026, 11, 1, 9, 0, 0, TimeSpan.FromHours(8)),
+                new DateTimeOffset(2026, 11, 1, 9, 20, 0, TimeSpan.FromHours(8)),
+                30, 60, null, false, null))
+            .ToList(),
+        new List<DayRate>(),
+        new List<ActiveSpan>());
+
+    var prompt = ProfileLines.ToPrompt(someProfile);
+
+    Check("有画像时提示词里带着不许念给他听的硬规矩",
+        prompt.Contains("不要念给他听"));
+    Check("给 AI 的每一条都带样本数",
+        prompt.Contains("看了 6 次"));
+
+    // 天数不够时，趋势只说"还在攒"，不给数字。
+    var thinLast = new PeriodStat(new DateOnly(2026, 10, 20), 1, 40, 0.5, 300, 2, 1);
+    var thinThis = new PeriodStat(new DateOnly(2026, 10, 27), 1, 15, 0.9, 400, 2, 2);
+    var thinItems = TrendCalculator.Compare(thinLast, thinThis);
+
+    Check("天数不够时不给结论", thinItems.All(x => !x.EnoughData));
+    Check("天数不够时写的是「还在攒」而不是一个假数字",
+        ProfileLines.DescribeForUser(thinItems.First()).Contains("还在攒"));
+}
+
+// ============================================================
+// 26. 界面资源：XAML 里引用的键名必须真的存在
+// ============================================================
+//
+// 【为什么要让冒烟来查这一条】
+// 2026-11-02 的真事：时间页新加的卡片写成 Style="{StaticResource Card}"，
+// 而实际定义的是 CardStyle。**编译 0 错 0 警**——XAML 的静态资源是运行时才解析的。
+// 运行时它炸在页面构造函数里（InitializeComponent），
+// 而页面是 Shell 切 Tab 时才被创建的：于是页面没建成、Shell 的当前项也没换过去，
+// 用户看到的是"切到时间页之后整个界面卡死，切不回来了"。
+// 日志里躺着 XamlParseException，但界面上什么都没说。
+// 这类错误只能靠"把所有 XAML 扫一遍、比对键名"提前抓住——人眼扫不出来。
+Console.WriteLine();
+Console.WriteLine("=== 26. 界面资源（键名写错编译不报错，运行时整页炸） ===");
+
+{
+    var srcRoot = FindSrcRoot();
+
+    Check("找得到源码根目录", srcRoot is not null, srcRoot);
+
+    if (srcRoot is not null)
+    {
+        var files = Directory
+            .GetFiles(srcRoot, "*.xaml", SearchOption.AllDirectories)
+            // bin/obj 里有编译复制过去的副本，扫它们会把同一个键算两遍、还会读到过期的旧文件。
+            .Where(p => !p.Contains("\\bin\\") && !p.Contains("\\obj\\")
+                        && !p.Contains("/bin/") && !p.Contains("/obj/"))
+            .ToList();
+
+        var defined = new HashSet<string>(StringComparer.Ordinal);
+        var used = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+
+        foreach (var file in files)
+        {
+            var text = File.ReadAllText(file);
+            foreach (Match m in Regex.Matches(text, "x:Key=\"([^\"]+)\""))
+            {
+                defined.Add(m.Groups[1].Value);
+            }
+        }
+
+        foreach (var file in files)
+        {
+            var text = File.ReadAllText(file);
+            foreach (Match m in Regex.Matches(text, @"\{(?:Static|Dynamic)Resource\s+([A-Za-z0-9_]+)"))
+            {
+                var key = m.Groups[1].Value;
+                if (!used.TryGetValue(key, out var where))
+                {
+                    used[key] = where = new List<string>();
+                }
+
+                where.Add(Path.GetFileName(file));
+            }
+        }
+
+        Check("XAML 都扫到了", files.Count >= 10, $"{files.Count} 个文件、{defined.Count} 个键");
+
+        var missing = used.Where(x => !defined.Contains(x.Key)).ToList();
+
+        Check(
+            "没有引用不存在的资源键",
+            missing.Count == 0,
+            missing.Count == 0
+                ? null
+                : string.Join("；", missing.Select(
+                    x => $"{x.Key} 被 {string.Join(",", x.Value.Distinct())} 引用")));
+    }
+}
+
+// ============================================================
+// 27. 画像给他自己看的那一版
+// ============================================================
+//
+// 【为什么这一节必须存在】
+// 画像原来只喂给 AI，用户自己看不到——那等于这个功能只对 AI 有效。
+// 补上"给自己看"的版本之后，最容易出的两种错是：
+// ① 把没攒够的东西说得像结论（"你启动要 0 分钟"）；
+// ② 把失败清单摆到他面前（"你没做成 5 次"）。
+// 两条都会让人关掉这个功能，所以要在离线就能断言住。
+Console.WriteLine();
+Console.WriteLine("=== 27. 画像给自己看的那一版（不能只有 AI 能看到） ===");
+
+{
+    var empty = ProfileLines.DescribeForSelf(UserProfile.Empty);
+
+    Check("全新用户看到的是「还差什么」，不是空白",
+        empty.Count == 2 && empty.All(x => x.IsPending),
+        string.Join(" / ", empty.Select(x => x.Text)));
+
+    var active = new List<ActiveSpan>
+    {
+        new(new DateTimeOffset(2026, 11, 1, 14, 0, 0, TimeSpan.FromHours(8)),
+            new DateTimeOffset(2026, 11, 1, 16, 10, 0, TimeSpan.FromHours(8)))
+    };
+
+    var partial = ProfileCalculator.Build(
+        new List<WorkSample>(),
+        new List<DayRate> { new(new DateOnly(2026, 11, 1), 3, 2) },
+        active);
+
+    var facts = ProfileLines.DescribeForSelf(partial);
+
+    Check("活跃够两小时就说得出「几点在状态」",
+        facts.Any(x => x.Label == "什么时候在状态" && !x.IsPending));
+
+    Check("有记录的天给的是「安排了多少、做了多少」",
+        facts.Any(x => x.Text.Contains("安排了 3 件、做了 2 件")));
+
+    Check("范围写的是「最近两周」，不是一个天天变的数字",
+        facts.Any(x => x.Label == "最近两周"));
+
+    Check("启动样本不足时说的是「再记 5 次」，不是编一个数字",
+        facts.Any(x => x.Label == "从计划到动手" && x.IsPending && x.Remaining == 5),
+        string.Join(" / ", facts.Where(x => x.IsPending).Select(x => x.Text)));
+
+    Check("没做成的原因不进他这一版（那是给 AI 调建议用的，不是给他看的清单）",
+        facts.All(x => !x.Label.Contains("没做成")));
+
+    // 够五条样本之后，同一处要变成结论。
+    var samples = Enumerable.Range(0, 5)
+        .Select(_ => new WorkSample(
+            new DateTimeOffset(2026, 11, 1, 9, 0, 0, TimeSpan.FromHours(8)),
+            new DateTimeOffset(2026, 11, 1, 9, 30, 0, TimeSpan.FromHours(8)),
+            null, null, null, false, null))
+        .ToList();
+
+    var rich = ProfileCalculator.Build(
+        samples, new List<DayRate>(), new List<ActiveSpan>());
+
+    var delay = ProfileLines.DescribeForSelf(rich).First(x => x.Label == "从计划到动手");
+
+    Check("样本够了之后，同一处变成中位数结论（不再是「再记几次」）",
+        !delay.IsPending && delay.Text.Contains("30 分钟"), delay.Text);
+
+    Check("一周什么都没有时不编数字",
+        ProfileLines.DescribeRecentWeek(
+            new PeriodStat(new DateOnly(2026, 10, 27), 0, null, 0, 0, 0, 0)).Contains("还没有可算"));
+
+    Check("一周只做事没排安排也说得出来",
+        ProfileLines.DescribeRecentWeek(
+            new PeriodStat(new DateOnly(2026, 10, 27), 0, null, 0, 90, 0, 0)).Contains("没排安排"));
+
+    Check("有安排时同时给安排数和完成数",
+        ProfileLines.DescribeRecentWeek(
+            new PeriodStat(new DateOnly(2026, 10, 27), 5, null, 0.5, 120, 10, 5))
+            .Contains("安排了 10 件、做了 5 件"));
+}
+
+// ============================================================
+// 28. AI 没回上来时的自动重发：绝不能冒出第二条消息
+// ============================================================
+//
+// 【为什么要让冒烟来查这一条】
+// 重试加在"发出一句话、等 AI 回复"这条路径上，最容易写错的方式是
+// 把整个 RunAsync 拿去重跑：那样用户气泡会再加一次、chat_messages 再写一行，
+// 下次拼历史时 AI 会看见"同一句他说了两遍"——正是要避免的上下文污染。
+// 而这两种写法都能编译通过、界面上也不报错，只有翻库才看得出来。
+// 所以把"重试循环体内不新增气泡、不写库""拿到结果就停""有上限"
+// 当作不变量，直接扫源码断言住。
+Console.WriteLine();
+Console.WriteLine("=== 28. 自动重发（重试不能产生第二条消息 / 第二行库记录） ===");
+
+{
+    var srcRoot = FindSrcRoot();
+    var vmPath = srcRoot is null
+        ? null
+        : Path.Combine(srcRoot, "DayManager.App", "ViewModels", "ChatViewModel.cs");
+
+    Check("找得到 ChatViewModel.cs", vmPath is not null && File.Exists(vmPath), vmPath);
+
+    if (vmPath is not null && File.Exists(vmPath))
+    {
+        var code = File.ReadAllText(vmPath);
+
+        // 只截"重试循环"这一段：从 for 起到"最终失败"判断之前。
+        var loopStart = code.IndexOf("for (var attempt = 0", StringComparison.Ordinal);
+        var loopEnd = code.IndexOf("if (okTurn is null)", StringComparison.Ordinal);
+        Check("重试循环还在（没被整段删掉）", loopStart >= 0 && loopEnd > loopStart);
+
+        if (loopStart >= 0 && loopEnd > loopStart)
+        {
+            var loop = code.Substring(loopStart, loopEnd - loopStart);
+
+            Check("重发的是 _api.AgentAsync 这一句", loop.Contains("_api.AgentAsync"));
+
+            Check("重试循环里不新增任何气泡",
+                !loop.Contains("Messages.Add") && !loop.Contains("ChatBubble.User"));
+
+            Check("重试循环里不写库",
+                !loop.Contains("SaveAsync") && !loop.Contains("_chat.AddAsync"));
+
+            Check("拿到成功结果就停，绝不发第二次",
+                Regex.IsMatch(loop, @"if\s*\(\s*one\.Ok\s*\)[\s\S]{0,200}?break"));
+
+            Check("每轮之间真的等了一下", loop.Contains("Task.Delay(RetryDelay)"));
+        }
+
+        Check("最多重发两次（不是无限重发）",
+            code.Contains("MaxRetries = 2") && code.Contains("attempt <= MaxRetries"));
+
+        Check("间隔是 1 秒",
+            Regex.IsMatch(code, @"RetryDelay\s*=\s*TimeSpan\.FromSeconds\(1\)"));
+
+        Check("两次都没回上来，原话放回输入框",
+            Regex.IsMatch(code, @"InputText\s*=\s*userText"));
+
+        // 用户明确要求：气泡里就显示错误，不要塞"重发了几遍、原话已放回"这类说明。
+        // 只认那句真的 Messages.Add，不认注释，免得以后注释里出现同样几个字就误报。
+        var errLine = code.Split('\n').FirstOrDefault(
+            l => l.Contains("Messages.Add") && l.Contains("AI 没回上来："));
+        Check("失败气泡只有错误一句，不塞重发说明",
+            errLine is not null
+            && !errLine.Contains("重发") && !errLine.Contains("重试")
+            && !errLine.Contains("原话") && !errLine.Contains("复制"),
+            errLine?.Trim());
+    }
 }
 
 Console.WriteLine();
