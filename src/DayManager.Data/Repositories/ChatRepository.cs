@@ -95,6 +95,37 @@ public class ChatRepository
     }
 
     /// <summary>
+    /// 删掉单独一条（软删）。
+    ///
+    /// 【为什么界面上要有"删一条"，光有"清空"不够】
+    /// 真正想删的往往就是那一条：问错的一句话、AI 答非所问的一次。
+    /// 为他的一句口误去请他清空整段对话，这是在惩罚坦白。
+    ///
+    /// 【为什么删掉的是对话，不动它做过的改动】
+    /// 撤回才是"改回去"（UndoBatch），删只是"不想再看见这句话"。
+    /// 两件事混在一起的话，人会因为怕丢数据而不敢删，反而更不敢误聊。
+    /// 删除在这里就是收起来——数据还在库里，撤销在那边有专门的入口。
+    ///
+    /// 【软删而不是硬删】
+    /// 跟 ClearAsync 一致的口径：别的表都是软删，这里硬删会破坏一致性，
+    /// 而且误删了还能捞回来。
+    /// </summary>
+    public async Task<bool> DeleteAsync(Guid id, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+
+        var row = await db.ChatMessages.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (row is null)
+        {
+            return false;
+        }
+
+        row.DeletedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+        return true;
+    }
+
+    /// <summary>
     /// 清空对话历史（软删）。
     ///
     /// 【为什么是软删】

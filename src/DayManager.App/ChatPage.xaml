@@ -2,6 +2,7 @@
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
              xmlns:vm="clr-namespace:DayManager.App.ViewModels"
+             xmlns:controls="clr-namespace:DayManager.App.Controls"
              x:Class="DayManager.App.ChatPage"
              x:DataType="vm:ChatViewModel"
              Title="对话">
@@ -147,6 +148,16 @@
                               Frame 从 .NET 9 起标记为过时，编译器会给警告（CS0618）。
                               它俩能做同样的事，但 Frame 内部为了兼容老版本多套了一层布局，
                               在列表里滚动时更重。Border 是现在的推荐写法。
+
+                              【为什么文字用 SelectableLabel】
+                              MAUI 自带的 Label 只能看，拖不动也复制不了，
+                              AI 说的话想搬到别处就只能照着屏幕手打。
+                              换了这个，选中 + Ctrl+C 就够了，不需要额外的复制按钮。
+
+                              右键两种做法都试过：先在气泡下面摆「复制 / 删除」两个小按钮，
+                              实测每个气泡底下都挂着可以按的东西，对话一长整屏都是按钮，
+                              反而把"这是一句话"这件事冲淡了。
+                              复制改成自己选中，删除收进右键菜单，平时一个按钮都不露。
                             -->
                             <Border Padding="10,8"
                                     BackgroundColor="{Binding BubbleColor}"
@@ -155,25 +166,33 @@
                                 <Border.StrokeShape>
                                     <RoundRectangle CornerRadius="12" />
                                 </Border.StrokeShape>
+
                                 <!--
+                                  【右键菜单为什么不在 XAML 里】
+                                  MAUI 的 ContextFlyout 附加属性在 Windows 的气泡链路上
+                                  弹不出来，所以它挂在原生层（SelectableLabelMapper）里。
+                                  菜单里只有「删除」——删掉的是话，
+                                  AI 做过的改动不受影响（那要反悔走「撤回」）。
+
                                   【为什么文字色要绑定，而不是写死 Black】
                                   气泡底色是 C# 里给的（跟着主题走），
                                   文字却写死黑色的话，深色模式下就是"深底黑字"。
                                   这两个值必须一起变，所以文字也交给 ViewModel。
                                 -->
-                                <Label Text="{Binding Text}"
-                                       FontSize="14"
-                                       TextColor="{Binding BubbleTextColor}"
-                                       LineBreakMode="WordWrap" />
+                                <controls:SelectableLabel Text="{Binding Text}"
+                                                          FontSize="14"
+                                                          TextColor="{Binding BubbleTextColor}"
+                                                          LineBreakMode="WordWrap" />
                             </Border>
 
                             <!-- 系统提示：不装进气泡，直接一行橙字。
-                                 把它做得像 AI 说的话，用户会把故障当成内容。 -->
-                            <Label Text="{Binding Text}"
-                                   FontSize="12"
-                                   TextColor="{AppThemeBinding Light={StaticResource WarnOrange}, Dark={StaticResource WarnOrangeDark}}"
-                                   IsVisible="{Binding IsSystem}"
-                                   LineBreakMode="WordWrap" />
+                                 把它做得像 AI 说的话，用户会把故障当成内容。
+                                 报错常常要复制出去查，所以它也是可选中的。 -->
+                            <controls:SelectableLabel Text="{Binding Text}"
+                                                      FontSize="12"
+                                                      TextColor="{AppThemeBinding Light={StaticResource WarnOrange}, Dark={StaticResource WarnOrangeDark}}"
+                                                      IsVisible="{Binding IsSystem}"
+                                                      LineBreakMode="WordWrap" />
 
                             <!-- AI 这一轮真的改了什么。
                                  【为什么必须逐条列出来】
@@ -198,6 +217,20 @@
                                     IsVisible="{Binding CanUndo}"
                                     Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ChatViewModel}}, Path=UndoCommand}"
                                     CommandParameter="{Binding .}" />
+
+                            <!--
+                              时刻。
+
+                              【为什么写在气泡外面、贴着气泡下沿】
+                              它是这句话的属性（几点说的），不是这句话的内容。
+                              装进气泡里会被读成正文的一部分，
+                              用比正文弱的字号贴在下面，"这是关于它的信息"不用解释就成立。
+                            -->
+                            <Label Text="{Binding TimeText}"
+                                   FontSize="10"
+                                   TextColor="{StaticResource MutedText}"
+                                   HorizontalOptions="{Binding Align}"
+                                   IsVisible="{Binding HasTime}" />
                         </VerticalStackLayout>
 
                             <!-- 你自己那侧，排在内容的右边（气泡本来就靠右），

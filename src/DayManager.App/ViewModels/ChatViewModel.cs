@@ -50,6 +50,12 @@ public partial class ChatViewModel : ObservableObject
     /// </summary>
     private const int LoadLimit = 50;
 
+    /// <summary>AI 没回上来时，最多再把同一句原样重问几遍（不含第一次）。</summary>
+    private const int MaxRetries = 2;
+
+    /// <summary>两次之间隔多久。1 秒够后端缓过来，又不至于让人干等着。</summary>
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(1);
+
     private readonly ApiClient _api;
     private readonly BackendGuard _guard;
     private readonly ChatRepository _chat;
@@ -82,6 +88,11 @@ public partial class ChatViewModel : ObservableObject
         // 没人重新取它就永远停在旧值。换主题时对每个气泡叫一遍，让绑定重取。
         WeakReferenceMessenger.Default.Register<ThemeChangedMessage>(
             this, (_, _) => RefreshBubblesForTheme());
+
+        // 右键菜单的「删除这一句」从原生层发过来（菜单挂在 WinUI 控件上，
+        // 平台代码拿不到这个 ViewModel）。收到就按命令的规矩走：软删、不弹确认。
+        WeakReferenceMessenger.Default.Register<DeleteChatBubbleMessage>(
+            this, (recipient, m) => ((ChatViewModel)recipient).DeleteCommand.Execute(m.Bubble));
     }
 
     /// <summary>
@@ -310,15 +321,49 @@ public partial class ChatViewModel : ObservableObject
     /// 用户要的就是"留得住"。存不进去却什么都不说，
     /// 他会一直以为留住了，直到某天打开发现是空的。
     /// </summary>
-    private async Task SaveAsync(string role, string text, Guid? batchId, string? outcomesJson)
+
+    /// <summary>
+    /// 删掉单独一条。
+    ///
+    /// 【为什么不弹"确定吗"】
+    /// 清空全部那样一键抹几十条才需要再确认一次；
+    /// 删一条的判断已经由"你点的就是这一条"承担了。
+    /// 再问一遍是在暗示这一步有后果，而它其实没有：
+    /// 删掉的是话，AI 做过的改动不受影响（要反悔数据，走「撤回」）。
+    ///
+    /// 【为什么 AI 说的也能删】
+    /// 答非所问的那一次、夹在中间碍眼的那一句，留着只会让整段对话更难读。
+    /// </summary>
+    [RelayCommand]
+    private async Task DeleteAsync(ChatBubble bubble)
+    {
+        // 还没落库的（Guid.Empty）本来就不在数据库里，从界面上拿掉就是全部。
+        if (bubble.Id != Guid.Empty)
+        {
+            try
+            {
+                await _chat.DeleteAsync(bubble.Id);
+            }
+            catch (Exception ex)
+            {
+                Messages.Add(ChatBubble.System($"没删掉：{ex.Message}"));
+                return;
+            }
+        }
+
+        Messages.Remove(bubble);
+    }
+
+    private async Task<ChatMessage?> SaveAsync(string role, string text, Guid? batchId, string? outcomesJson)
     {
         try
         {
-            await _chat.AddAsync(role, text, batchId, outcomesJson);
+            return await _chat.AddAsync(role, text, batchId, outcomesJson);
         }
         catch (Exception ex)
         {
             Messages.Add(ChatBubble.System($"这条没存下来：{ex.Message}"));
+            return null;
         }
     }
 
@@ -356,10 +401,18 @@ public partial class ChatViewModel : ObservableObject
         // 它们猜的是"看到上一条回复的你"，留着会被误点第二次。
         ClearSuggestions();
 
-        Messages.Add(ChatBubble.User(text));
+        var bubble = ChatBubble.User(text);
+        Messages.Add(bubble);
         InputText = string.Empty;
 
-        await SaveAsync(ChatMessage.RoleUser, text, null, null);
+        // 先把它说出去、再补"落地"的那部分信息。
+        // 有了 id 这一条才删得动，有了时间界面才标得出它是几点说的。
+        var saved = await SaveAsync(ChatMessage.RoleUser, text, null, null);
+        if (saved is not null)
+        {
+            bubble.AttachRecord(saved);
+        }
+
         await RunAsync(text);
     }
 
@@ -414,25 +467,69 @@ public partial class ChatViewModel : ObservableObject
                 history.Add(ChatMessageDto.User(userText));
             }
 
-            var turn = await _api.AgentAsync(history, DateOnly.FromDateTime(DateTime.Now));
+            // 【为什么只对「向后端要这一句话」重发】
+            // 连不上后端、没填密钥是更早的提前返回，重发没有意义；
+            // 而一旦成功拿到结果（turn.Ok）就立刻停，绝不重发——
+            // 那一轮可能已经改了数据，再问一遍会把动作做两次。
+            // 每轮之间隔 1 秒，最多再问两遍，总共等 2 秒。
+            var today = DateOnly.FromDateTime(DateTime.Now);
+            AgentTurn? okTurn = null;
+            string? lastError = null;
 
-            if (!turn.Ok)
+            for (var attempt = 0; attempt <= MaxRetries; attempt++)
             {
-                Messages.Add(ChatBubble.System($"AI 没回上来：{turn.Error}"));
+                if (attempt > 0)
+                {
+                    await Task.Delay(RetryDelay);
+                }
+
+                try
+                {
+                    var one = await _api.AgentAsync(history, today);
+
+                    if (one.Ok)
+                    {
+                        okTurn = one;
+                        break;
+                    }
+
+                    lastError = one.Error;
+                }
+                catch (Exception ex)
+                {
+                    // 连不上、超时也算这一轮没回上来，跟 ok=false 一样处理。
+                    // 中间几次失败不弹气泡、不写库——这一轮对话只有一条你说的话。
+                    lastError = ex.Message;
+                }
+            }
+
+            if (okTurn is null)
+            {
+                // 沿用原来那句文案，气泡里不多解释；原话放回输入框，
+                // 直接点发送就能再来一次，不用复制粘贴重打一遍。
+                Messages.Add(ChatBubble.System($"AI 没回上来：{lastError ?? "没收到回复"}"));
                 StatusText = "AI 没回上来";
+                InputText = userText;
                 return;
             }
 
+            var turn = okTurn;
             var bubble = ChatBubble.Ai(turn);
             Messages.Add(bubble);
 
             // 改动明细和批次号一起存：批次号是"永久可撤"的钥匙（D4），
             // 重开之后那个「撤回」按钮还得能点。
-            await SaveAsync(
+            var saved = await SaveAsync(
                 ChatMessage.RoleAssistant,
                 turn.Reply,
                 turn.BatchId,
                 SerializeOutcomes(turn.Outcomes));
+
+            // 存完就能把 id 和时间填回去，这一条从此可以单独删除、也标得出时刻。
+            if (saved is not null)
+            {
+                bubble.AttachRecord(saved);
+            }
 
             StatusText = turn.Changed
                 ? $"改了 {turn.Outcomes.Count} 条"
@@ -451,6 +548,7 @@ public partial class ChatViewModel : ObservableObject
         {
             Messages.Add(ChatBubble.System($"出错了：{ex.Message}"));
             StatusText = "出错了";
+            InputText = userText;
         }
         finally
         {
@@ -615,6 +713,59 @@ public partial class ChatBubble : ObservableObject
 
     public Guid? BatchId { get; private init; }
 
+    /// <summary>
+    /// 库里那条记录的 id。还没落库时这里是 Guid.Empty。
+    ///
+    /// 【为什么气泡得知道自己是哪条记录】
+    /// 删除要按 id 删。靠"文本内容去找"行不通——
+    /// 同一个人说过两遍一样的话，就会删错那一条。
+    /// </summary>
+    public Guid Id { get; private set; }
+
+    /// <summary>
+    /// 这句话是什么时候说的。
+    ///
+    /// 【为什么要显示它】
+    /// 对话是这个软件的主界面，也是"回想起来"的地方：
+    /// 下午看到早上那条，想知道它是几点提出的；隔天打开，
+    /// 想知道这个计划是昨天谈的还是上周谈的。
+    /// 没有时间戳，这些只能靠猜，而猜错的代价是认不清自己什么时候在干活。
+    /// </summary>
+    [ObservableProperty]
+    public partial DateTimeOffset? CreatedAt { get; set; }
+
+    /// <summary>时间标签要不要显示。系统提示是这一次运行的状态，不显示时间。</summary>
+    public bool HasTime => !IsSystem && CreatedAt.HasValue;
+
+    /// <summary>
+    /// 显示在气泡下面的时刻。
+    ///
+    /// 【为什么要 ToLocalTime】
+    /// 库里存的是 UTC，读出来的 DateTimeOffset 偏移量是 0。
+    /// 直接格式化会得到比北京时间早 8 小时的数字——看着是时间，实际是错的。
+    /// </summary>
+    public string TimeText => CreatedAt?.ToLocalTime().ToString("HH:mm") ?? string.Empty;
+
+    partial void OnCreatedAtChanged(DateTimeOffset? value)
+    {
+        OnPropertyChanged(nameof(HasTime));
+        OnPropertyChanged(nameof(TimeText));
+    }
+
+    /// <summary>
+    /// 落库之后把 id 和时间补回来。
+    ///
+    /// 【为什么要分两步（先显示、后补 id），不能等存好再显示】
+    /// 一句话从发出去到 AI 回话要隔二三十秒，
+    /// 这段时间他盯着空白的对话区会以为没发出去。
+    /// 先把话说出来，再补上"它已经落地"的那部分信息。
+    /// </summary>
+    public void AttachRecord(ChatMessage record)
+    {
+        Id = record.Id;
+        CreatedAt = record.CreatedAt;
+    }
+
     [ObservableProperty]
     public partial bool IsUndone { get; set; }
 
@@ -700,7 +851,7 @@ public partial class ChatBubble : ObservableObject
     }
 
     public static ChatBubble User(string text) =>
-        new() { IsUser = true, Text = text };
+        new() { IsUser = true, Text = text, CreatedAt = DateTimeOffset.Now };
 
     public static ChatBubble System(string text) =>
         new() { IsSystem = true, Text = text };
@@ -711,7 +862,8 @@ public partial class ChatBubble : ObservableObject
             IsUser = false,
             Text = turn.Reply,
             Outcomes = turn.Outcomes,
-            BatchId = turn.BatchId
+            BatchId = turn.BatchId,
+            CreatedAt = DateTimeOffset.Now
         };
 
     /// <summary>
@@ -741,11 +893,13 @@ public partial class ChatBubble : ObservableObject
 
         return new ChatBubble
         {
+            Id = record.Id,
             IsUser = record.Role == ChatMessage.RoleUser,
             Text = record.Text,
             Outcomes = outcomes,
             BatchId = record.BatchId,
-            IsUndone = record.IsUndone
+            IsUndone = record.IsUndone,
+            CreatedAt = record.CreatedAt
         };
     }
 }
