@@ -2351,7 +2351,8 @@ Console.WriteLine("=== 31. 翻更早历史 + 按天分组的日期条 ===");
 
     var time31 = Read31(Path.Combine("DayManager.Core", "Ai", "ChatTime.cs"));
     var repo31 = Read31(Path.Combine("DayManager.Data", "Repositories", "ChatRepository.cs"));
-    var vm31 = Read31(Path.Combine("DayManager.App", "ViewModels", "ChatViewModel.cs"));
+    var vm31 = Read31(Path.Combine("DayManager.App", "ViewModels", "ChatViewModel.cs"))
+        + Read31(Path.Combine("DayManager.App", "ViewModels", "ChatBubble.cs"));
     var page31 = Read31(Path.Combine("DayManager.App", "ChatPage.xaml"));
     var code31 = Read31(Path.Combine("DayManager.App", "ChatPage.xaml.cs"));
 
