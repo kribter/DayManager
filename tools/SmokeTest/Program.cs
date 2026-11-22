@@ -2237,7 +2237,8 @@ Console.WriteLine("=== 30. 视野：过去 7 天回顾 + AI 按需 query（治�
     string Read30(string rel) => srcRoot30 is null ? "" :
         File.ReadAllText(Path.Combine(srcRoot30, rel));
 
-    var agent30 = Read30(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var agent30 = Read30(Path.Combine("DayManager.Api", "Services", "AgentService.cs"))
+        + Read30(Path.Combine("DayManager.Api", "Services", "AgentPromptBuilder.cs"));
     var tools30 = Read30(Path.Combine("DayManager.Api", "Services", "ItemTools.cs"));
     var models30 = Read30(Path.Combine("DayManager.Api", "Models", "AgentModels.cs"));
     var repo30 = Read30(Path.Combine("DayManager.Data", "Repositories", "ItemRepository.cs"));
@@ -2520,7 +2521,8 @@ Console.WriteLine("=== 32. 只有截止日的事：常驻带 / 完成语义 / �
     var repo32Src = Read32(Path.Combine("DayManager.Data", "Repositories", "ItemRepository.cs"));
     var models32 = Read32(Path.Combine("DayManager.Api", "Models", "AgentModels.cs"));
     var tools32 = Read32(Path.Combine("DayManager.Api", "Services", "ItemTools.cs"));
-    var agent32 = Read32(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var agent32 = Read32(Path.Combine("DayManager.Api", "Services", "AgentService.cs"))
+        + Read32(Path.Combine("DayManager.Api", "Services", "AgentPromptBuilder.cs"));
     var mainVm32 = Read32(Path.Combine("DayManager.App", "ViewModels", "MainViewModel.cs"));
     var itemVm32 = Read32(Path.Combine("DayManager.App", "ViewModels", "ItemViewModel.cs"));
     var page32 = Read32(Path.Combine("DayManager.App", "MainPage.xaml"));
@@ -2702,7 +2704,8 @@ Console.WriteLine("=== 33. 三根轴：形态 / 容器 / 完成方式 / 判成�
     var ctx33 = Read33(Path.Combine("DayManager.Data", "AppDbContext.cs"));
     var models33 = Read33(Path.Combine("DayManager.Api", "Models", "AgentModels.cs"));
     var toolsSrc33 = Read33(Path.Combine("DayManager.Api", "Services", "ItemTools.cs"));
-    var agentSrc33 = Read33(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var agentSrc33 = Read33(Path.Combine("DayManager.Api", "Services", "AgentService.cs"))
+        + Read33(Path.Combine("DayManager.Api", "Services", "AgentPromptBuilder.cs"));
     var picker33 = Read33(Path.Combine("DayManager.Core", "Intervention", "NudgeTargetPicker.cs"));
     var itemVmSrc33 = Read33(Path.Combine("DayManager.App", "ViewModels", "ItemViewModel.cs"));
     var proactiveSrc33 = Read33(Path.Combine("DayManager.Api", "Services", "ProactiveService.cs"));
@@ -2768,7 +2771,8 @@ Console.WriteLine("=== 34. AI 能建「每次各算 / 不判成败」：只补�
     string Read34(string rel) => src34 is null ? "" : File.ReadAllText(Path.Combine(src34, rel));
     var models34 = Read34(Path.Combine("DayManager.Api", "Models", "AgentModels.cs"));
     var tools34 = Read34(Path.Combine("DayManager.Api", "Services", "ItemTools.cs"));
-    var agent34 = Read34(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var agent34 = Read34(Path.Combine("DayManager.Api", "Services", "AgentService.cs"))
+        + Read34(Path.Combine("DayManager.Api", "Services", "AgentPromptBuilder.cs"));
     var mainVm34 = Read34(Path.Combine("DayManager.App", "ViewModels", "MainViewModel.cs"));
     var page34 = Read34(Path.Combine("DayManager.App", "MainPage.xaml"));
 
@@ -2975,7 +2979,8 @@ Console.WriteLine("=== 36. 收分类 + 大任务递归层级：主要是删，�
     var projVm36 = Read36(Path.Combine("DayManager.App", "ViewModels", "ProjectDetailViewModel.cs"));
     var itemVm36 = Read36(Path.Combine("DayManager.App", "ViewModels", "ItemViewModel.cs"));
     var page36 = Read36(Path.Combine("DayManager.App", "ProjectDetailPage.xaml"));
-    var agent36 = Read36(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var agent36 = Read36(Path.Combine("DayManager.Api", "Services", "AgentService.cs"))
+        + Read36(Path.Combine("DayManager.Api", "Services", "AgentPromptBuilder.cs"));
     var proactive36 = Read36(Path.Combine("DayManager.Api", "Services", "ProactiveService.cs"));
 
     // ① 收：容器判据归一到一个答案、停止写空转取值；枚举与列不物理删，兼容历史。
@@ -3145,7 +3150,8 @@ Console.WriteLine("=== 36. 收分类 + 大任务递归层级：主要是删，�
 {
     var src37 = FindSrcRoot();
     string Read37(string rel) => src37 is null ? "" : File.ReadAllText(Path.Combine(src37, rel));
-    var agent37 = Read37(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var agent37 = Read37(Path.Combine("DayManager.Api", "Services", "AgentService.cs"))
+        + Read37(Path.Combine("DayManager.Api", "Services", "AgentPromptBuilder.cs"));
     var prog37 = Read37(Path.Combine("DayManager.Api", "Program.cs"));
     var repo37 = Read37(Path.Combine("DayManager.Data", "Repositories", "ProjectRepository.cs"));
     var proactive37 = Read37(Path.Combine("DayManager.Api", "Services", "ProactiveService.cs"));
@@ -3243,7 +3249,8 @@ Console.WriteLine("=== 36. 收分类 + 大任务递归层级：主要是删，�
 {
     var src38 = FindSrcRoot();
     string Read38(string rel) => src38 is null ? "" : File.ReadAllText(Path.Combine(src38, rel));
-    var agent38 = Read38(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var agent38 = Read38(Path.Combine("DayManager.Api", "Services", "AgentService.cs"))
+        + Read38(Path.Combine("DayManager.Api", "Services", "AgentPromptBuilder.cs"));
     var tools38 = Read38(Path.Combine("DayManager.Api", "Services", "ItemTools.cs"));
     var proactive38 = Read38(Path.Combine("DayManager.Api", "Services", "ProactiveService.cs"));
 
