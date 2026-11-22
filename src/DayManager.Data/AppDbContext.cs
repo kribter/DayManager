@@ -202,6 +202,17 @@ public class AppDbContext : DbContext
             .HasForeignKey(x => x.RecurrenceParentId)
             .OnDelete(DeleteBehavior.ClientSetNull);
 
+        // 任务层级的自引用：阶段性目标也是 Item，可以再挂下级，深度不固定。
+        // 【为什么必须显式配关系】
+        // 光有 ParentTaskId 这个 Guid 字段，EF 不会把它当外键，
+        // 删父项时子项会变成悬空引用；配了 ClientSetNull 才不会连坐删除，
+        // 但也不会悄悄留着孤儿——删容器是明确动作，由上层决定子项去哪。
+        // 注意导航属性要留空（不建集合），否则和 Project.Items 的加载路径互相干扰。
+        b.HasOne<Item>()
+            .WithMany()
+            .HasForeignKey(x => x.ParentTaskId)
+            .OnDelete(DeleteBehavior.ClientSetNull);
+
         // ---------- 索引 ----------
 
         // 【为什么这些地方要建索引】
@@ -211,7 +222,9 @@ public class AppDbContext : DbContext
         b.HasIndex(x => x.DueAt);              // 待办按截止时间排序
         b.HasIndex(x => x.Status);             // 完成率统计
         b.HasIndex(x => x.ProjectId);          // 项目进度查询
+        b.HasIndex(x => x.ParentTaskId);       // 找某容器的子项 / 判断是不是容器
         b.HasIndex(x => x.RecurrenceParentId); // 展开重复日程时找覆盖记录
+        b.HasIndex(x => x.Shape);              // 常驻带只读定段项，别全表扫
         b.HasIndex(x => x.UpdatedAt);          // 增量同步的核心索引
         b.HasIndex(x => x.CreatedAt);          // 按创建时间排序 + 启动延迟统计区间查询
 

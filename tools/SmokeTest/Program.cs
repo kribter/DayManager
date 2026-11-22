@@ -2077,6 +2077,1065 @@ Console.WriteLine("=== 28. 自动重发（重试不能产生第二条消息 / �
 }
 
 Console.WriteLine();
+Console.WriteLine("=== 29. 时间观念：历史带时间标注 + 时间坐标（治跨夜说晚安 / 吃饭事件 / 催睡觉） ===");
+
+{
+    // 固定一个"现在"：2026-11-21 周六上午 10:30。测试不能依赖跑的那一刻。
+    var anchor = new DateTime(2026, 11, 21, 10, 30, 0, DateTimeKind.Local);
+    DateTimeOffset At(int day, int hour, int minute = 0) =>
+        new(new DateTime(2026, 11, day, hour, minute, 0, DateTimeKind.Local));
+
+    // ① 时段是代码判的，不留给它自己猜。上午绝不能被算成深夜。
+    Check("上午 10:30 判成「上午」", ChatTime.Band(anchor) == "上午");
+    Check("深夜 01:00 判成「深夜」", ChatTime.Band(At(21, 1).LocalDateTime) == "深夜");
+    Check("23:30 判成「深夜」", ChatTime.Band(At(21, 23, 30).LocalDateTime) == "深夜");
+    Check("下午 15:00 判成「下午」", ChatTime.Band(At(21, 15).LocalDateTime) == "下午");
+
+    // ② 日期标签：跨夜要变成看得见的字。
+    Check("同一天标「今天」", ChatTime.DayLabel(At(21, 9).LocalDateTime, anchor).StartsWith("今天"));
+    Check("前一天标「昨天」", ChatTime.DayLabel(At(20, 23).LocalDateTime, anchor).StartsWith("昨天"));
+    Check("更早的写出月日", ChatTime.DayLabel(At(17, 22).LocalDateTime, anchor).StartsWith("11-17"));
+
+    // ③ 单条标注：内容原样保留，前面加时间；没有时间不加标注（不能凭空捏）。
+    var marked = ChatTime.Mark("我去吃饭了", At(20, 23, 48), anchor);
+    Check("历史标注带「昨天」", marked.Contains("昨天"));
+    Check("历史标注带时段「深夜」", marked.Contains("深夜"));
+    Check("历史标注保留原话", marked.EndsWith("我去吃饭了"));
+    Check("没有时间就不加标注", ChatTime.Mark("原话", null, anchor) == "原话");
+
+    // ④ 间隔是硬数字，跨夜要说出来。
+    Check("隔了一夜要说出来", ChatTime.GapWithNight(At(20, 23, 48).LocalDateTime, anchor).Contains("隔了一夜"));
+    Check("同日下午不算隔夜", !ChatTime.GapWithNight(At(21, 9).LocalDateTime, anchor).Contains("隔了一夜"));
+    Check("分钟差算得出来", ChatTime.Gap(anchor.AddMinutes(-37), anchor).Contains("37"));
+
+    // ⑤ 坐标段：三条规矩都在（时段 / 旧状态过期 / 别自己推时间）。
+    var coord = ChatTime.Coordinate(anchor, At(20, 23, 48));
+    Check("坐标段写明现在是上午", coord.Contains("上午"));
+    Check("坐标段写明距上次说话隔了多久", coord.Contains("隔了一夜"));
+    Check("坐标段写明旧状态会过期", coord.Contains("默认已经结束"));
+    Check("坐标段写明别自己推时间", coord.Contains("别自己再推一遍时间"));
+    Check("坐标段写明说话要合时段", coord.Contains("上午别道晚安"));
+    Check("没有上一句时不硬编时间", !ChatTime.Coordinate(anchor, null).Contains("上一句话"));
+
+    // ⑥ 源码扫描：两条链路都得真的用上同一份 ChatTime，不能只改了一边。
+    var srcRoot = FindSrcRoot();
+    string Read(string rel) => srcRoot is null ? "" :
+        File.ReadAllText(Path.Combine(srcRoot, rel));
+
+    var agentCode = Read(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var proactiveCode = Read(Path.Combine("DayManager.Api", "Services", "ProactiveService.cs"));
+    var vmCode = Read(Path.Combine("DayManager.App", "ViewModels", "ChatViewModel.cs"));
+    var apiClientCode = Read(Path.Combine("DayManager.App", "Services", "ApiClient.cs"));
+    var proxyCode = Read(Path.Combine("DayManager.Api", "Services", "AiProxy.cs"));
+
+    Check("聊天链路逐条打了时间标注", agentCode.Contains("ChatTime.Mark"));
+    Check("聊天链路插了时间坐标", agentCode.Contains("ChatTime.Coordinate"));
+    Check("主动开口链路逐条打了时间标注", proactiveCode.Contains("ChatTime.Mark"));
+    Check("主动开口链路插了时间坐标", proactiveCode.Contains("ChatTime.Coordinate"));
+    Check("主动开口不再只取 m.Text 丢掉时间", !Regex.IsMatch(proactiveCode, @"Content\s*=\s*m\.Text\s*[,}]"));
+    Check("客户端把气泡的 CreatedAt 带进历史", vmCode.Contains("ChatMessageDto.User(x.Text, x.CreatedAt)"));
+    Check("请求 payload 带上 createdAt", apiClientCode.Contains("createdAt = x.CreatedAt"));
+    Check("发给上游仍只投影 role/content（时间字段不外泄）",
+        Regex.IsMatch(proxyCode, @"new\s*\{\s*role\s*=\s*m\.Role\s*,\s*content\s*=\s*m\.Content\s*\}"));
+}
+
+Console.WriteLine();
+Console.WriteLine("=== 30. 视野：过去 7 天回顾 + AI 按需 query（治「看不到昨天的任务」） ===");
+
+{
+    // ① 纯函数：查询范围的解析与裁剪。放 Core 就是为了让这里能直接断言边界，
+    //    不用真调一次大模型才发现它写了个「查去年一整年」。
+    var single = DayQuery.Parse("2026-11-03", null);
+    Check("只给起始日 = 只查这一天", single.Valid && single.Days == 1
+        && single.From == new DateOnly(2026, 11, 3) && single.To == single.From);
+
+    var range = DayQuery.Parse("2026-11-03", "2026-11-05");
+    Check("给了结束日就按范围算", range.Valid && range.Days == 3
+        && !range.Clipped && range.Enumerate().Last() == new DateOnly(2026, 11, 5));
+
+    var reversed = DayQuery.Parse("2026-11-05", "2026-11-03");
+    Check("日期写反了自动换过来，不当成查不到", reversed.Valid
+        && reversed.From == new DateOnly(2026, 11, 3) && reversed.To == new DateOnly(2026, 11, 5));
+
+    Check("起始日是乱写的要挡住", !DayQuery.Parse("上个月", null).Valid);
+    Check("没给起始日要挡住", !DayQuery.Parse(null, null).Valid && !DayQuery.Parse("", "2026-11-03").Valid);
+
+    var clipped = DayQuery.Parse("2026-01-01", "2026-12-31");
+    Check("一次查一年会被裁到上限", clipped.Valid && clipped.Clipped && clipped.Days == DayQuery.MaxSpanDays);
+    Check("裁完仍是连续的一段", clipped.To == clipped.From.AddDays(DayQuery.MaxSpanDays - 1));
+
+    // ② 回顾取数：核心是「逾期旧账不能在 7 天里重复 7 遍」。
+    //    选一个远离其它测试数据的日子，避免和历史用例造的记录互相干扰。
+    var reviewDay = DateOnly.FromDateTime(DateTime.Today.AddDays(-40));
+    DateTimeOffset AtLocal(int dayOffset, int hour)
+    {
+        var local = DateTime.Today.AddDays(dayOffset).AddHours(hour);
+        return new DateTimeOffset(local, TimeZoneInfo.Local.GetUtcOffset(local));
+    }
+
+    Guid overdueId, scheduledId, completedId, abandonedId, bothId;
+    await using (var db = factory.CreateDbContext())
+    {
+        Item Mk(string title, ItemStatus st, DateTimeOffset? start, DateTimeOffset? due, DateTimeOffset? done) => new()
+        {
+            Title = title,
+            Status = st,
+            StartAt = start,
+            DueAt = due,
+            CompletedAt = done,
+            TimeZoneId = TimeZoneInfo.Local.Id
+        };
+
+        // 这条很早到期、至今没做的欠账，按界面口径翻到过去任意一天都会冒出来。
+        // 截止日要远在 7 天扫描窗口之前，否则最远那天因 DueAt < dayEnd 不成立会少一次。
+        var overdue = Mk("回顾测试-逾期未完成的旧账", ItemStatus.Pending, null, AtLocal(-60, 23), null);
+        // 那天有具体钟点的日程：回顾里该在。
+        var scheduled = Mk("回顾测试-那天十点的会", ItemStatus.Pending, AtLocal(-40, 10), null, null);
+        // 更早创建的待办，但在那天做完：回顾里也该在（做完发生在那天）。
+        var completed = Mk("回顾测试-那天做完的事", ItemStatus.Done, null, AtLocal(-60, 23), AtLocal(-40, 15));
+        // 放弃的不该出现（用户已经决定不做）。
+        var abandoned = Mk("回顾测试-那天放弃的事", ItemStatus.Abandoned, AtLocal(-40, 11), null, null);
+        // 同时满足「那天排的」和「那天做完的」：只能出现一次。
+        var both = Mk("回顾测试-当天排当天做完", ItemStatus.Done, AtLocal(-40, 9), null, AtLocal(-40, 12));
+
+        db.Items.AddRange(overdue, scheduled, completed, abandoned, both);
+        await db.SaveChangesAsync();
+
+        overdueId = overdue.Id;
+        scheduledId = scheduled.Id;
+        completedId = completed.Id;
+        abandonedId = abandoned.Id;
+        bothId = both.Id;
+    }
+
+    var reviewList = await repo.GetDayReviewAsync(reviewDay);
+    Check("回顾里有那天有钟点的日程", reviewList.Any(x => x.Id == scheduledId));
+    Check("回顾里有那天做完的事", reviewList.Any(x => x.Id == completedId));
+    Check("回顾里没有一直欠着的逾期旧账", reviewList.All(x => x.Id != overdueId));
+    Check("回顾里没有放弃的事", reviewList.All(x => x.Id != abandonedId));
+    Check("同一条同时满足两类时不重复", reviewList.Count(x => x.Id == bothId) == 1,
+        $"出现了 {reviewList.Count(x => x.Id == bothId)} 次");
+
+    // 对照：界面翻页口径确实会把那条旧账并进过去每一天——这正是不能照抄它的理由。
+    var interfaceList = await repo.GetDayListAsync(reviewDay);
+    Check("对照：界面翻到那天会带上逾期旧账", interfaceList.Any(x => x.Id == overdueId));
+
+    var reviewHits = 0;
+    var interfaceHits = 0;
+    for (var i = 0; i < 7; i++)
+    {
+        var scanDay = reviewDay.AddDays(-i);
+        if ((await repo.GetDayReviewAsync(scanDay)).Any(x => x.Id == overdueId)) reviewHits++;
+        if ((await repo.GetDayListAsync(scanDay)).Any(x => x.Id == overdueId)) interfaceHits++;
+    }
+    Check("连着 7 天回顾，旧账一次都不重复", reviewHits == 0, $"回顾里出现 {reviewHits} 次");
+    Check("对照：同样 7 天界面口径会把它带 7 次", interfaceHits == 7,
+        $"界面口径出现 {interfaceHits} 次");
+
+    // ③ 源码扫描：确认真的接上了，而不只是文件里躺着一个新类。
+    var srcRoot30 = FindSrcRoot();
+    string Read30(string rel) => srcRoot30 is null ? "" :
+        File.ReadAllText(Path.Combine(srcRoot30, rel));
+
+    var agent30 = Read30(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var tools30 = Read30(Path.Combine("DayManager.Api", "Services", "ItemTools.cs"));
+    var models30 = Read30(Path.Combine("DayManager.Api", "Models", "AgentModels.cs"));
+    var repo30 = Read30(Path.Combine("DayManager.Data", "Repositories", "ItemRepository.cs"));
+    var proactive30 = Read30(Path.Combine("DayManager.Api", "Services", "ProactiveService.cs"));
+    var proxy30 = Read30(Path.Combine("DayManager.Api", "Services", "AiProxy.cs"));
+    var dayQueryFile = srcRoot30 is null ? "" : Path.Combine(srcRoot30, "DayManager.Core", "Ai", "DayQuery.cs");
+
+    Check("Core 里有 DayQuery 纯函数", File.Exists(dayQueryFile));
+    Check("query 的解析放 Core、不在 Api 里重写", File.Exists(dayQueryFile)
+        && File.ReadAllText(dayQueryFile).Contains("MaxSpanDays"));
+
+    Check("聊天链路真的取了过去几天的回顾", agent30.Contains("GetDayReviewAsync"));
+    Check("回顾取数走仓储、口径只有一份", repo30.Contains("GetDayReviewAsync"));
+    Check("聊天链路有「查完再答」的循环", agent30.Contains("MaxQueryRounds")
+        && agent30.Contains("RunQueriesAsync"));
+    Check("query 在交给执行器前被剔掉（不会进撤销批次）",
+        agent30.Contains("Where(a => !IsQuery(a))"));
+    Check("执行器对漏进来的 query 有明确防御", tools30.Contains("case \"query\""));
+    Check("动作模型带上了查询结束日", models30.Contains("DateTo"));
+
+    Check("提示词不再教它说「看不到」",
+        !agent30.Contains("更早以前的、以及这几天之后的安排，你看不到"));
+    Check("提示词明确改为「可以查、不要再说看不到」",
+        agent30.Contains("不要再说「我看不到」") && agent30.Contains("query"));
+    Check("提示词列了六种操作", agent30.Contains("可用的操作有这六种"));
+    // 源码里那行是带转义的 C# 字符串字面量，直接找 "op": "query" 会漏；
+    // 用示例里独有的文案 + 日期来确认它还在。
+    Check("提示词给了 query 的写法示例",
+        agent30.Contains("他问的是上个月") && agent30.Contains("2026-10-05"));
+
+    // 范围守约：这次只扩聊天链路，主动开口那边不动。
+    Check("主动开口链路没被顺手改掉", !proactive30.Contains("RunQueriesAsync")
+        && !proactive30.Contains("GetDayReviewAsync"));
+    // 时间字段仍然只在本机传输，不外泄给上游。
+    Check("发给上游仍只投影 role/content",
+        Regex.IsMatch(proxy30, @"new\s*\{\s*role\s*=\s*m\.Role\s*,\s*content\s*=\s*m\.Content\s*\}"));
+}
+
+// ============================================================
+// 31. 翻更早历史 + 微信式日期条
+// ============================================================
+Console.WriteLine();
+Console.WriteLine("=== 31. 翻更早历史 + 按天分组的日期条 ===");
+
+{
+    var anchor31 = new DateTime(2026, 11, 21, 10, 30, 0, DateTimeKind.Local); // 周六
+    DateTime D31(int day, int hour = 10) => new(2026, 11, day, hour, 0, 0, DateTimeKind.Local);
+
+    // ① 日期条的文案是硬判断，不留给它自己推。
+    Check("同一天显示「今天」", ChatTime.DayDivider(D31(21), anchor31) == "今天");
+    Check("前一天显示「昨天」", ChatTime.DayDivider(D31(20), anchor31) == "昨天");
+    Check("两天前显示星期几", ChatTime.DayDivider(D31(19), anchor31) == "星期四");
+    Check("一周内边界：六天前仍是星期", ChatTime.DayDivider(D31(15), anchor31) == "星期日");
+    Check("七天前改写成月日，不再含糊说星期", ChatTime.DayDivider(D31(14), anchor31) == "11月14日");
+    Check("同年更早的写月日", ChatTime.DayDivider(D31(3), anchor31) == "11月3日");
+    Check("跨年必须带年份", ChatTime.DayDivider(new DateTime(2025, 12, 25, 10, 0, 0, DateTimeKind.Local), anchor31)
+        == "2025年12月25日");
+
+    // ② 切天按本地，不按 UTC：库里存的是 UTC，照 UTC 切会把跨夜两条算成同一天。
+    var utcAcross = new DateTimeOffset(2026, 11, 20, 16, 30, 0, TimeSpan.Zero);
+    Check("LocalDay 用本地日期而不是 UTC 日期",
+        ChatTime.LocalDay(utcAcross) == DateOnly.FromDateTime(utcAcross.ToLocalTime().DateTime));
+    var sameInstant = new DateTimeOffset(2026, 11, 21, 0, 30, 0, TimeSpan.FromHours(8));
+    Check("同一时刻的两种 offset 写法算同一天",
+        ChatTime.LocalDay(utcAcross) == ChatTime.LocalDay(sameInstant));
+    Check("确实会把不同日子切开（不是恒返回同一天）",
+        ChatTime.LocalDay(utcAcross) != ChatTime.LocalDay(utcAcross.AddDays(2)));
+
+    // ③ 翻页：整窗重取 + 按 id 去重。造一批新对话，避免依赖前面章节留下的软删数据。
+    var chat31 = new ChatRepository(factory);
+    await chat31.ClearAsync();
+    for (var i = 0; i < 6; i++)
+    {
+        await chat31.AddAsync(ChatMessage.RoleUser, $"翻页测试-{i}");
+    }
+
+    Check("总数只数没删的", await chat31.CountAsync() == 6);
+
+    var page1 = await chat31.GetRecentAsync(3);
+    Check("第一页按时间正序（界面从上往下读）", page1.Count == 3
+        && page1[0].CreatedAt <= page1[1].CreatedAt && page1[1].CreatedAt <= page1[2].CreatedAt);
+
+    // 模拟「窗口扩大一页」：取回整窗，只留没显示过的。
+    var window31 = await chat31.GetRecentAsync(page1.Count + 3);
+    Check("第一页就是整窗里最新的三条", window31.Count == 6
+        && page1.Select(x => x.Id).SequenceEqual(window31.Skip(3).Select(x => x.Id)));
+    Check("整窗也是从早到晚",
+        window31.Zip(window31.Skip(1)).All(p => p.First.CreatedAt <= p.Second.CreatedAt));
+    var shown31 = page1.Select(x => x.Id).ToHashSet();
+    var older31 = window31.Where(x => !shown31.Contains(x.Id)).ToList();
+    Check("扩窗后只挑出没显示过的（不会重复）", older31.Count == 3
+        && older31.All(x => !shown31.Contains(x.Id)));
+    Check("挑出来的排在整窗前面（更早的那一段）",
+        older31.Select(x => x.Id).SequenceEqual(window31.Take(3).Select(x => x.Id)));
+    Check("旧页和新页拼起来正好是整窗，不重不漏",
+        older31.Concat(page1).Select(x => x.Id).OrderBy(x => x).SequenceEqual(
+            window31.Select(x => x.Id).OrderBy(x => x)));
+    Check("全翻完之后按钮就该消失", await chat31.CountAsync() <= window31.Count);
+
+    // 软删之后总数跟着减，翻页不会把删掉的那条又捞回来。
+    await chat31.DeleteAsync(page1[0].Id);
+    Check("单条软删后总数减少", await chat31.CountAsync() == 5);
+    Check("删掉的那条不在最新窗口里", (await chat31.GetRecentAsync(7)).All(x => x.Id != page1[0].Id));
+
+    await chat31.ClearAsync();
+
+    // ④ 源码扫描：确认真的接上了，而不是文件里躺着几个新类。
+    var src31 = FindSrcRoot();
+    string Read31(string rel) => src31 is null ? "" : File.ReadAllText(Path.Combine(src31, rel));
+
+    var time31 = Read31(Path.Combine("DayManager.Core", "Ai", "ChatTime.cs"));
+    var repo31 = Read31(Path.Combine("DayManager.Data", "Repositories", "ChatRepository.cs"));
+    var vm31 = Read31(Path.Combine("DayManager.App", "ViewModels", "ChatViewModel.cs"));
+    var page31 = Read31(Path.Combine("DayManager.App", "ChatPage.xaml"));
+    var code31 = Read31(Path.Combine("DayManager.App", "ChatPage.xaml.cs"));
+
+    Check("Core 里有日期条纯函数", time31.Contains("public static string DayDivider"));
+    Check("Core 里有按本地切天的函数", time31.Contains("public static DateOnly LocalDay"));
+    Check("仓储有总数查询", repo31.Contains("public async Task<int> CountAsync"));
+    Check("翻页靠整窗重取，不用会错位的 skip", !repo31.Contains("Skip(skip)"));
+    Check("界面按 id 去重，不靠计数器", vm31.Contains("ToHashSet()"));
+    Check("集合变了会整段重算日期分界", vm31.Contains("RefreshDayDividers()"));
+    Check("有翻页命令", vm31.Contains("LoadMoreHistoryAsync"));
+    Check("气泡带日期条的两个字段", vm31.Contains("ShowDayDivider") && vm31.Contains("DayDividerText"));
+    Check("XAML 里有加载更早按钮", page31.Contains("加载更早的消息") && page31.Contains("HasMore"));
+    Check("XAML 里日期条绑了独立的居中标签", page31.Contains("DayDividerText")
+        && page31.Contains("ShowDayDivider"));
+    Check("翻页时不滚到底", code31.Contains("IsPrepending") && code31.Contains("ScrollToLast"));
+    Check("翻页后把阅读位置锚回去", code31.Contains("RestoreAnchor")
+        && code31.Contains("ChatHistoryPrependStarted") && code31.Contains("ChatHistoryPrepended"));
+    Check("清空之后按钮会收起来", vm31.Contains("HasMore = false"));
+}
+
+// ============================================================
+// 32. 只有截止日的事（5.2 第三种形态）+ 三条完成语义
+// ============================================================
+Console.WriteLine();
+Console.WriteLine("=== 32. 只有截止日的事：常驻带 / 完成语义 / 完成率分母 ===");
+
+{
+    // 用独立临时库：GetFloatingDeadlinesAsync 是全表口径（粗筛所有未来截止的
+    // 无开始时间待办），前面 31 节造的数据会混进来，无法精确断言数量和排序。
+    var dbFile32 = Path.Combine(Path.GetTempPath(), $"dm-smoke-floating-{Guid.NewGuid():N}.db");
+    var factory32 = new TestFactory(dbFile32);
+    await using (var db32 = factory32.CreateDbContext())
+    {
+        await db32.Database.EnsureCreatedAsync();
+    }
+    var repo32 = new ItemRepository(factory32);
+
+    var anchor32 = DateOnly.FromDateTime(DateTime.Today);
+
+    // 带本地偏移的时刻：纯函数内部会 ToLocalTime，构造时就得按本地来。
+    DateTimeOffset Local(int dayOffset, int hour = 23, int minute = 59) =>
+        new(DateTime.Today.AddDays(dayOffset).AddHours(hour).AddMinutes(minute),
+            TimeZoneInfo.Local.GetUtcOffset(DateTime.Today.AddDays(dayOffset)));
+
+    // ① 纯函数：这一格属不属于「还悬着」。
+    // 【11-21 改版】第一句判据从「StartAt 空 + DueAt 未来」换成 Shape == DeadlineOnly，
+    // 形态不再靠推断。下面每条都显式给形态，正是这次事故要钉死的地方。
+    bool Floating(ItemShape shape, VerdictMode mode, DateTimeOffset? due, ItemStatus status) =>
+        ItemPresence.IsFloatingDeadline(shape, mode, due, status, anchor32);
+
+    Check("定段、未来截止、待办 → 常驻",
+        Floating(ItemShape.DeadlineOnly, VerdictMode.Judged, Local(6), ItemStatus.Pending));
+    Check("定段、今天到期 → 不算常驻（正经待办）",
+        !Floating(ItemShape.DeadlineOnly, VerdictMode.Judged, Local(0), ItemStatus.Pending));
+    Check("定段、已经过期 → 不算常驻（逾期欠账）",
+        !Floating(ItemShape.DeadlineOnly, VerdictMode.Judged, Local(-3), ItemStatus.Pending));
+    Check("定段、提前做完 → 不算常驻（收起）",
+        !Floating(ItemShape.DeadlineOnly, VerdictMode.Judged, Local(6), ItemStatus.Done));
+    Check("定段、放弃 → 不算常驻",
+        !Floating(ItemShape.DeadlineOnly, VerdictMode.Judged, Local(6), ItemStatus.Abandoned));
+    Check("定段、进行中仍算常驻（没到终点）",
+        Floating(ItemShape.DeadlineOnly, VerdictMode.Judged, Local(6), ItemStatus.InProgress));
+    Check("定段、跳过仍算常驻",
+        Floating(ItemShape.DeadlineOnly, VerdictMode.Judged, Local(6), ItemStatus.Skipped));
+    // 【正是 11-21 的 18 条误判】定日哪怕 DueAt 在很远的未来，也不是常驻项。
+    Check("定日、未来截止 → 不算常驻（18 条误判的核心）",
+        !Floating(ItemShape.DayTask, VerdictMode.Judged, Local(6), ItemStatus.Pending));
+    Check("定点 → 不算常驻（那是日程）",
+        !Floating(ItemShape.Timed, VerdictMode.Judged, null, ItemStatus.Pending));
+    Check("无锚 → 不算常驻（零散待办）",
+        !Floating(ItemShape.Unanchored, VerdictMode.Judged, null, ItemStatus.Pending));
+    Check("定段但没写截止日 → 不算常驻",
+        !Floating(ItemShape.DeadlineOnly, VerdictMode.Judged, null, ItemStatus.Pending));
+    Check("守住类（Never）永远不算常驻",
+        !Floating(ItemShape.DeadlineOnly, VerdictMode.Never, Local(6), ItemStatus.Pending));
+
+    Check("剩余天数按本地日期算", ItemPresence.DaysLeft(Local(6), anchor32) == 6);
+    Check("剩余天数不含时分零头", ItemPresence.DaysLeft(Local(1, 0, 0), anchor32) == 1);
+
+    var line6 = ItemPresence.DeadlineLine(Local(6), anchor32);
+    Check("副标题里带剩余天数", line6.Contains("还有 6 天"), line6);
+    Check("副标题里带截止日期", line6.Contains("截止"), line6);
+    var farYear = ItemPresence.DeadlineLine(Local(400), anchor32);
+    Check("跨年时补上年份，不让人以为早过了",
+        farYear.Contains($"{DateTime.Today.AddDays(400).Year}年"), farYear);
+
+    // 切天按本地、不按 UTC：库里存 UTC 毫秒，照 UTC 切会把跨夜的截止日算错一天。
+    // 取「UTC 当天 16:00」这个时刻，在东八区已经是次日 00:00。
+    // DateTime.Today 是 Kind=Local，直接配 TimeSpan.Zero 会抛「偏移不匹配」，
+    // 所以先把 Kind 抹成 Unspecified，再按 UTC 造时刻。
+    var utcAcross32 = new DateTimeOffset(
+        DateTime.SpecifyKind(DateTime.Today.AddDays(6).AddHours(16), DateTimeKind.Unspecified),
+        TimeSpan.Zero);
+    // 同一个瞬间换成本地 offset 的写法（ToOffset 自动带出本地时钟）。
+    var sameInstant32 = utcAcross32.ToOffset(TimeZoneInfo.Local.GetUtcOffset(utcAcross32));
+    Check("同一时刻的两种 offset 写法算同一天",
+        ItemPresence.LocalDay(utcAcross32) == ItemPresence.LocalDay(sameInstant32));
+    Check("确实会切开不同日子",
+        ItemPresence.LocalDay(utcAcross32) != ItemPresence.LocalDay(utcAcross32.AddDays(-3)));
+    // 东时区跨夜时，按本地切出来的日期必须和照 UTC 日历切出来的不同。
+    // 若哪天把 LocalDay 改成照 .DateTime 切，这条会先炸。
+    if (TimeZoneInfo.Local.GetUtcOffset(utcAcross32) > TimeSpan.Zero)
+    {
+        var utcCalendarDay32 = DateOnly.FromDateTime(utcAcross32.UtcDateTime.Date);
+        Check("按本地切天，不照 UTC 日期切（跨夜不差一天）",
+            ItemPresence.LocalDay(utcAcross32) != utcCalendarDay32);
+    }
+
+    // ② 真实数据：常驻带只收该收的，且按截止日排序。
+    var near = await repo32.AddDeadlineAsync("常驻测试-近的报告", anchor32.AddDays(3));
+    var far = await repo32.AddDeadlineAsync("常驻测试-远的报告", anchor32.AddDays(20));
+    await repo32.AddToDayAsync("常驻测试-今天到期的待办", anchor32);
+    await repo32.AddAsync("常驻测试-逾期的旧账", null, Local(-5));
+    await repo32.AddAsync("常驻测试-有钟点的未来日程", Local(4, 9, 0));
+    var doneEarly = await repo32.AddDeadlineAsync("常驻测试-提前做完的报告", anchor32.AddDays(8));
+    await repo32.ToggleDoneAsync(doneEarly.Id);
+    var abandoned = await repo32.AddDeadlineAsync("常驻测试-放弃的报告", anchor32.AddDays(9));
+    await repo32.SetStatusAsync(abandoned.Id, ItemStatus.Abandoned);
+
+    Check("AddDeadlineAsync 建的记录没有 StartAt", near.StartAt is null);
+    Check("AddDeadlineAsync 把 DueAt 落在截止日当天",
+        ItemPresence.LocalDay(near.DueAt!.Value) == anchor32.AddDays(3));
+
+    var floating32 = await repo32.GetFloatingDeadlinesAsync(anchor32);
+    var fids32 = floating32.Select(x => x.Id).ToList();
+    Check("常驻带收未来截止的", fids32.Contains(near.Id) && fids32.Contains(far.Id));
+    Check("常驻带不收今天到期的正经待办", floating32.All(x => x.Title != "常驻测试-今天到期的待办"));
+    Check("常驻带不收逾期的旧账", floating32.All(x => x.Title != "常驻测试-逾期的旧账"));
+    Check("常驻带不收有钟点的未来日程", floating32.All(x => x.Title != "常驻测试-有钟点的未来日程"));
+    Check("常驻带不收提前做完的", !fids32.Contains(doneEarly.Id));
+    Check("常驻带不收放弃的", !fids32.Contains(abandoned.Id));
+    Check("常驻带按截止日升序（近的在前）",
+        fids32.IndexOf(near.Id) < fids32.IndexOf(far.Id));
+
+    // ③ 完成率分母：这是「不算今天该做完」的硬指标。
+    var todayList32 = await repo32.GetDayListAsync(anchor32);
+    Check("今天的清单里不出现常驻项", todayList32.All(x => !fids32.Contains(x.Id)));
+    var stats32 = await repo32.GetDayStatsAsync(anchor32);
+    Check("完成率分母不含常驻项", stats32.Total == todayList32.Count,
+        $"分母 {stats32.Total}，清单 {todayList32.Count} 条");
+
+    // ④ 三条完成语义，逐条在真实查询上验证（不是靠状态机，是靠 DueAt 滑动）。
+    //    a. 提前做完 → 收起 + 被「那天做完的事」接住（正反馈）。
+    Check("提前完成后从常驻带收起", !fids32.Contains(doneEarly.Id));
+    Check("提前完成后进「今天做完的事」（正反馈）",
+        todayList32.Any(x => x.Id == doneEarly.Id && x.Status == ItemStatus.Done));
+    var review32 = await repo32.GetDayReviewAsync(anchor32);
+    Check("提前完成后进回顾（那天实际发生过）", review32.Any(x => x.Id == doneEarly.Id));
+
+    //    b. 到 DDL 当天 → 第一次变成正经待办，出现在那天的清单里。
+    var onDeadline32 = await repo32.GetDayListAsync(anchor32.AddDays(3));
+    Check("到截止日当天转成正经待办", onDeadline32.Any(x => x.Id == near.Id));
+    Check("截止日当天之前，它不在中间那些天的清单里",
+        !(await repo32.GetDayListAsync(anchor32.AddDays(1))).Any(x => x.Id == near.Id));
+
+    //    c. 过了 DDL 还没做 → 按既有口径滚进今天成欠账。
+    var overdue32 = await repo32.AddDeadlineAsync("常驻测试-已过期的报告", anchor32.AddDays(-2));
+    Check("过了截止日不再算常驻", !ItemPresence.IsFloatingDeadline(overdue32, anchor32));
+    Check("过了截止日滚进今天成欠账",
+        (await repo32.GetDayListAsync(anchor32)).Any(x => x.Id == overdue32.Id));
+
+    // ⑤ 源码扫描：确认真的接上了，不是躺着几个新类。
+    var src32 = FindSrcRoot();
+    string Read32(string rel) => src32 is null ? "" : File.ReadAllText(Path.Combine(src32, rel));
+
+    var presence32 = Read32(Path.Combine("DayManager.Core", "Planning", "ItemPresence.cs"));
+    var repo32Src = Read32(Path.Combine("DayManager.Data", "Repositories", "ItemRepository.cs"));
+    var models32 = Read32(Path.Combine("DayManager.Api", "Models", "AgentModels.cs"));
+    var tools32 = Read32(Path.Combine("DayManager.Api", "Services", "ItemTools.cs"));
+    var agent32 = Read32(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var mainVm32 = Read32(Path.Combine("DayManager.App", "ViewModels", "MainViewModel.cs"));
+    var itemVm32 = Read32(Path.Combine("DayManager.App", "ViewModels", "ItemViewModel.cs"));
+    var page32 = Read32(Path.Combine("DayManager.App", "MainPage.xaml"));
+    var proactive32 = Read32(Path.Combine("DayManager.Api", "Services", "ProactiveService.cs"));
+
+    Check("Core 里有常驻判定纯函数", presence32.Contains("public static bool IsFloatingDeadline"));
+    Check("Core 里有剩余天数文案纯函数", presence32.Contains("public static string DeadlineLine"));
+    Check("常驻判定第一句读 Shape，不再靠时间字段推断",
+        presence32.Contains("shape != ItemShape.DeadlineOnly"));
+    Check("仓储里有独立的常驻查询", repo32Src.Contains("GetFloatingDeadlinesAsync"));
+    Check("常驻查询粗筛只读定段（18 条误判的正面修复）",
+        repo32Src.Contains("x.Shape == ItemShape.DeadlineOnly"));
+    Check("仓储里有专用的截止日创建入口", repo32Src.Contains("AddDeadlineAsync"));
+    Check("动作模型把 dueDate 和 date 分开了", models32.Contains("DueDate") && models32.Contains("public string? Date"));
+    Check("执行器分流到 AddDeadlineAsync", tools32.Contains("_items.AddDeadlineAsync"));
+    Check("执行器对解析不了的截止日明确报错，不猜成今天", tools32.Contains("截止日「"));
+    Check("聊天链路把常驻项喂给了 AI", agent32.Contains("GetFloatingDeadlinesAsync"));
+    Check("提示词明说常驻项不算今天该做完", agent32.Contains("不算今天该做完"));
+    Check("提示词教了 dueDate 的写法", agent32.Contains("dueDate"));
+
+    // 完成率分母没被改坏：GetDayListAsync 主体里不该被塞进常驻判定。
+    var dayListBody32 = repo32Src.Contains("public async Task<List<Item>> GetDayListAsync")
+        ? repo32Src[repo32Src.IndexOf("public async Task<List<Item>> GetDayListAsync")..
+                    repo32Src.IndexOf("public async Task<List<Item>> GetDayReviewAsync")]
+        : "";
+    Check("GetDayListAsync 主体没被塞进常驻项（分母口径不变）",
+        dayListBody32.Length > 0 && !dayListBody32.Contains("IsFloatingDeadline"));
+    Check("GetDayStatsAsync 仍用 GetDayListAsync 当分母",
+        repo32Src.Contains("var items = await GetDayListAsync(day, ct)"));
+
+    Check("界面用两个独立集合，完成率只数 TodayItems",
+        mainVm32.Contains("FloatingItems") && mainVm32.Contains("ShowFloatingBand")
+        && mainVm32.Contains("var total = TodayItems.Count"));
+    Check("常驻项完成之后整页重查（搬进「今天做完的事」）",
+        mainVm32.Contains("wasFloating") && mainVm32.Contains("await LoadAsync()"));
+    Check("常驻项副标题走 Core 纯函数，不显示逾期",
+        itemVm32.Contains("ItemPresence.DeadlineLine") && itemVm32.Contains("isFloating"));
+    Check("走表的常驻项也刷已进行分钟数", mainVm32.Contains("TodayItems.Concat(FloatingItems)"));
+    Check("XAML 里常驻带挂在 Header 上", page32.Contains("CollectionView.Header")
+        && page32.Contains("FloatingItems"));
+    Check("XAML 里常驻带给了两个入口", page32.Contains("ToggleCompleteCommand")
+        && page32.Contains("StartFocusCommand"));
+    // 资源键写错会编译 0 错 0 警、运行时整页炸，这件事第 26 节已经
+    // 全量扫过一遍所有 XAML 了；这里只确认新带子确实引用了复用键，不重复造轮子。
+    Check("XAML 里常驻带复用已有资源键，没有自造键",
+        page32.Contains("{StaticResource CardStyle}")
+        && page32.Contains("{StaticResource ChipButton}")
+        && page32.Contains("{StaticResource CardTitle}"));
+
+    // 范围守约：主动开口链路本轮不动（它的触发判定是另一条线）。
+    Check("主动开口链路没被顺手改掉", !proactive32.Contains("GetFloatingDeadlinesAsync"));
+
+    try { File.Delete(dbFile32); } catch { }
+}
+
+Console.WriteLine("=== 33. 三根轴：形态 / 容器 / 完成方式 / 判成败 ===");
+
+{
+    var dbFile33 = Path.Combine(Path.GetTempPath(), $"dm-smoke-axes-{Guid.NewGuid():N}.db");
+    var factory33 = new TestFactory(dbFile33);
+    await using (var db33 = factory33.CreateDbContext())
+    {
+        await db33.Database.EnsureCreatedAsync();
+    }
+    var repo33 = new ItemRepository(factory33);
+    var anchor33 = DateOnly.FromDateTime(DateTime.Today);
+
+    DateTimeOffset Local33(int dayOffset, int hour = 23, int minute = 59) =>
+        new(DateTime.Today.AddDays(dayOffset).AddHours(hour).AddMinutes(minute),
+            TimeZoneInfo.Local.GetUtcOffset(DateTime.Today.AddDays(dayOffset)));
+
+    // ① 创建入口把形态写死，不再让下游推断。
+    var dayTask33 = await repo33.AddToDayAsync("轴测试-今天作业", anchor33);
+    var timed33 = await repo33.AddToDayAsync("轴测试-9点开会", anchor33, new TimeSpan(9, 0, 0));
+    var deadline33 = await repo33.AddDeadlineAsync("轴测试-15号交报告", anchor33.AddDays(6));
+    Check("AddToDayAsync 无钟点 → 定日", dayTask33.Shape == ItemShape.DayTask);
+    Check("AddToDayAsync 有钟点 → 定点", timed33.Shape == ItemShape.Timed);
+    Check("AddDeadlineAsync → 定段（与定日第一次在库里可区分）",
+        deadline33.Shape == ItemShape.DeadlineOnly);
+    Check("定日和定段的时间字段仍然一样（差别只在 Shape 这一列）",
+        dayTask33.StartAt is null && deadline33.StartAt is null
+        && dayTask33.DueAt is not null && deadline33.DueAt is not null);
+    Check("新建记录默认做一次 / 判",
+        dayTask33.CompletionMode == CompletionMode.Once
+        && dayTask33.VerdictMode == VerdictMode.Judged);
+
+    // ② ② 容器可递归：容器下面挂阶段，阶段下面再挂叶子。
+    var root33 = await repo33.AddContainerAsync("轴测试-数学竞赛");
+    var stage33 = await repo33.AddContainerAsync("轴测试-学习第一章",
+        parentTaskId: root33.Id);
+    var leaf33 = await repo33.AddToDayAsync("轴测试-做题", anchor33,
+        parentTaskId: stage33.Id);
+    Check("容器是 ByChildren，不进分母", root33.CompletionMode == CompletionMode.ByChildren);
+    Check("阶段性目标也是容器（② 可递归）", stage33.CompletionMode == CompletionMode.ByChildren);
+    Check("阶段挂在根容器下", stage33.ParentTaskId == root33.Id);
+    Check("叶子挂在阶段下，形成三层", leaf33.ParentTaskId == stage33.Id);
+    Check("叶子仍是做一次 / 判", leaf33.CompletionMode == CompletionMode.Once
+        && leaf33.VerdictMode == VerdictMode.Judged);
+    // 11-22 收分类：容器不再挑 Unanchored 这个「库里 0 条的空转取值」，一律写定日。
+    // 真正要守住的是「无截止日不被兜底塞成今天到期」，这条一直没变。
+    Check("容器不再写空转的 Unanchored，仍保持无截止日（不被兜底塞成今天到期）",
+        root33.Shape == ItemShape.DayTask && root33.DueAt is null);
+
+    var today33 = await repo33.GetDayListAsync(anchor33);
+    var ids33 = today33.Select(x => x.Id).ToHashSet();
+    Check("容器不进今日清单（父子不同时占一格）", !ids33.Contains(root33.Id) && !ids33.Contains(stage33.Id));
+    Check("叶子照常进今日清单", ids33.Contains(leaf33.Id));
+    Check("定段常驻项不进今日清单", !ids33.Contains(deadline33.Id));
+    var stats33 = await repo33.GetDayStatsAsync(anchor33);
+    Check("完成率分母 = 清单条数（容器与常驻都排除）", stats33.Total == today33.Count);
+
+    // ③ 判成败三带：纯函数读出来，不存第四根轴。
+    Check("定段未到期 → 暂时不判",
+        ItemAxes.VerdictOf(deadline33, anchor33) == ItemAxes.Verdict.Deferred);
+    Check("到截止日当天 → 翻成判",
+        ItemAxes.VerdictOf(ItemShape.DeadlineOnly, VerdictMode.Judged,
+            deadline33.DueAt, anchor33.AddDays(6))
+        == ItemAxes.Verdict.Judged);
+    Check("定日 → 判",
+        ItemAxes.VerdictOf(dayTask33, anchor33) == ItemAxes.Verdict.Judged);
+    var keep33 = await repo33.AddToDayAsync("轴测试-0点上床睡觉", anchor33,
+        verdictMode: VerdictMode.Never);
+    Check("守住类 → 一直不判",
+        ItemAxes.VerdictOf(keep33, anchor33) == ItemAxes.Verdict.Never);
+    Check("守住类不进今日清单、不进分母", !ids33.Contains(keep33.Id));
+    Check("守住类不能被点名（离线兜底读字段就能判）",
+        !ItemAxes.CanNudge(keep33, anchor33));
+    Check("容器不能被点名", !ItemAxes.CanNudge(root33, anchor33));
+    Check("常驻项不能被点名", !ItemAxes.CanNudge(deadline33, anchor33));
+    Check("普通待办能被点名", ItemAxes.CanNudge(dayTask33, anchor33));
+
+    // ④ 每次各算一次：漏做的那次不滚欠账，但当天仍在清单里。
+    var daily33 = await repo33.AddAsync("轴测试-每天背单词", null, Local33(-1),
+        ct: default, completionMode: CompletionMode.PerOccurrence);
+    var dailyToday33 = await repo33.AddAsync("轴测试-今天背单词", null, Local33(0),
+        ct: default, completionMode: CompletionMode.PerOccurrence);
+    Check("PerOccurrence 是显式声明，不靠 RRule 推断",
+        daily33.CompletionMode == CompletionMode.PerOccurrence);
+    var todayAgain33 = await repo33.GetDayListAsync(anchor33);
+    Check("昨天漏做的每日任务不滚进今天（不补不欠）",
+        todayAgain33.All(x => x.Id != daily33.Id));
+    Check("今天这一次的每日任务照常出现",
+        todayAgain33.Any(x => x.Id == dailyToday33.Id));
+    Check("漏做那次仍进当天的完成率分母（不自欺）",
+        (await repo33.GetDayListAsync(anchor33.AddDays(-1))).Any(x => x.Id == daily33.Id));
+
+    // ⑤ 离线兜底：这一轮最大的受益者，不需要语义理解。
+    var candidates33 = new List<Item> { keep33, root33, deadline33, dayTask33 };
+    var actionable33 = NudgeTargetPicker.Actionable(candidates33, DateTimeOffset.Now);
+    Check("离线兜底只留下普通待办",
+        actionable33.Count == 1 && actionable33[0].Id == dayTask33.Id);
+    Check("守住类、容器、定段都没被点名",
+        actionable33.All(x => x.Id != keep33.Id && x.Id != root33.Id && x.Id != deadline33.Id));
+
+    // ⑥ 撤销快照覆盖三根轴：AI 改了形态或层级，撤销必须还原。
+    var snap33 = ItemSnapshot.From(deadline33);
+    Check("快照带上 Shape", snap33.Shape == ItemShape.DeadlineOnly);
+    var clone33 = new Item { Title = "还原用", Shape = ItemShape.DayTask,
+        CompletionMode = CompletionMode.ByChildren, VerdictMode = VerdictMode.Never,
+        ParentTaskId = root33.Id };
+    snap33.ApplyTo(clone33);
+    Check("撤销还原 Shape / CompletionMode / VerdictMode / ParentTaskId",
+        clone33.Shape == ItemShape.DeadlineOnly
+        && clone33.CompletionMode == CompletionMode.Once
+        && clone33.VerdictMode == VerdictMode.Judged
+        && clone33.ParentTaskId is null);
+
+    // ⑦ 源码扫描：确认三根轴真的接进了各条链路，不是躺着几个新类。
+    var src33 = FindSrcRoot();
+    string Read33(string rel) => src33 is null ? "" : File.ReadAllText(Path.Combine(src33, rel));
+    var enums33 = Read33(Path.Combine("DayManager.Core", "Enums.cs"));
+    var axes33 = Read33(Path.Combine("DayManager.Core", "Planning", "ItemAxes.cs"));
+    var item33 = Read33(Path.Combine("DayManager.Core", "Entities", "Item.cs"));
+    var repoSrc33 = Read33(Path.Combine("DayManager.Data", "Repositories", "ItemRepository.cs"));
+    var projSrc33 = Read33(Path.Combine("DayManager.Data", "Repositories", "ProjectRepository.cs"));
+    var ctx33 = Read33(Path.Combine("DayManager.Data", "AppDbContext.cs"));
+    var models33 = Read33(Path.Combine("DayManager.Api", "Models", "AgentModels.cs"));
+    var toolsSrc33 = Read33(Path.Combine("DayManager.Api", "Services", "ItemTools.cs"));
+    var agentSrc33 = Read33(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var picker33 = Read33(Path.Combine("DayManager.Core", "Intervention", "NudgeTargetPicker.cs"));
+    var itemVmSrc33 = Read33(Path.Combine("DayManager.App", "ViewModels", "ItemViewModel.cs"));
+    var proactiveSrc33 = Read33(Path.Combine("DayManager.Api", "Services", "ProactiveService.cs"));
+    var migrations33 = src33 is null ? "" : string.Join("\n",
+        Directory.GetFiles(Path.Combine(src33, "DayManager.Data", "Migrations"), "*AddTaskAxes.cs")
+            .Select(File.ReadAllText));
+
+    Check("三根轴都是强类型枚举，不是 Tags 里的字符串",
+        enums33.Contains("public enum ItemShape")
+        && enums33.Contains("public enum CompletionMode")
+        && enums33.Contains("public enum VerdictMode"));
+    Check("③ 只收三个值，守住类不占③的格子",
+        enums33.Contains("ByChildren = 2")
+        && axes33.Contains("public enum Verdict"));
+    Check("判成败是读出来的结论，不是存进去的第四根轴",
+        axes33.Contains("public static Verdict VerdictOf")
+        && !item33.Contains("public Verdict "));
+    Check("Item.cs 旧注释已作废（不再宣称靠时间字段区分形态）",
+        item33.Contains("旧写法已作废"));
+    Check("② 用 ParentTaskId 自引用，不新增枚举字段",
+        item33.Contains("public Guid? ParentTaskId")
+        && ctx33.Contains("HasForeignKey(x => x.ParentTaskId)"));
+    Check("AppDbContext 给 Shape / ParentTaskId 都建了索引",
+        ctx33.Contains("HasIndex(x => x.Shape)")
+        && ctx33.Contains("HasIndex(x => x.ParentTaskId)"));
+    Check("清单过滤走 Core 判据，不在查询里另抄一遍",
+        repoSrc33.Contains("ItemAxes.EntersDayList(x)"));
+    Check("项目进度只数叶子（容器不重复计数）",
+        projSrc33.Contains("x.CompletionMode != CompletionMode.ByChildren"));
+    Check("每次各算一次的不滚欠账是真口径，不是注释",
+        repoSrc33.Contains("x.CompletionMode != CompletionMode.PerOccurrence"));
+    Check("仓储有阶段性目标创建入口", repoSrc33.Contains("AddContainerAsync"));
+    Check("AI 能建容器与挂子项",
+        models33.Contains("IsStage") && models33.Contains("ParentTitle")
+        && toolsSrc33.Contains("ResolveParentTaskAsync"));
+    Check("父任务找不到时明确报错，不猜", toolsSrc33.Contains("找不到叫"));
+    Check("AI 视野里能看到容器（软件里所有信息 AI 都能看到）",
+        agentSrc33.Contains("GetStagesAsync") && agentSrc33.Contains("stagesText"));
+    Check("提示词明说容器不算今天该做完", agentSrc33.Contains("阶段性目标（容器）"));
+    Check("离线兜底读 Core 判据，不再只靠 StartAt 猜",
+        picker33.Contains("ItemAxes.CanNudge"));
+    Check("界面不给容器/守住类 10 分钟入口",
+        itemVmSrc33.Contains("ItemAxes.CanNudge"));
+    Check("迁移含历史回填，且明说定段回填 0 条",
+        migrations33.Contains("UPDATE items SET Shape = 1")
+        && migrations33.Contains("定段回填 0 条"));
+    Check("迁移没把历史记录擅自改成守住类或每日任务",
+        !migrations33.Contains("VerdictMode = 1")
+        && !migrations33.Contains("CompletionMode = 1"));
+    Check("ItemSnapshot 覆盖三根轴与层级",
+        Read33(Path.Combine("DayManager.Data", "Snapshots", "ItemSnapshot.cs"))
+            .Contains("public ItemShape Shape"));
+    Check("范围守约：主动开口链路没被顺手改掉",
+        !proactiveSrc33.Contains("GetFloatingDeadlinesAsync"));
+
+    try { File.Delete(dbFile33); } catch { }
+}
+
+Console.WriteLine("=== 34. AI 能建「每次各算 / 不判成败」：只补写的一侧 ===");
+
+{
+    var src34 = FindSrcRoot();
+    string Read34(string rel) => src34 is null ? "" : File.ReadAllText(Path.Combine(src34, rel));
+    var models34 = Read34(Path.Combine("DayManager.Api", "Models", "AgentModels.cs"));
+    var tools34 = Read34(Path.Combine("DayManager.Api", "Services", "ItemTools.cs"));
+    var agent34 = Read34(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var mainVm34 = Read34(Path.Combine("DayManager.App", "ViewModels", "MainViewModel.cs"));
+    var page34 = Read34(Path.Combine("DayManager.App", "MainPage.xaml"));
+
+    Check("AiAction 加 repeatsDaily / noVerdict 两个可选布尔",
+        models34.Contains("public bool? RepeatsDaily")
+        && models34.Contains("public bool? NoVerdict"));
+    Check("模型注释说清 RRule 展开仍留白，不许诺排好一周",
+        models34.Contains("不会自动生成后面几天的实例"));
+    Check("noVerdict 写成待遇而不是另一类任务",
+        models34.Contains("它不是另一类任务"));
+    Check("执行器把两个开关透传给创建入口",
+        tools34.Contains("CompletionMode.PerOccurrence")
+        && tools34.Contains("VerdictMode.Never"));
+    Check("开关与定段/容器冲突时明确报错，不静默忽略",
+        tools34.Contains("只能给普通待办"));
+    Check("回喂模型的文案说清建成了什么",
+        tools34.Contains("每次各算一次，漏做当天封账")
+        && tools34.Contains("不判成败，不算今天该做完"));
+    Check("提示词列了两个新参数",
+        agent34.Contains("repeatsDaily（可空）") && agent34.Contains("noVerdict（可空）"));
+    Check("提示词明说现在不会自动生成后面几天",
+        agent34.Contains("现在还不会自动生成后面几天的实例"));
+    Check("提示词不许把 noVerdict 说成新类别",
+        agent34.Contains("别在 reply 里给他安一个新类别的名字"));
+    Check("提示词没出现「守住类」这个实体化名字",
+        !agent34.Contains("守住类"));
+    Check("范围守约：第 34 批没把 AI 那两个开关做成界面入口",
+        !mainVm34.Contains("RepeatsDaily") && !mainVm34.Contains("NoVerdict")
+        && !page34.Contains("repeatsDaily") && !page34.Contains("noVerdict"));
+
+    // 真实临时库：执行器调的是 AddToDayAsync，验证两个开关真能落库、
+    // 以及「不判成败」的那条确实不进今日清单。
+    var dbFile34 = Path.Combine(Path.GetTempPath(), $"dm-smoke-write-side-{Guid.NewGuid():N}.db");
+    var factory34 = new TestFactory(dbFile34);
+    await using (var db34 = factory34.CreateDbContext())
+    {
+        await db34.Database.EnsureCreatedAsync();
+    }
+    var repo34 = new ItemRepository(factory34);
+    var today34 = DateOnly.FromDateTime(DateTime.Today);
+
+    var daily34 = await repo34.AddToDayAsync("冒烟-每天跑5km", today34,
+        completionMode: CompletionMode.PerOccurrence);
+    var quiet34 = await repo34.AddToDayAsync("冒烟-0点上床睡觉", today34,
+        verdictMode: VerdictMode.Never);
+    var plain34 = await repo34.AddToDayAsync("冒烟-普通待办", today34);
+
+    Check("每日任务落库 CompletionMode=PerOccurrence",
+        daily34.CompletionMode == CompletionMode.PerOccurrence
+        && daily34.VerdictMode == VerdictMode.Judged);
+    Check("不判成败落库 VerdictMode=Never",
+        quiet34.VerdictMode == VerdictMode.Never
+        && quiet34.CompletionMode == CompletionMode.Once);
+    Check("没给开关仍是默认（做一次 / 判）",
+        plain34.CompletionMode == CompletionMode.Once
+        && plain34.VerdictMode == VerdictMode.Judged);
+    var list34 = await repo34.GetDayListAsync(today34);
+    Check("每日任务仍进今日清单，不判成败的不进",
+        list34.Any(x => x.Id == daily34.Id)
+        && list34.Any(x => x.Id == plain34.Id)
+        && !list34.Any(x => x.Id == quiet34.Id));
+
+    try { File.Delete(dbFile34); } catch { }
+}
+
+Console.WriteLine("=== 35. 界面能直接建四种形态：一个折叠入口 ===");
+
+{
+    var src35 = FindSrcRoot();
+    string Read35(string rel) => src35 is null ? "" : File.ReadAllText(Path.Combine(src35, rel));
+    var vm35 = Read35(Path.Combine("DayManager.App", "ViewModels", "MainViewModel.cs"));
+    var page35 = Read35(Path.Combine("DayManager.App", "MainPage.xaml"));
+    var tools35 = Read35(Path.Combine("DayManager.Api", "Services", "ItemTools.cs"));
+    var models35 = Read35(Path.Combine("DayManager.Api", "Models", "AgentModels.cs"));
+    var prog35 = Read35(Path.Combine("DayManager.Api", "Program.cs"));
+
+    Check("形态枚举是界面层自己的，四个取值、没有容器/不判成败",
+        vm35.Contains("public enum AddShape")
+        && vm35.Contains("Day = 0") && vm35.Contains("Timed = 1")
+        && vm35.Contains("Deadline = 2") && vm35.Contains("Daily = 3")
+        && !vm35.Contains("VerdictMode.Never"));
+
+    Check("默认是「今天做」，随手打字回车不用多点一下",
+        vm35.Contains("NewItemShape { get; set; } = AddShape.Day"));
+
+    Check("形态按钮文字 / 两个按需展开区都是算出来的",
+        vm35.Contains("public string ShapeButtonText")
+        && vm35.Contains("public bool ShowTimePicker")
+        && vm35.Contains("public bool ShowDatePicker")
+        && vm35.Contains("!IsShapePickerOpen && NewItemShape == AddShape.Timed")
+        && vm35.Contains("!IsShapePickerOpen && NewItemShape == AddShape.Deadline"));
+
+    // 只查真正会渲染的字符串，注释不算：MainPage.xaml 自己的注释里
+    // 就写着 ‹ › 来讲 11-02 那次事故，VM 注释也一样。剥掉注释再扫。
+    var xamlBody35 = Regex.Replace(page35, @"<!--[\s\S]*?-->", "");
+    Check("界面符号只用 ASCII，不用字体里可能缺字形的下拉箭头（11-02 事故）",
+        !xamlBody35.Contains("\u25BE") && !xamlBody35.Contains("\u2039")
+        && !xamlBody35.Contains("\u203A")
+        && vm35.Contains("\"今天 v\"") && vm35.Contains("\"定点 v\"")
+        && vm35.Contains("\"截止日 v\"") && vm35.Contains("\"每天 v\"")
+        && !vm35.Contains("=> \"今天 \u25BE\""));
+
+    Check("提示语跟着形态变，防「我以为在建普通待办」",
+        vm35.Contains("AddShape.Deadline => $\"什么事")
+        && vm35.Contains("AddShape.Daily => \"每天要做的事？\""));
+
+    Check("XAML：形态按钮 + 四个 CommandParameter + 收起时塌成 0 高",
+        page35.Contains("Text=\"{Binding ShapeButtonText}\"")
+        && page35.Contains("Command=\"{Binding ToggleShapePickerCommand}\"")
+        && page35.Contains("Command=\"{Binding PickShapeCommand}\"")
+        && page35.Contains("CommandParameter=\"Timed\"")
+        && page35.Contains("CommandParameter=\"Deadline\"")
+        && page35.Contains("CommandParameter=\"Daily\"")
+        && page35.Contains("IsVisible=\"{Binding IsShapePickerOpen}\""));
+
+    Check("XAML：时间/日期选择器互斥，各绑各的可见性",
+        page35.Contains("IsVisible=\"{Binding ShowTimePicker}\"")
+        && page35.Contains("IsVisible=\"{Binding ShowDatePicker}\"")
+        && page35.Contains("Date=\"{Binding DeadlineDate}\"")
+        && page35.Contains("MinimumDate=\"{Binding DeadlineMinDate}\""));
+
+    Check("XAML：复用已有资源键，没有自造键（第 26 节会全量校对）",
+        page35.Contains("{StaticResource ChipButton}")
+        && !page35.Contains("{StaticResource ShapePickerButton}"));
+
+    Check("旧的「定时」勾选框已彻底移除，没留下死字段",
+        !page35.Contains("UseSpecificTime") && !vm35.Contains("UseSpecificTime"));
+
+    Check("四种形态各走专用创建入口，不靠时间字段反推",
+        vm35.Contains("case AddShape.Timed:")
+        && vm35.Contains("case AddShape.Deadline:")
+        && vm35.Contains("case AddShape.Daily:")
+        && vm35.Contains("_itemRepository.AddDeadlineAsync(")
+        && vm35.Contains("completionMode: CompletionMode.PerOccurrence")
+        && vm35.Contains("AddToDayAsync(title, SelectedDay, NewTime)"));
+
+    Check("每天只建这一条，不硬摊一串（18 条误判的来历）",
+        vm35.Contains("RRule 真实展开还留白")
+        && !vm35.Contains("AddDeadlineAsync(title, SelectedDay"));
+
+    Check("加入后重置回默认形态，连续录入不会串成截止日",
+        vm35.Contains("NewItemShape = AddShape.Day;")
+        && vm35.Contains("IsShapePickerOpen = false;"));
+
+    Check("截止日不许挑过去（新建出来不该一落地就是欠账）",
+        vm35.Contains("public DateTime DeadlineMinDate => DateTime.Today"));
+
+    Check("本轮没给「容器 / 不判成败」入口（用户明确先不给）",
+        !page35.Contains("isStage") && !page35.Contains("noVerdict")
+        && !vm35.Contains("AddContainerAsync") && !vm35.Contains("VerdictMode.Never"));
+
+    Check("范围守约：后端 / 数据层 / 迁移 / 提示词这轮都没动",
+        models35.Contains("public bool? RepeatsDaily")
+        && models35.Contains("public bool? NoVerdict")
+        && tools35.Contains("CompletionMode.PerOccurrence")
+        && prog35.Contains("items.AddToDayAsync(request.Title.Trim(), day, time, ct)")
+        && !models35.Contains("AddShape") && !tools35.Contains("ShapeButtonText"));
+
+    // 真实临时库：把界面四种分流对应的仓储入口各调一遍，
+    // 验证落库的 Shape / CompletionMode / 钟点，而不是只扫源码字符串。
+    var dbFile35 = Path.Combine(Path.GetTempPath(), $"dm-smoke-ui-shapes-{Guid.NewGuid():N}.db");
+    var factory35 = new TestFactory(dbFile35);
+    await using (var db35 = factory35.CreateDbContext())
+    {
+        await db35.Database.EnsureCreatedAsync();
+    }
+    var repo35 = new ItemRepository(factory35);
+    var today35 = DateOnly.FromDateTime(DateTime.Today);
+
+    var day35 = await repo35.AddToDayAsync("冒烟-今天做", today35);
+    var timed35 = await repo35.AddToDayAsync("冒烟-定点", today35, new TimeSpan(14, 30, 0));
+    var ddl35 = await repo35.AddDeadlineAsync("冒烟-只有截止日", today35.AddDays(7));
+    var daily35 = await repo35.AddToDayAsync("冒烟-每天", today35,
+        completionMode: CompletionMode.PerOccurrence);
+
+    Check("今天做 / 定点落库 Shape 正确，定点带 StartAt",
+        day35.Shape == ItemShape.DayTask && day35.StartAt is null
+        && timed35.Shape == ItemShape.Timed && timed35.StartAt is not null);
+    Check("只有截止日落库 Shape=DeadlineOnly，与定日待办能区分",
+        ddl35.Shape == ItemShape.DeadlineOnly
+        && ddl35.Shape != day35.Shape);
+    Check("每天落库 CompletionMode=PerOccurrence，且只有一条",
+        daily35.CompletionMode == CompletionMode.PerOccurrence
+        && daily35.CompletionMode != day35.CompletionMode
+        && (await repo35.GetDayListAsync(today35)).Count(x => x.Id == daily35.Id) == 1);
+    Check("定段常驻带只认 Shape=DeadlineOnly（18 条误判不复发）",
+        ItemPresence.IsFloatingDeadline(ddl35, today35)
+        && !ItemPresence.IsFloatingDeadline(day35, today35)
+        && !ItemPresence.IsFloatingDeadline(daily35, today35));
+
+    try { File.Delete(dbFile35); } catch { }
+}
+
+Console.WriteLine("=== 36. 收分类 + 大任务递归层级：主要是删，不是加 ===");
+
+{
+    var src36 = FindSrcRoot();
+    string Read36(string rel) => src36 is null ? "" : File.ReadAllText(Path.Combine(src36, rel));
+    var tree36 = Read36(Path.Combine("DayManager.Core", "Planning", "ProjectTree.cs"));
+    var axes36 = Read36(Path.Combine("DayManager.Core", "Planning", "ItemAxes.cs"));
+    var enums36 = Read36(Path.Combine("DayManager.Core", "Enums.cs"));
+    var itemSrc36 = Read36(Path.Combine("DayManager.Core", "Entities", "Item.cs"));
+    var repoSrc36 = Read36(Path.Combine("DayManager.Data", "Repositories", "ItemRepository.cs"));
+    var projVm36 = Read36(Path.Combine("DayManager.App", "ViewModels", "ProjectDetailViewModel.cs"));
+    var itemVm36 = Read36(Path.Combine("DayManager.App", "ViewModels", "ItemViewModel.cs"));
+    var page36 = Read36(Path.Combine("DayManager.App", "ProjectDetailPage.xaml"));
+    var agent36 = Read36(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var proactive36 = Read36(Path.Combine("DayManager.Api", "Services", "ProactiveService.cs"));
+
+    // ① 收：容器判据归一到一个答案、停止写空转取值；枚举与列不物理删，兼容历史。
+    Check("容器判据归一：IsContainer 只读 CompletionMode，不再有两个答案",
+        axes36.Contains("public static bool IsContainer(Item item)")
+        && axes36.Contains("item.CompletionMode == CompletionMode.ByChildren")
+        && !axes36.Contains("IsContainer(bool hasChildren"));
+    Check("清单准入与离线点名都走同一个 IsLeaf",
+        axes36.Contains("!IsContainer(item)") && axes36.Contains("&& IsLeaf(item)"));
+    Check("AddContainerAsync 停止写 Unanchored，一律定日 + 无锚",
+        repoSrc36.Contains("停止写入 Unanchored")
+        && repoSrc36.Contains("shape: ItemShape.DayTask,"));
+    Check("不物理删列：Unanchored 枚举值留着兼容历史，Shape 等字段也还在",
+        enums36.Contains("Unanchored") && itemSrc36.Contains("public ItemShape Shape")
+        && itemSrc36.Contains("public Guid? ParentTaskId"));
+
+    // ② ProjectTree 是 Core 纯函数：内存造树就能测，不必落库。
+    Item N36(string title, Guid id, Guid? parent = null,
+        CompletionMode cm = CompletionMode.Once, ItemStatus st = ItemStatus.Pending) =>
+        new Item { Id = id, Title = title, ParentTaskId = parent,
+            CompletionMode = cm, Status = st };
+
+    var r36 = Guid.NewGuid(); var s36 = Guid.NewGuid(); var top36 = Guid.NewGuid();
+    var l1_36 = Guid.NewGuid(); var l2_36 = Guid.NewGuid(); var l3_36 = Guid.NewGuid();
+    var treeItems36 = new List<Item>
+    {
+        N36("根", r36, cm: CompletionMode.ByChildren),
+        N36("顶层叶子", top36),
+        N36("阶段", s36, r36, CompletionMode.ByChildren),
+        N36("做完", l1_36, s36, st: ItemStatus.Done),
+        N36("没做", l2_36, s36),
+        N36("放弃", l3_36, s36, st: ItemStatus.Abandoned),
+    };
+    var rows36 = ProjectTree.Flatten(treeItems36);
+    Check("按 ParentTaskId 组装出 6 行，深度 0 / 1 / 2",
+        rows36.Count == 6
+        && rows36.Single(x => x.Item.Id == r36).Depth == 0
+        && rows36.Single(x => x.Item.Id == s36).Depth == 1
+        && rows36.Single(x => x.Item.Id == l1_36).Depth == 2
+        && rows36.Single(x => x.Item.Id == top36).Depth == 0);
+    Check("深度优先：阶段紧跟父容器，没有跳到别处",
+        rows36[0].Item.Id == r36 && rows36[1].Item.Id == s36);
+    var stageProg36 = ProjectTree.StageProgressOf(treeItems36);
+    Check("阶段进度只数叶子、放弃的不算分母，容器自己也不算",
+        stageProg36[r36].Done == 1 && stageProg36[r36].Total == 2
+        && stageProg36[s36].Done == 1 && stageProg36[s36].Total == 2
+        && !stageProg36.ContainsKey(top36));
+
+    var ca36 = Guid.NewGuid(); var cb36 = Guid.NewGuid();
+    var cyc36 = ProjectTree.Flatten(new List<Item>
+    {
+        N36("环A", ca36, cb36),
+        N36("环B", cb36, ca36),
+    });
+    Check("有环不死循环，两条都补挂顶层没丢",
+        cyc36.Count == 2 && cyc36.All(x => x.Depth <= 1));
+    var orphan36 = Guid.NewGuid();
+    var orph36 = ProjectTree.Flatten(new List<Item> { N36("孤儿", orphan36, Guid.NewGuid()) });
+    Check("父不在这批里时当顶层，绝不凭空丢记录",
+        orph36.Count == 1 && orph36[0].Depth == 0);
+    var chain36 = new List<Item>();
+    Guid? prev36 = null;
+    for (var i = 0; i < 10; i++)
+    {
+        var id36 = Guid.NewGuid();
+        chain36.Add(N36($"L{i}", id36, prev36, CompletionMode.ByChildren));
+        prev36 = id36;
+    }
+    var chainRows36 = ProjectTree.Flatten(chain36);
+    Check("超过 8 层就停，坏记录拖不死界面，深处的也没丢",
+        chainRows36.Count == chain36.Count && chainRows36.Max(x => x.Depth) == 8);
+
+    // ③ 真实临时库：本轮改过 AddContainerAsync，落库形态与三层组装都要真跑一遍。
+    var dbFile36 = Path.Combine(Path.GetTempPath(), $"dm-smoke-tree-{Guid.NewGuid():N}.db");
+    var factory36 = new TestFactory(dbFile36);
+    await using (var db36 = factory36.CreateDbContext())
+    {
+        await db36.Database.EnsureCreatedAsync();
+    }
+    // ProjectId 是外键：先建一个真项目再挂，不能拿随机 Guid 硬塞（会 FOREIGN KEY 失败）。
+    // 生产路径传的是详情页里真实存在的 _projectId，这里复现的就是那条路。
+    var proj36 = Guid.NewGuid();
+    await using (var seed36 = factory36.CreateDbContext())
+    {
+        seed36.Projects.Add(new Project { Id = proj36, Name = "冒烟-树项目" });
+        await seed36.SaveChangesAsync();
+    }
+    var repo36 = new ItemRepository(factory36);
+    var c36 = await repo36.AddContainerAsync("树-根容器", projectId: proj36);
+    var st36 = await repo36.AddContainerAsync("树-第一章", parentTaskId: c36.Id, projectId: proj36);
+    var lf36 = await repo36.AddAsync("树-做题", projectId: proj36,
+        parentTaskId: st36.Id, shape: ItemShape.DayTask);
+    Check("容器落库：定日 + ByChildren + 无截止 + 带项目归属，不写 Unanchored",
+        c36.Shape == ItemShape.DayTask && c36.CompletionMode == CompletionMode.ByChildren
+        && c36.DueAt is null && c36.ProjectId == proj36);
+    Check("阶段挂父容器、叶子挂阶段，三级 ParentTaskId 连起来",
+        st36.ParentTaskId == c36.Id && lf36.ParentTaskId == st36.Id);
+    await using (var read36 = factory36.CreateDbContext())
+    {
+        var all36 = await read36.Items.ToListAsync();
+        Check("容器下平铺的记录能组装成 0 / 1 / 2 三层",
+            ProjectTree.Flatten(all36).Single(x => x.Item.Id == c36.Id).Depth == 0
+            && ProjectTree.Flatten(all36).Single(x => x.Item.Id == st36.Id).Depth == 1
+            && ProjectTree.Flatten(all36).Single(x => x.Item.Id == lf36.Id).Depth == 2);
+    }
+    var dayList36 = await repo36.GetDayListAsync(DateOnly.FromDateTime(DateTime.Today));
+    Check("容器不进今日清单（父子不同时占一格）",
+        !dayList36.Any(x => x.Id == c36.Id || x.Id == st36.Id));
+    try { File.Delete(dbFile36); } catch { }
+
+    // ④ 大任务页：一个平铺 CollectionView，缩进表达层级，容器行不给打勾。
+    var body36 = Regex.Replace(page36, @"<!--[\s\S]*?-->", "");
+    Check("XAML 整行缩进绑 RowPadding，容器不给打勾 / 启动",
+        body36.Contains("Padding=\"{Binding RowPadding}\"")
+        && body36.Contains("IsVisible=\"{Binding IsLeaf}\"")
+        && body36.Contains("IsVisible=\"{Binding ShowTimerButton}\""));
+    Check("XAML 容器行显示下级进度与「往里加」",
+        body36.Contains("Text=\"{Binding StageProgressText}\"")
+        && body36.Contains("IsVisible=\"{Binding HasStageProgress}\"")
+        && body36.Contains("IsVisible=\"{Binding IsContainer}\"")
+        && body36.Contains("PickParentStageCommand"));
+    Check("XAML 一个输入框两种内容，挂靠可一键回顶层",
+        body36.Contains("ToggleAddKindCommand")
+        && body36.Contains("ClearParentStageCommand")
+        && body36.Contains("IsVisible=\"{Binding HasParentStage}\"")
+        && body36.Contains("Placeholder=\"{Binding AddPlaceholder}\"")
+        && body36.Contains("Text=\"{Binding AddKindText}\""));
+    Check("XAML 复用已有资源键，没有自造键（第 26 节全量校对）",
+        body36.Contains("{StaticResource ChipButton}")
+        && body36.Contains("{StaticResource RoundIconButton}")
+        && body36.Contains("{StaticResource Caption}")
+        && body36.Contains("{StaticResource BackButton}")
+        && body36.Contains("{StaticResource DoneGreen}"));
+    Check("界面符号只用 ASCII（11-02 事故），形态按钮是 v 不是缺字形箭头",
+        !body36.Contains("\u25BE") && !body36.Contains("\u2039") && !body36.Contains("\u203A")
+        && projVm36.Contains("\"加阶段 v\"") && projVm36.Contains("\"加任务 v\""));
+    Check("详情页用 Core 纯函数组装树，进度只数叶子",
+        projVm36.Contains("ProjectTree.Flatten(items)")
+        && projVm36.Contains("ProjectTree.StageProgressOf")
+        && projVm36.Contains("RefreshStageProgress()")
+        && projVm36.Contains("Items.Where(x => x.IsLeaf)"));
+    Check("加阶段 / 加任务 / 选父阶段 / 回顶层都有命令",
+        projVm36.Contains("AddContainerAsync(NewTitle.Trim()")
+        && projVm36.Contains("ToggleAddKind") && projVm36.Contains("PickParentStage")
+        && projVm36.Contains("ClearParentStage"));
+    Check("加叶子显式带 projectId，不走写死 null 的 AddToDayAsync（本轮修的坑）",
+        projVm36.Contains("projectId: _projectId")
+        && !projVm36.Contains("_items.AddToDayAsync"));
+    Check("ItemViewModel 同一行复用，只多了树行属性",
+        itemVm36.Contains("public Thickness RowPadding")
+        && itemVm36.Contains("ShowTimerButton") && itemVm36.Contains("HasStageProgress")
+        && itemVm36.Contains("StageProgressText"));
+
+    // ⑤ 减法范围守约：界面仍不给 noVerdict / RRule 展开，主动开口链路没顺手动。
+    Check("界面没给 noVerdict 入口，容器不是新的枚举类型值",
+        !body36.Contains("noVerdict") && !projVm36.Contains("VerdictMode.Never")
+        && !projVm36.Contains("ItemShape.Container"));
+    Check("RRule 真实展开仍留白（提示词里那句没被偷偷做掉）",
+        agent36.Contains("现在还不会自动生成后面几天的实例"));
+    Check("范围守约：主动开口链路没被顺手改掉", !proactive36.Contains("ProjectTree"));
+}
+
+Console.WriteLine();
 Console.WriteLine($"===== 结果：通过 {passed} 项，失败 {failed} 项 =====");
 
 try { File.Delete(dbFile); } catch { }

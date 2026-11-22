@@ -252,6 +252,9 @@ namespace DayManager.Data.Migrations
                     b.Property<long?>("CompletedAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<int>("CompletionMode")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long>("CreatedAt")
                         .HasColumnType("INTEGER");
 
@@ -313,6 +316,9 @@ namespace DayManager.Data.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("Shape")
+                        .HasColumnType("INTEGER");
+
                     b.Property<int>("SkipCount")
                         .HasColumnType("INTEGER");
 
@@ -354,6 +360,9 @@ namespace DayManager.Data.Migrations
                     b.Property<long>("UpdatedAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<int>("VerdictMode")
+                        .HasColumnType("INTEGER");
+
                     b.Property<int>("Version")
                         .HasColumnType("INTEGER");
 
@@ -363,9 +372,13 @@ namespace DayManager.Data.Migrations
 
                     b.HasIndex("DueAt");
 
+                    b.HasIndex("ParentTaskId");
+
                     b.HasIndex("ProjectId");
 
                     b.HasIndex("RecurrenceParentId");
+
+                    b.HasIndex("Shape");
 
                     b.HasIndex("Status");
 
@@ -580,6 +593,10 @@ namespace DayManager.Data.Migrations
 
             modelBuilder.Entity("DayManager.Core.Entities.Item", b =>
                 {
+                    b.HasOne("DayManager.Core.Entities.Item", null)
+                        .WithMany()
+                        .HasForeignKey("ParentTaskId");
+
                     b.HasOne("DayManager.Core.Entities.Project", "Project")
                         .WithMany("Items")
                         .HasForeignKey("ProjectId")

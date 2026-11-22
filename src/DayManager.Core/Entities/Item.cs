@@ -8,10 +8,15 @@ namespace DayManager.Core.Entities;
 /// 【为什么不分成 Event 和 Todo 两张表】
 /// 这是你的选择，也是我认为对的做法。分开两张表意味着：
 /// 两套增删改查代码、两套界面、两套统计逻辑，还得处理"一个事项既是日程又有待办属性"的尴尬。
-/// 合并之后靠"可空的时间字段"来区分形态：
-///   有 start_at/end_at        → 它是个有具体时间的日程（比如"9 点开会"）
-///   只有 due_at 或什么都没有  → 它是个待办（比如"交报告"）
-/// 代价是字段会有空值，收益是代码量减半、逻辑统一。
+/// 合并的代价是字段会有空值，收益是代码量减半、逻辑统一。
+///
+/// 【旧写法已作废：靠可空的时间字段区分形态】
+/// 这里原先写的是「有 start_at → 日程，只有 due_at → 待办」。11-21 出了事故：
+/// 「15 号那天做」和「15 号是最后期限」在库里长得一模一样，
+/// 常驻带靠推断把 18 条按天摊的待办全收了进去。
+/// 根不是判断写得不够细，是**形态从来没被当成数据存过**。
+/// 现在形态由 Shape 显式声明，StartAt / DueAt 只负责「什么时刻」，不负责「这是什么」。
+/// 见 Enums.cs 的 ItemShape 说明。
 /// </summary>
 public class Item : SyncEntityBase
 {
@@ -31,7 +36,30 @@ public class Item : SyncEntityBase
     public ItemKind Kind { get; set; } = ItemKind.MustDo;
 
 
-    // ---------- 时间：三个字段表达所有形态 ----------
+    // ---------- 三根轴：形态 / 完成方式 / 判成败 ----------
+    //
+    // 这三根彼此独立，一条记录在每根上各有一个答案，可以任意组合。
+    // 详见 docs/项目全景.md 与 Enums.cs 里每个枚举的说明。
+
+    /// <summary>
+    /// ① 落哪天（形态）。默认定日，是历史数据回填时最保守的一档。
+    /// 创建入口必须显式赋值，别让调用方靠默认猜。
+    /// </summary>
+    public ItemShape Shape { get; set; } = ItemShape.DayTask;
+
+    /// <summary>
+    /// ③ 怎么算完成。默认做一次；容器写 ByChildren，重复事项写 PerOccurrence。
+    /// </summary>
+    public CompletionMode CompletionMode { get; set; } = CompletionMode.Once;
+
+    /// <summary>
+    /// 判不判成败。默认判；只有「守住」类约束写 Never。
+    /// 「暂时不判」不存，由 Shape=DeadlineOnly + 截止日时间轴算出来。
+    /// </summary>
+    public VerdictMode VerdictMode { get; set; } = VerdictMode.Judged;
+
+
+    // ---------- 时间：只负责「什么时刻」，不负责「这是什么」 ----------
 
     /// <summary>
     /// 开始时间，可空。
@@ -206,13 +234,29 @@ public class Item : SyncEntityBase
     public DateTimeOffset? OriginalStart { get; set; }
 
 
-    // ---------- 两级结构 ----------
+    // ---------- ② 是不是容器：自引用层级 ----------
+    //
+    // ② 不新增枚举，因为「是不是容器」是**关系**不是取值：
+    // 有子项的就是容器，没子项的就是叶子。一个节点既可以是别人的子项、
+    // 又是别人的容器，所以这根轴天生可递归（数学竞赛 → 第一章 → 做题）。
+    //
+    // 【为什么当初留了字段却没启用】
+    // ProjectRepository.cs 开头记着：父子都落在 items 一张表时，
+    // 今日清单会把父子两条都查出来，同一件事在界面上出现两次。
+    // 所以早期改用「项目独立一张表」绕开。现在启用递归，必须同时做到：
+    //   今日清单只出叶子（GetDayListAsync 过滤掉有子项的记录）
+    //   进度 / 完成率分母只数叶子（容器不重复计数）
+    // 这两条是本轮一起落的，别只启用字段不过滤。
 
     /// <summary>所属项目。可空，允许存在不挂在任何项目下的零散任务。</summary>
     public Guid? ProjectId { get; set; }
 
     /// <summary>
-    /// 父任务。用于在任务下面再挂一层子任务（做大目标分解时用，一期界面可以先不做）。
+    /// 父任务（同一张 items 表内的自引用）。非空表示我是某个容器/阶段性目标的下级。
+    /// 阶段性目标本身也是 Item，可以再挂更下一级，深度不固定。
+    ///
+    /// 【注意别和 RecurrenceParentId 混】
+    /// 那个是「重复日程的单次覆盖」，这个是「任务层级」，两个语义完全不同的父子关系。
     /// </summary>
     public Guid? ParentTaskId { get; set; }
 

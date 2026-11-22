@@ -6,6 +6,7 @@ using DayManager.App.Messages;
 using DayManager.App.Services;
 using DayManager.Core.Entities;
 using DayManager.Core.Enums;
+using DayManager.Core.Planning;
 using DayManager.Data.Repositories;
 
 namespace DayManager.App.ViewModels;
@@ -92,6 +93,55 @@ public partial class ProjectDetailViewModel : ObservableObject
     [ObservableProperty]
     public partial bool IsEmpty { get; set; } = true;
 
+    // ---------- 一层层往下挂 ----------
+    //
+    // 界面上只有一个输入框。默认把新条目挂在大任务这一层；
+    // 点某个阶段行的「往里加」，就把这条挂到那个阶段下面，
+    // 于是「大任务 → 第 1 章 → 基本知识 / 做题 / 真题」不用第二个入口。
+    // 容器只是 ParentTaskId 指向的一条普通记录，不是另一张表、也不是新类型。
+
+    /// <summary>当前要挂到哪个阶段下；null = 挂在大任务顶层。</summary>
+    [ObservableProperty]
+    public partial Guid? ParentStageId { get; set; }
+
+    /// <summary>当前父阶段的标题，只用于输入框提示语。</summary>
+    [ObservableProperty]
+    public partial string ParentStageTitle { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial bool IsAddingStage { get; set; }
+
+    public bool HasParentStage => ParentStageId is not null;
+
+    public string AddPlaceholder => IsAddingStage
+        ? (HasParentStage ? $"往「{ParentStageTitle}」里加一个阶段……" : "给这一层起个名字……")
+        : (HasParentStage ? $"往「{ParentStageTitle}」里加一条……" : "加一条子任务，回车就能加上");
+
+    /// <summary>
+    /// 挂靠提示条那句话。
+    ///
+    /// 【为什么在 C# 里拼好，不用 XAML 的 StringFormat】
+    /// StringFormat='...{0}...' 里的花括号在 markup extension 里是特殊字符，
+    /// 而这项目被「XAML 写错 = 编译 0 错 0 警、运行时整页炸」坑过一次（TimePage）。
+    /// 一句话宁可在 VM 里算好，也不往 XAML 里塞可能被误解析的语法。
+    /// </summary>
+    public string ParentStageLabel => $"往「{ParentStageTitle}」里加";
+
+    /// <summary>形态按钮上的字。只用 ASCII，别用字体里可能缺字形的箭头。</summary>
+    public string AddKindText => IsAddingStage ? "加阶段 v" : "加任务 v";
+
+    private void NotifyAddUi()
+    {
+        OnPropertyChanged(nameof(HasParentStage));
+        OnPropertyChanged(nameof(AddPlaceholder));
+        OnPropertyChanged(nameof(ParentStageLabel));
+        OnPropertyChanged(nameof(AddKindText));
+    }
+
+    partial void OnParentStageIdChanged(Guid? value) => NotifyAddUi();
+    partial void OnParentStageTitleChanged(string value) => NotifyAddUi();
+    partial void OnIsAddingStageChanged(bool value) => NotifyAddUi();
+
     partial void OnProjectIdTextChanged(string value)
     {
         if (Guid.TryParse(value, out var id))
@@ -118,13 +168,24 @@ public partial class ProjectDetailViewModel : ObservableObject
         {
             var items = await _projects.GetItemsAsync(_projectId);
 
+            // 平铺的记录在这里组装成带层级的行：缩进表达层级，
+            // 容器行只显示下级进度、没有完成按钮。组装是 Core 的纯函数，
+            // 界面不自己再推一遍「谁挂在谁下面」。
+            var rows = ProjectTree.Flatten(items);
+
             Items.Clear();
-            foreach (var item in items)
+            foreach (var row in rows)
             {
-                Items.Add(new ItemViewModel(item));
+                var vm = new ItemViewModel(row.Item)
+                {
+                    Depth = row.Depth,
+                    IsContainer = ItemAxes.IsContainer(row.Item)
+                };
+                Items.Add(vm);
             }
 
             IsEmpty = Items.Count == 0;
+            RefreshStageProgress();
             UpdateProgress();
 
             // 项目名单独取一次：GetItemsAsync 只给了任务，没带项目实体。
@@ -169,6 +230,7 @@ public partial class ProjectDetailViewModel : ObservableObject
             if (updated is not null)
             {
                 item.Update(updated);
+                RefreshStageProgress();
                 UpdateProgress();
             }
         }
@@ -233,9 +295,25 @@ public partial class ProjectDetailViewModel : ObservableObject
 
         try
         {
-            await _items.AddAsync(NewTitle.Trim(), projectId: _projectId);
+            if (IsAddingStage)
+            {
+                // 阶段性目标是容器：没有完成按钮、不进今日清单、进度由下级汇总。
+                // 复用数据层现成入口，界面不碰 Shape / CompletionMode。
+                await _items.AddContainerAsync(NewTitle.Trim(),
+                    parentTaskId: ParentStageId, projectId: _projectId);
+            }
+            else
+            {
+                // 叶子仍是「挂在今天的一条待办」，只是多了一个 ParentTaskId。
+                // 不能走 AddToDayAsync：那个入口把 projectId 写死成 null，
+                // 新加的叶子就不属于这个项目，GetItemsAsync 按 ProjectId 查不到它。
+                // 这里显式传 shape，形态仍由入口写死，不靠时间字段反推。
+                await _items.AddAsync(NewTitle.Trim(), projectId: _projectId,
+                    parentTaskId: ParentStageId, shape: ItemShape.DayTask);
+            }
 
             // 不清输入框内容的理由和日程页一致：加完之后通常还要接着加下一条。
+            // 挂靠的阶段也留着：连着往同一章里加三条，不该每加一条重选一次。
             NewTitle = string.Empty;
 
             await LoadAsync();
@@ -245,6 +323,34 @@ public partial class ProjectDetailViewModel : ObservableObject
         {
             await ReportErrorAsync(ex);
         }
+    }
+
+    /// <summary>输入框左边那个小按钮：在「加任务 / 加阶段」之间切。</summary>
+    [RelayCommand]
+    private void ToggleAddKind() => IsAddingStage = !IsAddingStage;
+
+    /// <summary>
+    /// 点某个阶段行的「往里加」：把它设成当前父阶段。
+    /// 只有容器行会显示这个按钮（IsContainer），叶子行点不到。
+    /// </summary>
+    [RelayCommand]
+    private void PickParentStage(ItemViewModel item)
+    {
+        if (item is null || !item.IsContainer)
+        {
+            return;
+        }
+
+        ParentStageId = item.Id;
+        ParentStageTitle = item.Title;
+    }
+
+    /// <summary>回到顶层：清空挂靠的阶段。</summary>
+    [RelayCommand]
+    private void ClearParentStage()
+    {
+        ParentStageId = null;
+        ParentStageTitle = string.Empty;
     }
 
     // ================= 改目标日期 =================
@@ -404,15 +510,39 @@ public partial class ProjectDetailViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// 容器行那句「1 / 3 件完成」就地重算，不重查数据库。
+    /// 打勾只改一行，滚动位置不该跳；但容器进度在别的行上，
+    /// 所以拿当前内存里的记录再算一次，两全。
+    /// </summary>
+    private void RefreshStageProgress()
+    {
+        var progress = ProjectTree.StageProgressOf(Items.Select(x => x.Item).ToList());
+        foreach (var vm in Items)
+        {
+            if (!vm.IsContainer)
+            {
+                continue;
+            }
+
+            var (done, total) = progress.GetValueOrDefault(vm.Id);
+            vm.StageProgressText = total == 0
+                ? "还没有子任务"
+                : $"{done} / {total} 件完成";
+        }
+    }
+
     private void UpdateProgress()
     {
         //
-        // 口径和列表页保持一致：放弃的不算进分母。
-        // 两处算法不一样的话，同一个项目在列表页显示 60%、进来显示 75%，
-        // 用户只会觉得这软件算不明白。
+        // 口径和列表页保持一致：只数叶子、放弃的不算分母。
+        // 容器自己没有完成按钮，把它算进分母会让同一件事算两次（父一条 + 子若干条），
+        // 进度条永远走不到 100%。两处算法不一样的话，
+        // 同一个项目在列表页显示 60%、进来显示 75%，用户只会觉得这软件算不明白。
         //
-        var active = Items.Count(x => x.Item.Status != ItemStatus.Abandoned);
-        var done = Items.Count(x => x.IsDone);
+        var leaves = Items.Where(x => x.IsLeaf).ToList();
+        var active = leaves.Count(x => x.Item.Status != ItemStatus.Abandoned);
+        var done = leaves.Count(x => x.IsDone);
 
         ProgressRatio = active == 0 ? 0 : (double)done / active;
         ProgressText = active == 0

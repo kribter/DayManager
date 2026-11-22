@@ -29,6 +29,11 @@ public partial class ChatPage : ContentPage
     /// </summary>
     private CancellationTokenSource? _scrollCts;
 
+    /// <summary>翻更早历史之前记下的滚动位置和内容高度，用来把视口锚回原来那条。</summary>
+    private double _anchorScrollY;
+    private double _anchorHeight;
+    private CancellationTokenSource? _anchorCts;
+
     public ChatPage(ViewModels.ChatViewModel viewModel)
     {
         InitializeComponent();
@@ -37,6 +42,17 @@ public partial class ChatPage : ContentPage
 
         // 新消息来了就滚到底（实现在下面）。
         _viewModel.Messages.CollectionChanged += (_, _) => ScrollToLast();
+
+        // 翻更早的历史是往**顶部**插内容，不是来新消息。
+        // 插之前量一次，插完之后按新增高度把滚动位置补回去，
+        // 否则用户正看着的那条会被顶到屏幕下面去，越翻越找不到刚才读到哪。
+        WeakReferenceMessenger.Default.Register<ChatHistoryPrependStarted>(this, (_, _) =>
+        {
+            _anchorScrollY = MessageScroll.ScrollY;
+            _anchorHeight = MessageStack.Height;
+        });
+
+        WeakReferenceMessenger.Default.Register<ChatHistoryPrepended>(this, (_, _) => RestoreAnchor());
 
         // 回车发送、Shift+回车换行。
         //
@@ -118,9 +134,47 @@ public partial class ChatPage : ContentPage
         MainThread.BeginInvokeOnMainThread(() => Walk(MessageStack));
     }
 
+    /// <summary>
+    /// 插完旧消息后把视口锚回原来那条。
+    /// 跟 ScrollToLast 一样要分几个时间点重试：内容高度是排版之后才涨上来的，
+    /// 只量一次会量到还没排完的旧高度，补偿就少了一截。
+    /// </summary>
+    private void RestoreAnchor()
+    {
+        _scrollCts?.Cancel();
+        _anchorCts?.Cancel();
+        _anchorCts = new CancellationTokenSource();
+        var token = _anchorCts.Token;
+
+        MainThread.BeginInvokeOnMainThread(async () =>
+        {
+            foreach (var wait in new[] { 30, 120, 320 })
+            {
+                try
+                {
+                    await Task.Delay(wait, token);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+
+                var grown = MessageStack.Height - _anchorHeight;
+                if (grown <= 0)
+                {
+                    continue;
+                }
+
+                await MessageScroll.ScrollToAsync(0, _anchorScrollY + grown, false);
+            }
+        });
+    }
+
     private void ScrollToLast()
     {
-        if (_viewModel.Messages.Count == 0)
+        // 往顶部插旧消息不是"来了新消息"，千万别滚到底——
+        // 那正好把用户刚翻到的位置丢掉。
+        if (_viewModel.IsPrepending || _viewModel.Messages.Count == 0)
         {
             return;
         }

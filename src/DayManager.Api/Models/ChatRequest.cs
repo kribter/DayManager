@@ -77,6 +77,20 @@ public sealed class ChatMessage
     public string Role { get; set; } = "user";
 
     public string Content { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 这句话是什么时候说的（客户端带过来，ISO 8601）。
+    ///
+    /// 【为什么加它】
+    /// 历史原先以纯文本进模型，它只看到一个「现在 HH:mm」，
+    /// 不知道每条是几点说的、隔了多久——于是把昨晚深夜的话和今早的当成
+    /// 连续一场，上午还接着说晚安。时间必须由代码算好、随消息带过来。
+    ///
+    /// 【为什么可以放心加】
+    /// 发给上游时 AiProxy 只投影 role/content 两个字段，这个字段不会外泄，
+    /// 也不会污染上游协议。它只在后端拼提示词时用。
+    /// </summary>
+    public DateTimeOffset? CreatedAt { get; set; }
 }
 
 /// <summary>

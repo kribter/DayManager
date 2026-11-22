@@ -198,7 +198,14 @@ public sealed class ApiClient
     {
         var payload = new
         {
-            messages = messages.Select(x => new { role = x.Role, content = x.Content }).ToList(),
+            // createdAt 随每条历史带过去：后端要用它算「隔了多久 / 是不是跨了一夜」，
+            // 由代码算好再喂给模型，而不是让它自己从「现在 HH:mm」去推。
+            messages = messages.Select(x => new
+            {
+                role = x.Role,
+                content = x.Content,
+                createdAt = x.CreatedAt
+            }).ToList(),
             today = today?.ToString("yyyy-MM-dd"),
             ai = AiPayload()
         };
@@ -591,9 +598,13 @@ public sealed class ChatMessageDto
     public string Role { get; set; } = "user";
     public string Content { get; set; } = string.Empty;
 
-    public static ChatMessageDto System(string content) => new() { Role = "system", Content = content };
-    public static ChatMessageDto User(string content) => new() { Role = "user", Content = content };
-    public static ChatMessageDto Assistant(string content) => new() { Role = "assistant", Content = content };
+    /// <summary>这句话是什么时候说的。历史消息由气泡带出来；拆解那类无历史的请求留空即可。</summary>
+    public DateTimeOffset? CreatedAt { get; set; }
+
+    // createdAt 做成可选参数：TaskDecomposer 那些没有真实历史的地方照旧调用，不受影响。
+    public static ChatMessageDto System(string content, DateTimeOffset? createdAt = null) => new() { Role = "system", Content = content, CreatedAt = createdAt };
+    public static ChatMessageDto User(string content, DateTimeOffset? createdAt = null) => new() { Role = "user", Content = content, CreatedAt = createdAt };
+    public static ChatMessageDto Assistant(string content, DateTimeOffset? createdAt = null) => new() { Role = "assistant", Content = content, CreatedAt = createdAt };
 }
 
 /// <summary>

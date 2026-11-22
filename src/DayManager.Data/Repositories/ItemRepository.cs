@@ -103,6 +103,12 @@ public class ItemRepository
         // ② 截止在这一天但还没做完的待办。
         //    今天和过去的日子要把逾期的旧账一起带上（否则欠账会永远停在过去某天），
         //    未来的日子只显示"那天到期"的东西——未来是给人排计划的，不是给人看账单的。
+        //
+        //    【每次各算一次的不滚欠账】
+        //    PerOccurrence（每日任务）漏做的那次当天封账：只在它自己那一天出现，
+        //    过了那天不再滚进今天。否则每天漏一次、往后每天多一条，
+        //    正好堆出「完不成 → 挫败 → 开摆」。这条是口径，不是新状态机：
+        //    RRule 那套「每天真的生成一次实例」仍留白，本轮只保证不欠账、不翻旧账。
         var due = isFuture
             ? db.Items.Where(x =>
                 x.StartAt == null
@@ -115,7 +121,9 @@ public class ItemRepository
                 && x.DueAt != null
                 && x.DueAt < dayEnd
                 && x.Status != ItemStatus.Done
-                && x.Status != ItemStatus.Abandoned);
+                && x.Status != ItemStatus.Abandoned
+                && (x.CompletionMode != CompletionMode.PerOccurrence
+                    || x.DueAt >= dayStart));
 
         // ③ 在这一天被做完的记录（做完也不从这一天的画面上消失）
         var completedThatDay = db.Items.Where(x =>
@@ -169,6 +177,12 @@ public class ItemRepository
             // 先用 GroupBy 去掉 UNION ALL 带来的重复行，否则同一条任务会显示两次
             .GroupBy(x => x.Id)
             .Select(g => g.First())
+            // 三根轴读出来的准入判据，和「跳过」的判定一起放内存做：
+            // 容器（ByChildren）没有完成按钮、进度由叶子汇总，不能进今天清单，
+            // 否则父子两条同时出现、完成率分母把同一件事算两次；
+            // 守住类（Never）压根不判成败，也不该占一格。
+            // 分母就是这份清单（GetDayStatsAsync），所以这一处同时管住了分母。
+            .Where(x => ItemAxes.EntersDayList(x))
             // "跳过"的判定放在内存里做：
             // 它需要拿 SkippedAt 和"这一天"比较，写成自定义方法 EF 翻译不了，
             // 而一天的清单是几十条，内存过滤的代价可以忽略。
@@ -177,6 +191,115 @@ public class ItemRepository
             .ThenBy(x => x.StartAt ?? x.DueAt ?? x.CreatedAt)
             .ThenBy(x => x.SortOrder)
             .ToList();
+    }
+
+    /// <summary>
+    /// 回顾用：取「那一天实际发生了什么」，给 AI 拼过去几天的背景。
+    ///
+    /// 【为什么不直接用 GetDayListAsync】
+    /// 那个方法是**界面翻页**的口径：今天和过去的日子会把所有逾期未完成的
+    /// 旧账一并带上（② 的条件是 DueAt &lt; 那天结束，没有下界）。
+    /// 单看一天没问题，但把连续 7 天逐日拼进提示词时，同一条欠账会出现 7 次——
+    /// 模型会当成 7 件同名的事，或者觉得这人欠了一堆账，而它其实只有一条，
+    /// 且已经并进【今天的清单】了。
+    ///
+    /// 回顾要的是「那天发生过什么」，不是「那天界面上挂着什么」，所以只取两类：
+    ///   ① 有具体钟点落在那一天的日程（做没做完都算，那是那天真安排过的事）
+    ///   ② 在那天被做完的记录（哪怕它是更早创建的待办，做完发生在那天）
+    /// 逾期未完成的旧账、没定时间的零散待办、跳过回来的，一律不在这里重复列。
+    /// 它们的归宿是今天，那段本来就会喂给模型。
+    ///
+    /// 【为什么要 Concat 再 GroupBy】
+    /// 同一条可能同时满足 ① 和 ②（当天排、当天做完），UNION ALL 不去重；
+    /// 和 GetDayListAsync 保持同一套写法，口径好对照。
+    /// </summary>
+    public async Task<List<Item>> GetDayReviewAsync(DateOnly day, CancellationToken ct = default)
+    {
+        var dayStart = StartOfDayAsLocalOffset(day);
+        var dayEnd = dayStart.AddDays(1);
+
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var scheduledThatDay = db.Items.Where(x =>
+            x.StartAt >= dayStart
+            && x.StartAt < dayEnd
+            && x.Status != ItemStatus.Abandoned);
+
+        var completedThatDay = db.Items.Where(x =>
+            x.CompletedAt >= dayStart
+            && x.CompletedAt < dayEnd
+            && x.Status != ItemStatus.Abandoned);
+
+        var items = await scheduledThatDay
+            .Concat(completedThatDay)
+            .ToListAsync(ct);
+
+        return items
+            .GroupBy(x => x.Id)
+            .Select(g => g.First())
+            .OrderBy(x => x.StartAt ?? x.CompletedAt ?? x.CreatedAt)
+            .ThenBy(x => x.SortOrder)
+            .ToList();
+    }
+
+    /// <summary>
+    /// 「一直悬着、还没到截止日的事」—— 常驻带的取数。
+    ///
+    /// 【为什么单独开一个查询，而不是并进 GetDayListAsync】
+    /// 完成率的分母就是 GetDayListAsync 的结果（见 GetDayStatsAsync）。
+    /// 常驻项一旦混进那份清单，就会天天被算成「今天又没做完的一件」，
+    /// 正是 5.2 里最要避免的「天天出现天天没做，三天后一串欠账」。
+    /// 分开查，分母一行都不用改，天然不含它们；界面也能干净地分两带。
+    ///
+    /// 【为什么粗筛第一句必须是 Shape】
+    /// 11-21 的 18 条误判就出在这里：旧版粗筛「StartAt 空 + DueAt 在未来」，
+    /// 把一批按天摊出来的定日待办全收了进来。现在只读 Shape == DeadlineOnly，
+    /// 那是创建时写死的声明；历史数据回填后没有一条是定段，带子直接空。
+    /// 判定本身仍在 Core 里只有一处，界面、统计、AI、冒烟共用。
+    ///
+    /// 【为什么不带 day 参数，只认「今天」】
+    /// 常驻带说的是「每天打开软件，今天这一栏都看得见」，
+    /// 不是「翻到未来每个日期都要重复列一遍」——那又会变成每天挂同一串。
+    /// 翻到某一天看的是那天该做完什么，仍走 GetDayListAsync。
+    /// </summary>
+    public async Task<List<Item>> GetFloatingDeadlinesAsync(DateOnly today, CancellationToken ct = default)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        // 粗筛：Shape 是 EF 能直接翻成 SQL 的列条件，也是这次修误判的关键。
+        // 到没到期、做没做完这些边界仍交给 ItemPresence 精筛，别抄第二遍。
+        var candidates = await db.Items
+            .Where(x =>
+                x.Shape == ItemShape.DeadlineOnly
+                && x.DueAt != null
+                && x.Status != ItemStatus.Done
+                && x.Status != ItemStatus.Abandoned)
+            .ToListAsync(ct);
+
+        return candidates
+            .Where(x => ItemPresence.IsFloatingDeadline(x, today))
+            // 越近的越靠前：先看见快到期的，不是按创建先后埋在一堆里。
+            .OrderBy(x => x.DueAt)
+            .ThenBy(x => x.CreatedAt)
+            .ToList();
+    }
+
+    /// <summary>
+    /// 阶段性目标（容器）清单。它们不进今日清单，但 AI 必须看得见：
+    /// 「软件里所有信息 AI 都能看到」是硬口径，容器被 EntersDayList 过滤掉之后，
+    /// 少了这一路查询，模型就会以为用户从没建过这个阶段。
+    /// 只列还在进行的（做完 / 放弃的容器不占视野）。
+    /// </summary>
+    public async Task<List<Item>> GetStagesAsync(CancellationToken ct = default)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        return await db.Items
+            .Where(x => x.CompletionMode == CompletionMode.ByChildren
+                        && x.Status != ItemStatus.Done
+                        && x.Status != ItemStatus.Abandoned)
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
     }
 
     /// <summary>
@@ -293,7 +416,8 @@ public class ItemRepository
     /// 两个都在反而说不清它到底算"到点要做"还是"当天要做完"。
     /// </summary>
     public async Task<Item> AddToDayAsync(string title, DateOnly day, TimeSpan? startTime = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default, CompletionMode? completionMode = null,
+        VerdictMode? verdictMode = null, Guid? parentTaskId = null)
     {
         DateTimeOffset? startAt = startTime is null
             ? null
@@ -301,7 +425,50 @@ public class ItemRepository
 
         DateTimeOffset? dueAt = startAt is null ? DateHelper.EndOfDay(day) : null;
 
-        return await AddAsync(title, startAt, dueAt, null, ct);
+        // 有钟点 = 定点，没钟点 = 定日。形态在这里写死，不再让下游靠 StartAt 猜。
+        return await AddAsync(title, startAt, dueAt, null, ct,
+            shape: startAt is null ? ItemShape.DayTask : ItemShape.Timed,
+            completionMode: completionMode, verdictMode: verdictMode, parentTaskId: parentTaskId);
+    }
+
+    /// <summary>
+    /// 新建一个阶段性目标（容器）下的一条子任务。② 可递归的落地入口：
+    /// 容器本身也是 Item，所以它自己也可以作为 parentTaskId 再挂一层。
+    /// 容器自己写 CompletionMode=ByChildren，不进今日清单、不进完成率分母。
+    /// </summary>
+    public Task<Item> AddContainerAsync(string title, DateOnly? dueDay = null,
+        Guid? parentTaskId = null, Guid? projectId = null, CancellationToken ct = default)
+    {
+        // 形态一律写定日：容器本来就不进清单（ItemAxes.EntersDayList 过滤），
+        // Shape 对它没有意义，早先按「有没有截止日」在 Unanchored / DayTask 之间挑，
+        // 只是又多写一个库里 0 条的空转取值。11-22 收分类时停止写入 Unanchored，
+        // 枚举值留着兼容历史，不物理删。
+        return AddAsync(title, null, dueDay is { } d ? DateHelper.EndOfDay(d) : null,
+            projectId, ct,
+            shape: ItemShape.DayTask,
+            completionMode: CompletionMode.ByChildren,
+            parentTaskId: parentTaskId,
+            keepNoDueAt: dueDay is null);
+    }
+
+    /// <summary>
+    /// 新建一条「只有截止日的事」—— 第三种形态的专用入口。
+    ///
+    /// 【为什么不再转调 AddToDayAsync】
+    /// 11-21 的事故根就在这里：旧版两个入口落库长得一模一样，
+    /// 形态只能靠推断，于是常驻带把 18 条定日待办全收了进去。
+    /// 现在这里显式写 Shape = DeadlineOnly，两者在库里第一次能被区分。
+    /// 数据仍然只是 StartAt 空 + DueAt = 截止日最后一刻（三条完成语义靠时间轴滑动），
+    /// 差别在那一列声明，不是新状态机。
+    ///
+    /// 【为什么不摊派、不给具体钟点】
+    /// 给了 StartAt 就变成定点日程；摊到各天就变成一串定日待办。
+    /// 两者都会把「最晚这天，中间哪天做都行」讲成「那天才需要面对」。
+    /// </summary>
+    public Task<Item> AddDeadlineAsync(string title, DateOnly deadline, CancellationToken ct = default)
+    {
+        return AddAsync(title, null, DateHelper.EndOfDay(deadline), null, ct,
+            shape: ItemShape.DeadlineOnly);
     }
 
     /// <summary>
@@ -311,9 +478,17 @@ public class ItemRepository
     /// 因为用户调研得到的结论是：没有具体时间的待办会被无限期推迟。
     /// 默认挂到今天，至少它会待在今天的清单上，
     /// 今晚回顾时你不得不面对它：要么做，要么明确改期，要么删掉——不能装看不见。
+    ///
+    /// 【shape / completionMode / verdictMode / parentTaskId 为什么都是可选末尾参数】
+    /// 冒烟和老调用方大量用位置参数 AddAsync("x", null, now)，签名不能动。
+    /// 但所有「正经入口」都必须显式传 shape：不传时按时间兜底推断，
+    /// 只用于测试夹具和历史兼容，生产路径别依赖这个兜底。
     /// </summary>
     public async Task<Item> AddAsync(string title, DateTimeOffset? startAt = null, DateTimeOffset? dueAt = null,
-        Guid? projectId = null, CancellationToken ct = default)
+        Guid? projectId = null, CancellationToken ct = default,
+        ItemShape? shape = null, CompletionMode? completionMode = null,
+        VerdictMode? verdictMode = null, Guid? parentTaskId = null,
+        bool keepNoDueAt = false)
     {
         if (string.IsNullOrWhiteSpace(title))
         {
@@ -326,8 +501,16 @@ public class ItemRepository
         {
             Title = title.Trim(),
             StartAt = startAt,
-            // 没指定任何时间时，默认截止到今晚最后一刻，保证它一定出现在今天的清单里
-            DueAt = dueAt ?? (startAt == null ? EndOfToday() : null),
+            // 没指定任何时间时，默认截止到今晚最后一刻，保证它一定出现在今天的清单里。
+            // keepNoDueAt 只对容器开：容器不进清单，不该被这个兜底硬塞一个今天的截止日，
+            // 否则「无锚的阶段性目标」在数据上看起来像一条今天到期的事。
+            DueAt = dueAt ?? (startAt == null && !keepNoDueAt ? EndOfToday() : null),
+
+            // 兜底推断只按时间字段，且只服务没传 shape 的老调用。
+            Shape = shape ?? (startAt is not null ? ItemShape.Timed : ItemShape.DayTask),
+            CompletionMode = completionMode ?? CompletionMode.Once,
+            VerdictMode = verdictMode ?? VerdictMode.Judged,
+            ParentTaskId = parentTaskId,
 
             // 挂到某个大任务下面。在大任务详情页里加子任务时传过来。
             //

@@ -78,6 +78,24 @@ public sealed class AgentService
     /// </summary>
     private const int UpcomingDays = 7;
 
+    /// <summary>
+    /// 默认往前带几天的回顾。和 UpcomingDays 对称，省得解释"为什么只有未来没有过去"。
+    ///
+    /// 【为什么回顾不是把界面那 7 天照抄过来】
+    /// 界面翻页口径会把所有逾期未完成的旧账并进每一天，逐日拼 7 天就是
+    /// 同一条欠账出现 7 次。回顾走 GetDayReviewAsync，只记那天实际发生了什么。
+    /// </summary>
+    private const int ReviewDays = 7;
+
+    /// <summary>
+    /// 最多允许几次「查完再答」的回喂。1 = 最多两次模型调用。
+    ///
+    /// 【为什么必须封顶】
+    /// 模型可能每一轮都再发一个 query（觉得还没看够），不封顶就是无限烧 token。
+    /// 一次查询已经能覆盖 31 天，足够回答"更早的某天有什么"。
+    /// </summary>
+    private const int MaxQueryRounds = 1;
+
     public AgentService(
         AiProxy proxy,
         ItemTools tools,
@@ -110,6 +128,17 @@ public sealed class AgentService
         var items = await _items.GetDayListAsync(day, ct);
         var stats = await _items.GetDayStatsAsync(day, ct);
 
+        // 「一直悬着、还没到截止日的事」单独取。它们不在【今天的清单】里
+        // （不算今天该做完），可 AI 必须看得见：5.2 定了这类事允许提醒、给动力，
+        // 而且「软件里所有信息 AI 都能看到」是已经修过的口径。
+        // 走同一个 GetFloatingDeadlinesAsync，界面和 AI 才是同一份事实。
+        var floating = await _items.GetFloatingDeadlinesAsync(day, ct);
+
+        // 阶段性目标（容器）同样不进今日清单，但也得让模型看见：
+        // 否则他刚说过「第一章」，下一句问「我那个竞赛拆到哪了」，
+        // AI 会答「没看到」，正好破坏「软件里所有信息 AI 都能看到」。
+        var stages = await _items.GetStagesAsync(ct);
+
         // 未来几天。
         //
         // 【为什么一天一天地查，而不是写一个"查某段日期"的新方法】
@@ -125,20 +154,58 @@ public sealed class AgentService
             upcoming.Add(new DayList(future, await _items.GetDayListAsync(future, ct)));
         }
 
+        // 过去几天的回顾。走的是 GetDayReviewAsync（那天实际发生了什么），
+        // 不是界面翻页口径——后者会把同一条逾期欠账在 7 天里各带一遍。
+        var review = new List<DayList>();
+        for (var i = ReviewDays; i >= 1; i--)
+        {
+            var past = day.AddDays(-i);
+            review.Add(new DayList(past, await _items.GetDayReviewAsync(past, ct)));
+        }
+
         // ---------- ② 拼提示 ----------
+
+        var now = DateTime.Now;
+        // 先物化一次：下面既要逐条标注，又要从「当前这句之前」算出距上次说话多久。
+        var recentHistory = history.Skip(Math.Max(0, history.Count - 20)).ToList();
 
         var messages = new List<ChatMessage>
         {
-            new() { Role = "system", Content = await BuildSystemPrompt(day, items, stats, upcoming, ct) }
+            new() { Role = "system", Content = await BuildSystemPrompt(day, items, stats, upcoming, review, floating, stages, ct) }
         };
 
         // 只带最近几轮历史：全部带上的话，聊久了 token 会失控，
         // 而真正影响当前判断的只有最近这几句。
         // （更长的历史压缩进 daily_context 是 M9 的事）
-        foreach (var m in history.Skip(Math.Max(0, history.Count - 20)))
+        //
+        // 【为什么每条要打时间标注】
+        // 纯文本历史会让模型把昨晚深夜和今早当成连续一场（实测上午 10:57 还在说晚安）。
+        // "隔了一夜 / 这条是几点说的"必须由代码算好、写成看得见的字，
+        // 而不是留一个「现在 HH:mm」让它自己减。标注由 ChatTime 统一生成，
+        // 主动开口链路用的是同一个函数，口径只有一份。
+        foreach (var m in recentHistory)
         {
-            messages.Add(m);
+            messages.Add(new ChatMessage
+            {
+                Role = m.Role,
+                Content = ChatTime.Mark(m.Content, m.CreatedAt, now),
+                CreatedAt = m.CreatedAt
+            });
         }
+
+        // 【为什么坐标段要单列一条、且放在历史之后】
+        // 模型对靠后的指令权重最高（项目里实测过多次）。把"现在是上午 /
+        // 距上次说话隔了多久 / 旧状态默认过期"写成一段硬事实放在这里，
+        // 是吃饭事件（18:03 去吃饭、20:10 还劝饭先吃）和催睡觉的直接解药。
+        // 最后一条是用户本次说的这句，所以"上一句话"取它之前的最后一条有时间的。
+        var lastBeforeCurrent = recentHistory.Count >= 2
+            ? recentHistory.Take(recentHistory.Count - 1).LastOrDefault(x => x.CreatedAt.HasValue)?.CreatedAt
+            : null;
+        messages.Add(new ChatMessage
+        {
+            Role = "system",
+            Content = ChatTime.Coordinate(now, lastBeforeCurrent)
+        });
 
         // 【为什么格式要求要在最后再说一遍】
         // 模型对**靠后**的指令权重最高。系统提示写在最前面，
@@ -174,117 +241,87 @@ public sealed class AgentService
             MaxTokens = 8000
         };
 
-        // ---------- ③ 调模型（空内容时最多补两次，最后一次换姿势） ----------
-
-        var upstream = await _proxy.ChatAsync(request, ct);
-
-        // 网络闪断、上游 5xx/限流：隔半秒重发一次多半就好。
-        // 直接报错的后果是用户看到"AI 挂了"，其实只是闪了一下。
-        if (!upstream.Success && IsTransientStatus(upstream.StatusCode))
-        {
-            await Task.Delay(500, ct);
-            upstream = await _proxy.ChatAsync(request, ct);
-        }
-
-        if (!upstream.Success)
-        {
-            return AgentResult.Failed($"调用 AI 失败：{upstream.Body}");
-        }
-
-        var content = ExtractContent(upstream.Body);
-
-        // ---------- ③b 空内容：原样重试一次，再不行就摘掉 json 模式 ----------
+        // ---------- ③ 调模型：可能调两次（第一次只是「我要查一下」） ----------
         //
-        // 【为什么会空】
-        // 偶发，且和输入无关——同一句话隔几分钟重发就好（2026-10-27 实测：
-        // 用户连着三条得到空回复，同一句话事后原样重放八次全部成功）。
-        // 上游不解释原因，只能记下 finish_reason 和 token 用量攒规律
-        // （现在落 logs/api-ai.log——控制台随进程消失，App 拉起的后端根本没人看得见）。
+        // 【为什么这里成了循环】
+        // 默认视野是「过去 7 天 + 今天 + 未来 7 天」。窗口外的日子模型看不到，
+        // 但它可以声明一个只读的 query 动作，系统查完把清单回喂，它再出最终答复。
+        // 这就是文档里 L1「工具结果回喂」的第一道门，也是「用户能看到的 AI 都能看到」
+        // 这条原则第一次真正落地。查询只读：不写库、不进撤销批次、不经过 ItemTools。
         //
-        // 【为什么第二次要摘掉 json 模式】
-        // 第一次重发赌的是"偶发"；再空，说明这种输入在这种模式下大概率一直空——
-        // json_object 配推理模型本就有偶发空输出的毛病。
-        // 摘掉之后模型自由发挥：提示词里本来就要求输出 JSON，它多半还是会给；
-        // 真给了纯文本，下面的解析兜底也会把原话当回复带出来，比"没接住"强得多。
-        //
-        // 【为什么不再拿 reasoning_content 顶替】
-        // 那是模型对自己说的话，显示出来就是"AI 在自言自语"（D17）。
-        // 空就是空，给一句能接住的话，比给人看内心独白强。
-        for (var attempt = 2; attempt <= 3 && string.IsNullOrWhiteSpace(content); attempt++)
-        {
-            LogEmpty("空内容，重试", upstream, attempt);
-            await Task.Delay(400, ct);
+        // 【为什么要有上限】
+        // 模型可能每轮都再发一个 query（觉得还没看够），不封顶就是无限烧 token。
+        // 所以最多回喂 MaxQueryRounds 次；到上限仍要查，就忽略 query 直接给答复。
+        AgentReply? reply = null;
 
-            if (attempt == 3)
+        for (var round = 0; round <= MaxQueryRounds; round++)
+        {
+            var once = await CallOnceAsync(request, ct);
+            if (once.Error is not null)
             {
-                request.JsonMode = false;
+                return AgentResult.Failed(once.Error);
             }
 
-            upstream = await _proxy.ChatAsync(request, ct);
-            if (!upstream.Success)
+            var content = once.Content!;
+
+            // 解析：JSON 里截一段、或干脆是纯文本，两条兜底都留着。
+            var parsed = ParseReply(content);
+            if (parsed is null)
+            {
+                // 它压根没按格式来，把原话当回复。这种轮次不会有 query。
+                return new AgentResult
+                {
+                    Success = true,
+                    Reply = CleanReply(content.Trim()),
+                    Outcomes = new List<ActionOutcome>(),
+                    BatchId = null,
+                    Suggestions = null
+                };
+            }
+
+            reply = parsed;
+
+            var queries = parsed.Actions.Where(IsQuery).ToList();
+            if (queries.Count == 0 || round == MaxQueryRounds)
             {
                 break;
             }
 
-            content = ExtractContent(upstream.Body);
-        }
+            // 【为什么这一轮的其它动作一律不执行】
+            // 它同时说「我要查」和「把那条删了」时，那个写动作是基于**还没查到**的信息做的。
+            // 先读后写：这一轮只当查询请求，查完让它重新给一次完整的 actions。
+            var queryText = await RunQueriesAsync(queries, ct);
 
-        if (string.IsNullOrWhiteSpace(content))
-        {
-            if (!upstream.Success)
+            // 把它这一轮的原话接回去，再接上系统查回来的结果。
+            // 两条都只在本次请求里，不进对话记录——不是任何人说过的话。
+            // 【为什么还要补一条格式提醒】
+            // 模型对靠后的指令权重最高（项目里实测过多次）。末尾这条既说清
+            // 「现在才是最终答复」，也把格式再压一遍，免得它把查库结果复述给用户。
+            // assistant 那条只是它自己申请查询时写下的 JSON，不是对用户说过的话。
+            // 不说破，第二轮它可能以为"我已经回过他了"，于是回一句空话或不肯重写 actions。
+            messages.Add(new ChatMessage { Role = "assistant", Content = content });
+            messages.Add(new ChatMessage
             {
-                return AgentResult.Failed($"调用 AI 失败：{upstream.Body}");
-            }
-
-            LogEmpty("三次都空，放弃", upstream, 4);
-
-            // 文案里不提 max_tokens：那只是我们内部的猜测，
-            // 而且多数时候不是真相。用户需要的是"下一步该干嘛"，不是一份故障报告。
-            return AgentResult.Failed("这一句 AI 没有接住。换个说法再说一次？");
+                Role = "system",
+                Content = "【系统按你的要求查回来的清单】\n" + queryText
+                    + "\n\n上面是系统查库的真实结果，不是他说的原话。"
+                    + "紧接着那条 assistant 消息只是你刚才申请查询时写的东西，**不算你已经回答过他**。"
+                    + "现在给出**最终**答复：仍按原来的 JSON 格式，reply 放你要对他说的那句话，"
+                    + "actions 里放这次真正要做的改动（刚才那一轮的其它动作没有执行，要重新给）。"
+                    + "不要再发 query。写着「空」、或没列出来的日子，就直说那天没有安排，不要编。"
+                    + "不要把查库结果、你的判断或任何格式说明写进 reply。"
+            });
+            request.Messages = messages;
+            request.JsonMode = true;
         }
 
-        // ---------- ④ 解析它想做什么 ----------
-
-        AgentReply? reply;
-        try
-        {
-            reply = JsonSerializer.Deserialize<AgentReply>(content, JsonOpts);
-        }
-        catch (JsonException)
-        {
-            // 兜底一：它可能前后带了别的话（"好的，结果是：{...}"），
-            // 把中间那段 JSON 截出来再试一次。
-            reply = TryExtractJson(content);
-        }
-
-        // 兜底二：它压根没按格式来。
-        //
-        // 【为什么这不是故障，而是正常情况】
-        // 实测：用户说"你只要回一句话确认收到"，它就真只回了一句话——
-        // 纯中文，没有大括号。模型在"听用户的话"和"守输出格式"之间选了前者，
-        // 而这个选择是合理的：那种时候本来也没有要执行的动作。
-        //
-        // 【为什么不报错】
-        // 报"AI 返回的不是 JSON"的后果是：明明有内容，界面上却显示一句故障提示，
-        // 用户会以为 AI 挂了。把它说的话原样当回复，才是这一轮真实发生的事。
-        // 只要它想改数据，就会老老实实给 JSON（那时候 JSON 是它唯一的表达方式）。
-        if (reply is null)
-        {
-            return new AgentResult
-            {
-                Success = true,
-                Reply = CleanReply(content.Trim()),
-                Outcomes = new List<ActionOutcome>(),
-                BatchId = null,
-                Suggestions = null
-            };
-        }
-
-        // ---------- ⑤ 执行 ----------
-
-        var (outcomes, batchId) = reply.Actions.Count == 0
-            ? (new List<ActionOutcome>(), null)
-            : await _tools.ExecuteAsync(reply.Actions, Summarize(reply.Actions), ct);
+        // ---------- ④ 执行 ----------
+        // query 是只读动作，ItemTools 不认识它，必须在这里剔掉，
+        // 否则会多出一条「不认识这个操作」的失败结果显示给他看。
+        var actions = reply!.Actions.Where(a => !IsQuery(a)).ToList();
+        var (outcomes, batchId) = actions.Count == 0
+            ? (new List<ActionOutcome>(), (Guid?)null)
+            : await _tools.ExecuteAsync(actions, Summarize(actions), ct);
 
         var said = CleanReply(reply.Reply);
 
@@ -310,6 +347,157 @@ public sealed class AgentService
     private static string CleanReply(string reply) => ReplyCleaner.Clean(reply);
 
     /// <summary>
+    /// 调一次模型，把「网络重试 + 空内容重试」都收在这里，返回 content 或失败原因。
+    ///
+    /// 【为什么单独抽出来】
+    /// 加了「查完再答」之后，一轮对话最多会调 MaxQueryRounds+1 次模型。
+    /// 两轮必须走同一套重试和空内容兜底，复制一遍迟早只改了一边。
+    /// </summary>
+    private async Task<(string? Content, string? Error)> CallOnceAsync(ChatRequest request, CancellationToken ct)
+    {
+        var upstream = await _proxy.ChatAsync(request, ct);
+
+        // 网络闪断、上游 5xx/限流：隔半秒重发一次多半就好。
+        if (!upstream.Success && IsTransientStatus(upstream.StatusCode))
+        {
+            await Task.Delay(500, ct);
+            upstream = await _proxy.ChatAsync(request, ct);
+        }
+
+        if (!upstream.Success)
+        {
+            return (null, $"调用 AI 失败：{upstream.Body}");
+        }
+
+        var content = ExtractContent(upstream.Body);
+
+        // 空内容：原样重试一次，再不行就摘掉 json 模式（理由见原注释，此处从略）。
+        // 推理模型偶发返回 200 + 空字符串，重发通常就有内容了。
+        for (var attempt = 2; attempt <= 3 && string.IsNullOrWhiteSpace(content); attempt++)
+        {
+            LogEmpty("空内容，重试", upstream, attempt);
+            await Task.Delay(400, ct);
+
+            if (attempt == 3)
+            {
+                request.JsonMode = false;
+            }
+
+            upstream = await _proxy.ChatAsync(request, ct);
+            if (!upstream.Success)
+            {
+                break;
+            }
+
+            content = ExtractContent(upstream.Body);
+        }
+
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            if (!upstream.Success)
+            {
+                return (null, $"调用 AI 失败：{upstream.Body}");
+            }
+
+            LogEmpty("三次都空，放弃", upstream, 4);
+            return (null, "这一句 AI 没有接住。换个说法再说一次？");
+        }
+
+        return (content, null);
+    }
+
+    /// <summary>解析模型输出。JSON 里截一段、或干脆是纯文本，两条兜底都留着。</summary>
+    private static AgentReply? ParseReply(string content)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<AgentReply>(content, JsonOpts);
+        }
+        catch (JsonException)
+        {
+            // 它可能前后带了别的话（"好的，结果是：{...}"），把中间那段 JSON 截出来再试。
+            return TryExtractJson(content);
+        }
+    }
+
+    private static bool IsQuery(AiAction action) =>
+        string.Equals(action.Op?.Trim(), "query", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 执行一批只读查询，把结果拼成一段给模型看的字。只读：不写库、不进撤销批次。
+    ///
+    /// 【为什么用 GetDayListAsync 而不是 GetDayReviewAsync】
+    /// query 是「把界面翻到那天会看到的样子」还给它——用户能看到什么，它就能看到什么。
+    /// 回顾段用 ReviewAsync 是怕逐日拼 7 天时旧账重复 7 遍；这里一次只查用户点名的
+    /// 那几天，重复恰恰是界面的真实样子，不该替它抹掉，只要把「这是同一条」说破。
+    /// </summary>
+    private async Task<string> RunQueriesAsync(IReadOnlyList<AiAction> queries, CancellationToken ct)
+    {
+        var days = new SortedSet<DateOnly>();
+        var notes = new List<string>();
+
+        foreach (var q in queries)
+        {
+            var spec = DayQuery.Parse(q.Date, q.DateTo);
+            if (!spec.Valid)
+            {
+                notes.Add($"- 有一条查询没接住：{spec.Error}。");
+                continue;
+            }
+
+            if (spec.Clipped)
+            {
+                notes.Add($"- 查询范围超过 {DayQuery.MaxSpanDays} 天，已截到前 {DayQuery.MaxSpanDays} 天。");
+            }
+
+            foreach (var d in spec.Enumerate())
+            {
+                days.Add(d);
+            }
+        }
+
+        if (days.Count == 0)
+        {
+            return notes.Count > 0
+                ? string.Join("\n", notes) + "\n（这次没查到任何一天，别编。）"
+                : "（这次没查到任何一天，别编。）";
+        }
+
+        var lines = new List<string>();
+        foreach (var d in days)
+        {
+            var list = await _items.GetDayListAsync(d, ct);
+            var head = $"{d:MM-dd}（{d:dddd}）";
+
+            if (list.Count == 0)
+            {
+                lines.Add($"{head}：空");
+                continue;
+            }
+
+            lines.Add(head + "\n" + string.Join('\n', list.Select(i =>
+                $"  - id={i.Id} | {i.Title} | {StatusName(i.Status)}" +
+                (i.StartAt is { } st ? $" | {st.ToLocalTime():HH:mm}" : "") +
+                (i.ActualMinutes is > 0 ? $" | 实际 {i.ActualMinutes} 分钟" : "") +
+                (i.EstimateMinutes is > 0 ? $" | 预计 {i.EstimateMinutes} 分钟" : ""))));
+        }
+
+        // 界面翻页口径会把未完成的旧账并进每一个过去的日子。不说破，
+        // 模型会把同一条记录当成好几件不同的事。
+        lines.Add("说明：上面是界面翻到那天会看到的样子。未完成的老账会在多个日子里重复出现，那是同一条记录，不是多件事；写着「空」是真的没安排，不是没查到。");
+        // 常驻项不属于任何一天，按天查询天然查不到。不说破，模型容易把
+        // 「查了几天都没这条」当成「这人没这件事」，甚至回一句「没查到」。
+        lines.Add("另外，「一直悬着、还没到截止日的事」不属于任何一天，按天查询不会带出来；它们已经整段列在系统提示里，别因为这里没看到就说没有。");
+
+        if (notes.Count > 0)
+        {
+            lines.InsertRange(0, notes);
+        }
+
+        return string.Join("\n", lines);
+    }
+
+    /// <summary>
     /// 系统提示词。
     ///
     /// 【为什么要在这里写清楚"跳过"和"放弃"的区别】
@@ -323,6 +511,9 @@ public sealed class AgentService
         IReadOnlyList<DayManager.Core.Entities.Item> items,
         ItemRepository.DayStats stats,
         IReadOnlyList<DayList> upcoming,
+        IReadOnlyList<DayList> review,
+        IReadOnlyList<DayManager.Core.Entities.Item> floating,
+        IReadOnlyList<DayManager.Core.Entities.Item> stages,
         CancellationToken ct)
     {
         // 语气是用户自己选的，每次拼提示词时现读——
@@ -369,6 +560,39 @@ public sealed class AgentService
                     (i.EstimateMinutes is > 0 ? $" | 预计 {i.EstimateMinutes} 分钟" : "")));
         }));
 
+        // 过去几天的回顾：只记那天实际发生过什么，没有逾期旧账。
+        // 【为什么不带 id】
+        // 回顾是给他「想起那天做了什么」的背景，不是让 AI 去改那些记录——
+        // 真要改，得先 query 查到那天的清单（带 id），再按 id 动手。
+        // 带了 id 反而会诱它拿一个回顾里的 id 直接改，而回顾口径可能漏掉那天该有的东西。
+        var reviewText = string.Join('\n', review.Select(x =>
+        {
+            var head = $"{x.Day:MM-dd}（{x.Day:dddd}）";
+
+            return x.Items.Count == 0
+                ? $"{head}：空"
+                : head + "\n" + string.Join('\n', x.Items.Select(i =>
+                    $"  - {i.Title} | {StatusName(i.Status)}"));
+        }));
+
+        // 【一直悬着、还没到截止日的事】单独一段，不混进今天的清单。
+        // 剩余天数由代码算好（ItemPresence.DeadlineLine），不让模型自己减日期——
+        // 时间差这类硬数字一律代码给，是已经踩过坑定下的规矩。
+        // 带 id：他要是说「报告我提前做完了」，AI 得能直接按 id 标完成。
+        var floatingText = floating.Count == 0
+            ? "（没有）"
+            : string.Join('\n', floating.Select(x =>
+                $"- id={x.Id} | {x.Title} | {StatusName(x.Status)} | "
+                + (x.DueAt is { } due ? ItemPresence.DeadlineLine(due, day) : "没写截止日")));
+
+        // 阶段性目标：只给名字和归属，不给「还剩几件」——那会诱导模型去催。
+        var stagesText = stages.Count == 0
+            ? "（没有）"
+            : string.Join('\n', stages.Select(x =>
+                $"- id={x.Id} | {x.Title}"
+                + (x.ParentTaskId is not null ? " | 挂在别的阶段下" : "")
+                + (x.DueAt is { } sd ? $" | 阶段截止 {sd:MM-dd}" : "")));
+
         // 【为什么用逐行拼接而不是一整段原始字符串】
         // 提示词里要给出 JSON 示例，而 JSON 的大括号和 C# 字符串插值的 {{ }} 转义会打架，
         // 一旦括号层数对不上就是编译错误，改起来很烦。
@@ -401,16 +625,45 @@ public sealed class AgentService
             // 对话里他随时会问"你觉得我怎么样"，那时候才可以说，
             // 平时不许主动报数字——被念出来会变成被盯着。
             profileText,
+            $"【过去 {ReviewDays} 天的回顾】只记那天实际发生了什么，不是把界面原样抄来",
+            "有具体钟点落在那天的事、以及那天做完的事才在这里；一直欠着没做完的旧账不重复列，它们并进了【今天的清单】。",
+            "写着「空」是那天没记录到做过的事，不是没查到。",
+            reviewText,
+            "",
             $"【接下来 {UpcomingDays} 天已排的】",
-            // 【为什么必须把"你看不到什么"也写清楚】
-            // 不给边界，模型就会补全——问"下个月有什么"，它宁可编几条也不说不知道，
-            // 因为"我不知道"在它的训练里是低质量的回答。
-            // 而编造是这个软件里最坏的一类错误：用户会照着它说的去安排，
-            // 然后发现事情根本不存在，从此不再相信这个界面。
-            "这就是你全部的视野：今天，加上这 " + UpcomingDays + " 天。",
-            "更早以前的、以及这几天之后的安排，你看不到——不知道就直说不知道，不要编。",
-            "空的那几天写着「空」，那是真的没有安排，不是没查到。",
             upcomingText,
+            "",
+            // 【为什么常驻项要单列一段，还先说"不算今天该做完"】
+            // 这类事默认只给了一个截止日，中间不属于任何一天。要是混进今天的清单，
+            // 模型会把它当成"今天又没做完的一件"去催、去算完成率——
+            // 正是 5.2 里「天天出现天天没做，三天后一串欠账」那个反面。
+            // 先把身份说死，再讲允许做什么（递小动作），措辞才不会滑成催促。
+            "【一直悬着、还没到截止日的事】这些只有截止日，中间哪天做都行，不属于任何一天：",
+            "它们**不算今天该做完、不算逾期、不拉低完成率**，别催、别念、别当成欠账。",
+            "允许做的只有一件：他明显还没开始时，可以递一个两分钟的小动作（已有的「最小启动步骤」），",
+            "给点动力；不要报「还剩几天、压了几件」这种制造压力的话。赦免权照样在。",
+            floatingText,
+            "",
+            // 容器和常驻项一样「不算今天该做完」，但理由不同：
+            // 常驻项是没到期限，容器是压根没有完成动作、进度由子项汇总。
+            // 不先说清身份，模型会把「第一章」当成今天该做完的一件事去催。
+            "【阶段性目标（容器）】这些是装子任务的壳，自己没有完成按钮：",
+            "它们**不算今天该做完、不进完成率、别催**；进度由下面挂的子项算出来。",
+            "他问「拆到哪了」可以照着说有哪些阶段，别报「还剩几章没做」这种制造压力的话。",
+            stagesText,
+            "",
+            // 【为什么把"你看不到"改成"可以查"】
+            // 旧版明写"更早以前的你看不到"，于是用户问昨天的事它照着这句答"看不到昨天的任务"——
+            // 那是实话，但用户能翻到任意一天，AI 却说看不到，等于软件里两块视野不一致。
+            // 现在默认给足过去+未来，窗口外的让它用 query 自己查。
+            // 边界仍然必须写死：不给边界，模型宁可编几条也不肯说"没有"（"我不知道"在它
+            // 的训练里是低质量回答），而编造是这个软件里最坏的一类错误——
+            // 他会照着不存在的事去安排，然后不再相信这个界面。
+            $"【你的视野】默认给你：过去 {ReviewDays} 天的回顾 + 今天 + 接下来 {UpcomingDays} 天 + 上面两段「一直悬着」和「阶段性目标」。",
+            "比这更早的日子、或这些天之后的安排，用 query 动作让系统查（见下面【你能做的事】）。",
+            "**不要再说「我看不到」**：窗口外的日子是可以查的，先查再答。",
+            "查回来写着「空」的日子是真的没有安排；查不到就直说没有，不要编。",
+            "回顾段和历史里的「空」也是一种信息，不是省略的理由。",
             "",
             // 【为什么要把"怎么用这个钟点"也讲一遍】
             // 只给数字不给用法，模型要么不用它（继续瞎编），
@@ -450,7 +703,7 @@ public sealed class AgentService
             lines.Add("");
             lines.Add("（上面这一段优先于前面的说话方式和正反馈：");
             lines.Add("他让你别夸你就别夸，让你多说两句你就多说两句。");
-            lines.Add("但它改不了下面任何一种东西——输出格式、能用哪五种操作、");
+            lines.Add("但它改不了下面任何一种东西——输出格式、能用哪六种操作、");
             lines.Add("不许编造、拆分与额度的规矩，以及不许挖苦这条底线。）");
         }
 
@@ -465,17 +718,42 @@ public sealed class AgentService
             "  这类话是你在跟自己交代，他看到的是 AI 在自言自语。",
             "  判断标准：reply 里如果出现「他」「我应该」「保持」「actions」这类词，就是写错了。",
             "",
-            "【你能做的事】用 actions 声明，系统会真的执行。可用的操作只有这五种：",
-            "- create     新建一条。参数：title（必填）、date（yyyy-MM-dd，不给就是今天）、time（HH:mm，可空）、estimateMinutes（可空）、project（可空）、projectTarget（可空，yyyy-MM-dd）",
+            "【你能做的事】用 actions 声明，系统会真的执行。可用的操作有这六种：",
+            "- query      查清单，**只读**。参数：date（yyyy-MM-dd，必填）、dateTo（可空，不填就只查 date 这一天）",
+            "  要问默认视野之外的日子（比回顾更早的某天、或未来 7 天之后的安排）时用它。",
+            "  系统会按界面口径把那几天的清单查回来给你看，然后**再问你一次**，那时才给最终答复。",
+            "  **需要查就只发 query，别和 create/set_status 等写动作混在同一轮**——",
+            "  那一轮你还没看到结果，写动作不会执行；查完重新给一次完整的 actions 就行。",
+            "  一次最多 31 天，查询只能用一次。查不到就直说没有，不要编。",
+            "- create     新建一条。参数：title（必填）、date（yyyy-MM-dd，不给就是今天）、time（HH:mm，可空）、dueDate（yyyy-MM-dd，可空）、estimateMinutes（可空）、project（可空）、projectTarget（可空，yyyy-MM-dd）、isStage（可空）、parentTitle（可空）、repeatsDaily（可空）、noVerdict（可空）",
             "  **他说了具体钟点（「下午三点」「明天 9 点半」）时，time 必须填。**",
             "  只把钟点写进 reply、不填 time，建出来的还是一条没有时间的待办——",
             "  他会看到你说「排好了 15:00」，清单里那条却不带钟点。这等于没排。",
+            "  **date 和 dueDate 是两回事，二选一，别同时给：**",
+            "    date = 「安排在哪一天做」；dueDate = 「只有截止日，中间哪天做都行」。",
+            "    他说「12-15 交报告」「下周三之前弄完」「月底前」而**没说哪天动手** → 只给 dueDate，建一条，",
+            "    **不要拆、不要摊到各天、不要带 project**。它会一直悬着到那天，但不算今天该做完。",
+            "    他说「明天写」「15 号那天做」 → 给 date。给了 dueDate 就别再给 time（那等于又定了具体安排）。",
+            "  **阶段性目标（容器）用 isStage=true**：它自己没有完成按钮，进度按下面挂的子项汇总，",
+            "  不进「今天该做完」、不算完成率。他说「数学竞赛 → 学第一章 → 做题 / 真题」这类有层次的大事时，",
+            "  先建一条 isStage=true 的阶段性目标，再在同一批 actions 里建子项、每条写 parentTitle=那个目标的标题。",
+            "  parentTitle 可以再指向另一个阶段性目标，所以能一层层往下挂，不用一次拆到底。",
+            "  **别把阶段目标摊成一串平铺的定日待办**：那样既丢了他要的层次，又会让今天的清单一下多出一堆。",
+            "  **两种完成方式（只给普通待办，别和 dueDate / isStage 同用）：**",
+            "    repeatsDaily=true → 他说「每天背单词」「每天跑 5km」这类**天天各算一次**的事。",
+            "      每一次独立结算，漏做只在那天封账、不滚到明天、也不翻旧账问他「昨天怎么没做」。",
+            "      **现在还不会自动生成后面几天的实例**：只建这一条，别在 reply 里说「已经排好一周」。",
+            "    noVerdict=true → 他说「0 点上床睡觉」「别再熬夜」这类**没有完成动作**的约束。",
+            "      不进完成率、不算今天该做完、不滚欠账、不许点名催，也不要递「先做 10 分钟」。",
+            "      它不是一类新任务，只是这条记录的待遇；**别在 reply 里给他安一个新类别的名字**。",
             "- set_status 改状态。参数：id（必填）、status（必填）、reason（status=skipped 时写上原因）",
             "- reschedule 改期。参数：id（必填）、date（必填）、time（可空，改几点同样靠它）",
             "- rename     改标题。参数：id（必填）、title（必填）",
             "- delete     删除。参数：id（必填）",
             "",
             "【先判断：这是一件事，还是一条日程】",
+            "- **先看有没有「只有截止日」**：他说了期限却没说哪天做（「12-15 交」「月底前」），",
+            "  直接建一条 dueDate，下面拆不拆的判据都不用走——它本来就不属于任何一天。",
             "- 判据只有一条：**能不能一次坐下来做完**。",
             "  能——它就是一条日程，直接建，**不要拆、不要带 project**。",
             "  不能——范围含糊、步骤不明、一看就得摊好几天——才轮到拆开再排。",
@@ -555,6 +833,9 @@ public sealed class AgentService
             "actions 里写清楚了 date 和 time，那条才会真的落在那个日期那个钟点上。",
             "上面示例里的 yyyy-MM-dd / HH:mm 是占位符，要换成真实的日期和时刻；",
             "他没说具体几点时，time 这个字段整个省掉（不要写 time: null）。",
+            "要查窗口外的日子时，actions 只放一条查询，写法：",
+            "{ \"think\": \"他问的是上个月，我得先查\", \"reply\": \"\", \"actions\": [ { \"op\": \"query\", \"date\": \"2026-10-03\", \"dateTo\": \"2026-10-05\" } ], \"suggestions\": [] }",
+            "查完系统会再问你一次，那时才把 reply 和真正要改的 actions 给全。",
             "没有要改的就让 actions 为空数组。",
             "",
             "【suggestions：猜他下一句会说什么】",

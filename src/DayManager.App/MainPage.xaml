@@ -168,6 +168,77 @@
                         ItemsSource="{Binding TodayItems}"
                         SelectionMode="None">
 
+            <!--
+              ================= 常驻带：一直悬着、还没到截止日 =================
+
+              【为什么用 Header，而不是往 Grid 里加一行、或塞进 TodayItems】
+              1. 它是清单上方的一段内容，跟着主清单一起滚动最自然；单独占一个
+                 Grid 行会固定吃掉一块屏幕，常驻项多时把清单挤没。
+              2. 两个可滚动控件（ScrollView/CollectionView）嵌套是 MAUI 的经典坑，
+                 Header 属于 CollectionView 自己，没有嵌套滚动。
+              3. 最关键：它**不进 TodayItems**，完成率分母天然不含它（见 MainViewModel）。
+
+              【为什么绑定都写 RelativeSource 到 MainViewModel】
+              Header 和 EmptyView 一样，BindingContext 不保证继承页面的 VM；
+              显式指到 MainViewModel 才不会静默绑空（编不报错、界面一片空）。
+
+              【为什么只有两个入口，没有确认弹窗】
+              用户定的：就「完成了」和「先做 10 分钟」，不搞状态机。
+              勾完成后它不是消失，而是被 completedThatDay 接进「今天做完的事」，
+              在那里还能再点一下取消完成、回到这一带——是可逆的，不需要多问一句。
+              对一个启动困难的人来说，多一次确认就是多一次放弃的机会。
+            -->
+            <CollectionView.Header>
+                <VerticalStackLayout Spacing="6"
+                                     IsVisible="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=ShowFloatingBand}">
+                    <Label Text="一直悬着 · 还没到截止日"
+                           Style="{StaticResource CardTitle}" />
+                    <Label Text="这些不算今天该做完，不用有压力；想动手就点一下。"
+                           Style="{StaticResource Caption}"
+                           TextColor="{StaticResource MutedText}" />
+
+                    <VerticalStackLayout Spacing="6"
+                                         BindableLayout.ItemsSource="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=FloatingItems}">
+                        <BindableLayout.ItemTemplate>
+                            <DataTemplate x:DataType="vm:ItemViewModel">
+                                <Border Style="{StaticResource CardStyle}" Padding="10,8">
+                                    <Grid ColumnDefinitions="*,Auto,Auto"
+                                          ColumnSpacing="8">
+                                        <VerticalStackLayout Grid.Column="0"
+                                                             Spacing="2"
+                                                             VerticalOptions="Center">
+                                            <Label Text="{Binding Title}"
+                                                   FontSize="14" />
+                                            <!-- 副标题是「还有 N 天 · X月X日 截止」，由 Core 算，不是"逾期" -->
+                                            <Label Text="{Binding Subtitle}"
+                                                   Style="{StaticResource Caption}" />
+                                            <Label Text="{Binding StepText}"
+                                                   Style="{StaticResource Caption}"
+                                                   TextColor="{StaticResource MutedText}"
+                                                   IsVisible="{Binding HasMinimalStep}" />
+                                        </VerticalStackLayout>
+
+                                        <Button Grid.Column="1"
+                                                Text="完成了"
+                                                Style="{StaticResource ChipButton}"
+                                                VerticalOptions="Center"
+                                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=ToggleCompleteCommand}"
+                                                CommandParameter="{Binding .}" />
+                                        <Button Grid.Column="2"
+                                                Text="10 分钟"
+                                                Style="{StaticResource ChipButton}"
+                                                VerticalOptions="Center"
+                                                IsVisible="{Binding CanFocus}"
+                                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=StartFocusCommand}"
+                                                CommandParameter="{Binding .}" />
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </BindableLayout.ItemTemplate>
+                    </VerticalStackLayout>
+                </VerticalStackLayout>
+            </CollectionView.Header>
+
             <CollectionView.EmptyView>
                 <!-- EmptyView：列表为空时显示的内容。
                      文案刻意写成鼓励而非催促，避免一打开就有压力。
@@ -325,31 +396,34 @@
         <!-- ================= 第 4 行：快速添加 =================
              输入框和按钮并排，省掉一整行的高度。
 
-             【为什么时间选项缩成一个方框，点开才出现时间选择器】
-             上一版是「输入框 / 勾选框+时间选择器 / 按钮」三行，
-             底部占掉三分之一屏，清单反而被挤得很短。
-             而"指定开始时间"是个低频操作——大多数随手加的待办不需要几点几分。
-             所以把它收进一个勾选框，勾了才展开时间选择器。 -->
+             【为什么把「定时」勾选框换成一个形态按钮】
+             原来那个勾选框只能建「定日 / 定点」两种；「只有截止日」「每天」
+             只能去对话里让 AI 建，用户自己点不出来。现在最左边这个按钮显示
+             当前形态，点开才浮出四个选项、选完收起——平时还是一行，
+             而且比原来少一个控件（勾选框 + 「定时」两个字合成一个按钮）。
+
+             【为什么默认仍是「今天」】
+             随手加一条待办是最高频的动作，必须保持打字回车就能完成。
+             形态是低频选择，藏在按钮后面，不打断默认路径。 -->
         <Grid Grid.Row="4"
-              ColumnDefinitions="Auto,Auto,*,Auto"
+              ColumnDefinitions="Auto,*,Auto"
               ColumnSpacing="4">
-            <CheckBox Grid.Column="0"
-                      IsChecked="{Binding UseSpecificTime}"
-                      MinimumWidthRequest="0"
-                      Scale="0.8"
-                      VerticalOptions="Center" />
-            <Label Grid.Column="1"
-                   Text="定时"
-                   Style="{StaticResource Caption}"
-                   FontSize="10"
-                   VerticalOptions="Center" />
-            <Entry Grid.Column="2"
+            <Button Grid.Column="0"
+                    Text="{Binding ShapeButtonText}"
+                    Style="{StaticResource ChipButton}"
+                    FontSize="12"
+                    WidthRequest="104"
+                    HeightRequest="40"
+                    VerticalOptions="Center"
+                    ToolTipProperties.Text="切换这条要建成哪种形态"
+                    Command="{Binding ToggleShapePickerCommand}" />
+            <Entry Grid.Column="1"
                    Text="{Binding NewTitle}"
                    Placeholder="{Binding AddPlaceholder}"
                    ReturnType="Done"
                    ReturnCommand="{Binding AddItemCommand}"
                    FontSize="14" />
-            <Button Grid.Column="3"
+            <Button Grid.Column="2"
                     Text="加入"
                     Command="{Binding AddItemCommand}"
                     WidthRequest="60"
@@ -359,14 +433,40 @@
                     FontSize="13" />
         </Grid>
 
-        <!-- 只有勾了上面的框才会出现，不占平时的空间 -->
-        <TimePicker Grid.Row="5"
-                    Time="{Binding NewTime}"
-                    IsVisible="{Binding UseSpecificTime}"
-                    IsEnabled="{Binding UseSpecificTime}"
-                    Format="HH:mm"
-                    FontSize="13"
-                    HorizontalOptions="Start" />
+        <!-- 第 5 行是三个互斥的展开区：形态选择 / 时间 / 截止日。
+             全部收起时这一行塌成 0，不占平时的空间（沿用了原来 TimePicker 的做法）。
+             IsVisible=false 的控件不参与布局，所以同一格叠放不会互相撑高。 -->
+        <Grid Grid.Row="5">
+            <Grid ColumnDefinitions="*,*,*,*"
+                  ColumnSpacing="4"
+                  IsVisible="{Binding IsShapePickerOpen}">
+                <Button Grid.Column="0" Text="今天做"
+                        Style="{StaticResource ChipButton}"
+                        Command="{Binding PickShapeCommand}" CommandParameter="Day" />
+                <Button Grid.Column="1" Text="定点（带时间）"
+                        Style="{StaticResource ChipButton}"
+                        Command="{Binding PickShapeCommand}" CommandParameter="Timed" />
+                <Button Grid.Column="2" Text="只有截止日"
+                        Style="{StaticResource ChipButton}"
+                        Command="{Binding PickShapeCommand}" CommandParameter="Deadline" />
+                <Button Grid.Column="3" Text="每天"
+                        Style="{StaticResource ChipButton}"
+                        Command="{Binding PickShapeCommand}" CommandParameter="Daily" />
+            </Grid>
+            <TimePicker Time="{Binding NewTime}"
+                        IsVisible="{Binding ShowTimePicker}"
+                        IsEnabled="{Binding ShowTimePicker}"
+                        Format="HH:mm"
+                        FontSize="13"
+                        HorizontalOptions="Start" />
+            <DatePicker Date="{Binding DeadlineDate}"
+                        MinimumDate="{Binding DeadlineMinDate}"
+                        IsVisible="{Binding ShowDatePicker}"
+                        IsEnabled="{Binding ShowDatePicker}"
+                        Format="yyyy-MM-dd"
+                        FontSize="13"
+                        HorizontalOptions="Start" />
+        </Grid>
 
     </Grid>
 

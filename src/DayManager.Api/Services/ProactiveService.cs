@@ -146,15 +146,33 @@ public sealed class ProactiveService
             }
         };
 
-        foreach (var m in history.Skip(Math.Max(0, history.Count - 8)))
+        // 物化一次：逐条标注，并从最后一条算出"距上次说话隔了多久"。
+        var recentHistory = history.Skip(Math.Max(0, history.Count - 8)).ToList();
+        foreach (var m in recentHistory)
         {
             // 历史里只带真正说过的话。系统提示一类的不进对话记录，自然也不会在这里。
+            //
+            // 【为什么必须标时间】
+            // 实体里本来就有 CreatedAt，上一版只取了 m.Text，把它扔了。
+            // 于是"18:03 他说去吃饭"和"现在 20:10"之间没有任何距离感，
+            // 模型顺着最后一句的语气继续演，两小时后还在劝"饭先吃"。
+            // 与聊天链路共用 ChatTime，口径只有一份。
             messages.Add(new ChatMessage
             {
                 Role = m.Role == DayManager.Core.Entities.ChatMessage.RoleUser ? "user" : "assistant",
-                Content = m.Text
+                Content = ChatTime.Mark(m.Text, m.CreatedAt, now.LocalDateTime),
+                CreatedAt = m.CreatedAt
             });
         }
+
+        // 和 AgentService 同一段坐标：现在是上午还是深夜、距上次说话多久、
+        // 旧状态默认已结束、说话要合时段。主动开口没有"当前这句"，
+        // 所以"上一句话"就是历史里最后一条。
+        messages.Add(new ChatMessage
+        {
+            Role = "system",
+            Content = ChatTime.Coordinate(now.LocalDateTime, recentHistory.LastOrDefault()?.CreatedAt)
+        });
 
         // 【为什么格式要求要在最后再说一遍】
         // 和 AgentService 里同一个坑：模型对靠后的指令权重最高，

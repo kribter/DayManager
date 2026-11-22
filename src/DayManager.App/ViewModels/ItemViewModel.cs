@@ -27,9 +27,20 @@ public partial class ItemViewModel : ObservableObject
 {
     private Item _item;
 
-    public ItemViewModel(Item item)
+    /// <summary>
+    /// 这一行是不是「一直悬着、还没到截止日」那一带的。
+    ///
+    /// 【为什么由外面传进来，而不是自己根据 DueAt 判】
+    /// 「算不算常驻」的判定已经在 Core 的 ItemPresence 里只有一份，
+    /// 取数时就用它筛过了。这里再判一遍就是第二处口径，迟早不一致。
+    /// 界面只负责「这一行该长什么样」，不负责「它属不属于这一带」。
+    /// </summary>
+    private readonly bool _isFloating;
+
+    public ItemViewModel(Item item, bool isFloating = false)
     {
         _item = item;
+        _isFloating = isFloating;
         Refresh();
     }
 
@@ -223,7 +234,48 @@ public partial class ItemViewModel : ObservableObject
         OnPropertyChanged(nameof(IsPaused));
         OnPropertyChanged(nameof(StartButtonText));
         OnPropertyChanged(nameof(CanStartPause));
+        OnPropertyChanged(nameof(ShowTimerButton));
     }
+
+    // ---------- 大任务详情页：这一行在树里的位置 ----------
+    //
+    // 日程页不用这几个（默认第 0 层、不是容器、没有阶段进度文案），
+    // 所以同一行 ViewModel 能在两个页面复用，不必为详情页另造一套模板。
+    // 树怎么组装是 Core/Planning/ProjectTree 的纯函数，这里只负责「摆出来」。
+
+    /// <summary>第几层：0 = 顶层阶段，或直接挂在大任务下的叶子。</summary>
+    [ObservableProperty]
+    public partial int Depth { get; set; }
+
+    /// <summary>整行左缩进。直接绑 Grid.Padding，不需要值转换器。</summary>
+    public Thickness RowPadding => new(4 + Depth * 16, 8, 4, 8);
+
+    partial void OnDepthChanged(int value) => OnPropertyChanged(nameof(RowPadding));
+
+    /// <summary>
+    /// 容器（阶段性目标）：没有完成按钮、不进分母，只显示下级进度。
+    /// 是不是容器由 Core 的 ItemAxes.IsContainer 判，这里不另写一遍。
+    /// </summary>
+    [ObservableProperty]
+    public partial bool IsContainer { get; set; }
+
+    public bool IsLeaf => !IsContainer;
+    public bool ShowTimerButton => !IsContainer && CanStartPause;
+    public bool HasStageProgress => IsContainer && !string.IsNullOrEmpty(StageProgressText);
+
+    partial void OnIsContainerChanged(bool value)
+    {
+        OnPropertyChanged(nameof(IsLeaf));
+        OnPropertyChanged(nameof(ShowTimerButton));
+        OnPropertyChanged(nameof(HasStageProgress));
+    }
+
+    /// <summary>容器行的下级进度，例如「1 / 3 件完成」。叶子行留空。</summary>
+    [ObservableProperty]
+    public partial string StageProgressText { get; set; } = string.Empty;
+
+    partial void OnStageProgressTextChanged(string value) =>
+        OnPropertyChanged(nameof(HasStageProgress));
 
     /// <summary>
     /// 每过一小会儿叫一次：重算那句"已进行几分钟"，值变了就让绑定自己刷新。
@@ -355,8 +407,13 @@ public partial class ItemViewModel : ObservableObject
 
         StepText = HasMinimalStep ? $"第一步：{_item.MinimalStep}" : string.Empty;
 
-        CanFocus = _item.Status
-            is ItemStatus.Pending or ItemStatus.Skipped or ItemStatus.InProgress;
+        // 容器（ByChildren）没有完成按钮，守住类（Never）不判成败——
+        // 「先睡 10 分钟」那种话就是从「还能点一下」这条路冒出来的。
+        // 判定走 Core 的 ItemAxes，跟离线兜底、AI 提示词同一份判据，不在这里另写一遍。
+        // 主界面的清单和常驻带本来就不收这两类（GetDayListAsync / GetFloatingDeadlinesAsync
+        // 已过滤），这里是第二道保险：大任务详情页会直接列项目下的全部 item。
+        CanFocus = (_item.Status is ItemStatus.Pending or ItemStatus.Skipped or ItemStatus.InProgress)
+                   && ItemAxes.CanNudge(_item, DateOnly.FromDateTime(DateTime.Now));
 
         // 上面那几个 derived 属性（用时、按钮文案）底层没有存值字段，
         // 换了新实体之后必须自己喊一声，否则按钮上的字还停在上一轮。
@@ -441,11 +498,29 @@ public partial class ItemViewModel : ObservableObject
             var today = DateOnly.FromDateTime(DateTime.Now);
             var dueDay = DateOnly.FromDateTime(dueLocal.Value.DateTime);
 
-            if (dueDay < today)
+            if (_isFloating && dueDay > today && _item.DueAt is { } floatingDue)
+            {
+                // 【常驻项显示"还剩几天"，绝不显示"逾期"】
+                // 它的截止日在未来，"逾期"是错的，而且会重新变成每天的压力——
+                // 正是这一形态要消除的东西。剩余天数由 Core 算好（不自己减日期），
+                // 跟 AI 提示词里那条用的是同一个函数，界面和 AI 说同一个数。
+                parts.Add(ItemPresence.DeadlineLine(floatingDue, today));
+            }
+            else if (dueDay < today)
             {
                 // 逾期天数必须显式说出来。这是"欠账清单"，
                 // 让它自动滚到今天还不够，必须让用户知道欠了多久。
-                parts.Add($"逾期 {today.DayNumber - dueDay.DayNumber} 天");
+                // 【已完成的不算逾期】"逾期"描述的是还欠着，做完的事已经还了。
+                // 翻历史日期时尤其扎眼：11-17 做完的任务，不该因为截止日是 11-15
+                // 就在副标题里顶着"逾期 2 天"。其余状态（含进行中/跳过/放弃）保持原样。
+                // 【不判成败的不算逾期】容器由子项汇总、守住类永不进分母，
+                // 给它们挂「逾期 N 天」等于把不该产生压力的事说成欠账。
+                if (_item.Status != ItemStatus.Done
+                    && ItemAxes.VerdictOf(_item, today) == ItemAxes.Verdict.Judged
+                    && _item.CompletionMode != CompletionMode.ByChildren)
+                {
+                    parts.Add($"逾期 {today.DayNumber - dueDay.DayNumber} 天");
+                }
             }
             else if (dueDay == today)
             {

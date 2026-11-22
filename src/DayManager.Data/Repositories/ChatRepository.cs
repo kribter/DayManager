@@ -31,6 +31,13 @@ public class ChatRepository
     /// 同一毫秒里可能存进两条（用户发一句、AI 回一句几乎同时写完时）
     /// 只按时间排的话顺序不确定，界面上表现为"偶尔上下颠倒"。
     /// 加一个稳定的第二排序键就不会。
+    ///
+    /// 【翻更早的历史为什么靠"把 count 调大"而不是 skip】
+    /// skip 数的是"从最新往回第几条"，可期间只要来一条新消息（AI 主动开口、
+    /// 用户又发一句）或删掉一条，这个位次就整体挪了一格，下一页会重复或漏掉一条。
+    /// 所以界面每次把窗口调大一批，整窗重取，再按 id 排除已经显示过的——
+    /// 正确性由"集合里现在有什么"决定，不靠一个随时会失效的计数器。
+    /// 本地 SQLite、几百条的量，重取一遍比维护游标便宜得多。
     /// </summary>
     public async Task<List<ChatMessage>> GetRecentAsync(int count, CancellationToken ct = default)
     {
@@ -45,6 +52,16 @@ public class ChatRepository
 
         list.Reverse();
         return list;
+    }
+
+    /// <summary>
+    /// 还有多少条没删的对话。界面拿它判断「加载更早」该不该出现。
+    /// 只要个数不取内容，别为了一个布尔把整张表捞回来。
+    /// </summary>
+    public async Task<int> CountAsync(CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        return await db.ChatMessages.CountAsync(x => x.DeletedAt == null, ct);
     }
 
     /// <summary>写一条进去。返回存好的实体（带上了自动填的时间）。</summary>

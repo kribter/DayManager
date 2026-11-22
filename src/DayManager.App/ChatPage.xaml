@@ -99,6 +99,21 @@
                        Margin="0,40,0,0"
                        IsVisible="{Binding HasMessages, Converter={StaticResource Not}}" />
 
+                <!--
+                  翻更早的历史。放在列表最上面：滚到顶自然就看见，
+                  不占底部输入区那一排，也不会挡住刚发的话。
+                  【为什么不像微信那样"滚到顶自动加载"】
+                  ScrollView 没有可靠的"到顶"事件，硬做容易一进页面就连着翻几页。
+                  一个明确的按钮更好控制，也更符合这软件"少替你做决定"的性子。
+                -->
+                <Button Text="加载更早的消息"
+                        Style="{StaticResource ChipButton}"
+                        HorizontalOptions="Center"
+                        Margin="0,4,0,10"
+                        Command="{Binding LoadMoreHistoryCommand}"
+                        IsVisible="{Binding HasMore}"
+                        IsEnabled="{Binding IsLoadingMore, Converter={StaticResource Not}}" />
+
                 <VerticalStackLayout Spacing="0"
                                      BindableLayout.ItemsSource="{Binding Messages}">
                     <BindableLayout.ItemTemplate>
@@ -112,6 +127,21 @@
                         AI   —— 靠左，浅灰
                         系统 —— 靠左，无底色，橙字（它是故障提示，不是对话内容）
                     -->
+                    <!--
+                      外层这一层必须撑满整行：气泡自己靠左/靠右（Align），
+                      但日期条要像微信那样整行居中，不能跟着气泡一起偏。
+                      所以把两者分开：外层负责宽度，内层 Grid 才管对齐。
+                    -->
+                    <VerticalStackLayout Spacing="0">
+
+                    <Label Text="{Binding DayDividerText}"
+                           Style="{StaticResource Caption}"
+                           FontSize="11"
+                           HorizontalOptions="Center"
+                           HorizontalTextAlignment="Center"
+                           Margin="0,10,0,2"
+                           IsVisible="{Binding ShowDayDivider}" />
+
                     <Grid Padding="0,5"
                           ColumnDefinitions="*"
                           HorizontalOptions="{Binding Align}">
@@ -243,6 +273,7 @@
                                           Drawable="{Binding Source={RelativeSource AncestorType={x:Type vm:ChatViewModel}}, Path=MyAvatar}" />
                         </HorizontalStackLayout>
                     </Grid>
+                    </VerticalStackLayout>
                 </DataTemplate>
                     </BindableLayout.ItemTemplate>
                 </VerticalStackLayout>

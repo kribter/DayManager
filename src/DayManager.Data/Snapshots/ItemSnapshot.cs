@@ -23,6 +23,13 @@ public sealed record ItemSnapshot
     public string? Notes { get; init; }
     public ItemKind Kind { get; init; }
 
+    // 三根轴 + 层级。都是业务字段：AI 改了形态或把任务挂到别的阶段下，
+    // 撤销必须还原，否则「撤了但分类没回去」是静默的数据错。
+    public ItemShape Shape { get; init; }
+    public CompletionMode CompletionMode { get; init; }
+    public VerdictMode VerdictMode { get; init; }
+    public Guid? ParentTaskId { get; init; }
+
     public DateTimeOffset? StartAt { get; init; }
     public DateTimeOffset? EndAt { get; init; }
     public DateTimeOffset? DueAt { get; init; }
@@ -80,6 +87,10 @@ public sealed record ItemSnapshot
         Title = item.Title,
         Notes = item.Notes,
         Kind = item.Kind,
+        Shape = item.Shape,
+        CompletionMode = item.CompletionMode,
+        VerdictMode = item.VerdictMode,
+        ParentTaskId = item.ParentTaskId,
         StartAt = Norm(item.StartAt),
         EndAt = Norm(item.EndAt),
         DueAt = Norm(item.DueAt),
@@ -112,6 +123,10 @@ public sealed record ItemSnapshot
         item.Title = Title;
         item.Notes = Notes;
         item.Kind = Kind;
+        item.Shape = Shape;
+        item.CompletionMode = CompletionMode;
+        item.VerdictMode = VerdictMode;
+        item.ParentTaskId = ParentTaskId;
         item.StartAt = StartAt;
         item.EndAt = EndAt;
         item.DueAt = DueAt;

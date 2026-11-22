@@ -1,5 +1,6 @@
 using DayManager.Core.Entities;
 using DayManager.Core.Enums;
+using DayManager.Core.Planning;
 
 namespace DayManager.Core.Intervention;
 
@@ -44,6 +45,14 @@ public static class NudgeTargetPicker
     /// 但把这个选择交给 AI 时，得让它看到**全部可选的那几件**再挑，
     /// 否则它只能在我替它挑好的那一件里打转，AI 的语义判断就白瞎了。
     /// 两处共用同一份筛选规则，不会出现"本地说不能点名、AI 却点出来了"。
+    ///
+    /// 【11-21 补：先过判成败，再过时间】
+    /// 旧版只有 IsActionableNow，把「压根没排时间（StartAt 空）」一律当成
+    /// 「纯待办、随时能做」，于是「0点上床睡觉」这种 StartAt 空 + DueAt=23:59
+    /// 的作息约束被当成能动手的候选，22:44 说出「先睡 10 分钟」。
+    /// 现在先读三根轴：守住类（VerdictMode.Never）、容器、定段常驻项一律不点名。
+    /// 这不需要语义理解、不需要联网——离线兜底读一个字段就能判，
+    /// 正是「分类落地最大的受益者是离线那条路」那句结论的兑现。
     /// </summary>
     public static IReadOnlyList<Item> Actionable(IReadOnlyList<Item> remaining, DateTimeOffset now)
     {
@@ -52,7 +61,11 @@ public static class NudgeTargetPicker
             return Array.Empty<Item>();
         }
 
-        var actionable = remaining.Where(x => IsActionableNow(x, now)).ToList();
+        var today = ItemPresence.LocalDay(now);
+        var actionable = remaining
+            .Where(x => ItemAxes.CanNudge(x, today))
+            .Where(x => IsActionableNow(x, now))
+            .ToList();
 
         if (actionable.Count <= 1)
         {

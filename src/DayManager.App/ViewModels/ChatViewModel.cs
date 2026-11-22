@@ -6,6 +6,7 @@ using CommunityToolkit.Mvvm.Messaging;
 using DayManager.App.Messages;
 using DayManager.App.Drawables;
 using DayManager.App.Services;
+using DayManager.Core.Ai;
 using DayManager.Core.Entities;
 using DayManager.Core.Planning;
 using DayManager.Data.Repositories;
@@ -64,6 +65,25 @@ public partial class ChatViewModel : ObservableObject
     /// <summary>历史只加载一次。切 Tab 回来时 Shell 会再触发，重复加载会把列表翻倍。</summary>
     private bool _loaded;
 
+    /// <summary>
+    /// 界面上已经显示了多少条**库里的**记录。翻页时当 skip 用。
+    /// 从集合现算，而不是自己维护一个计数器：新消息追加、单条删除、清空都会改变它，
+    /// 计数器漏加一次，下一页就会把同一条再捞一遍。
+    /// 系统提示（连不上后端之类）没有 id、也不在库里，正好不算。
+    /// </summary>
+    private int ShownCount => Messages.Count(x => x.Id != Guid.Empty);
+
+    /// <summary>还有没有更早的消息没翻出来。</summary>
+    [ObservableProperty]
+    public partial bool HasMore { get; set; }
+
+    /// <summary>正在翻上一页。防连点，也用来告诉页面别在这期间滚到底。</summary>
+    [ObservableProperty]
+    public partial bool IsLoadingMore { get; set; }
+
+    /// <summary>正在往列表**顶部**插旧消息。页面读到它就跳过"新消息滚到底"。</summary>
+    public bool IsPrepending { get; private set; }
+
     public ChatViewModel(ApiClient api, BackendGuard guard, ChatRepository chat, AiSettings ai, AvatarService avatars)
     {
         _api = api;
@@ -76,7 +96,13 @@ public partial class ChatViewModel : ObservableObject
         StatusText = "还没说话";
 
         // 「清空」按钮只在聊过之后出现，集合变了要通知一次，不然它永远不显示。
-        Messages.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasMessages));
+        // 日期条也一样：从顶部插入一批旧消息后，分界点会整段往后移，
+        // 必须按新的顺序重算一遍，不能只给新来的那几条算。
+        Messages.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(HasMessages));
+            RefreshDayDividers();
+        };
 
         // AI 主动说的话要能立刻看见。它是在后台线程上写进库的，
         // 不订阅就只有下次重新进这个页面时才出现——
@@ -272,10 +298,111 @@ public partial class ChatViewModel : ObservableObject
             {
                 Messages.Add(ChatBubble.FromRecord(record));
             }
+
+            // 用总数判断，而不是"这一页满没满"：刚好满一页时后面可能还有，
+            // 也可能正好没了，模棱两可的按钮最烦人。
+            HasMore = await _chat.CountAsync() > ShownCount;
         }
         catch (Exception ex)
         {
             Messages.Add(ChatBubble.System($"历史没读出来：{ex.Message}"));
+        }
+    }
+
+    /// <summary>
+    /// 再翻一页更早的消息，插到列表**顶部**。
+    ///
+    /// 【为什么整窗重取再按 id 去重】
+    /// 见 ChatRepository.GetRecentAsync 的说明：期间新来的消息、删掉的一条，
+    /// 都会让"跳过前 N 条"这种分页错一格。整窗取回来，只挑没显示过的，
+    /// 顺序天然对、也不会重复。
+    ///
+    /// 【为什么要先打招呼再插】
+    /// 往 ScrollView 顶部塞内容，视口会往回跳。页面收到开始消息先量好位置，
+    /// 插完之后按新增高度补回去，用户看的那条还停在原处。
+    /// </summary>
+    [RelayCommand]
+    private async Task LoadMoreHistoryAsync()
+    {
+        if (IsLoadingMore || !HasMore || !_loaded)
+        {
+            return;
+        }
+
+        IsLoadingMore = true;
+        IsPrepending = true;
+
+        try
+        {
+            WeakReferenceMessenger.Default.Send(new ChatHistoryPrependStarted());
+
+            // 窗口 = 已经显示的条数 + 一整页。系统提示不在库里，ShownCount 不算它们。
+            var window = await _chat.GetRecentAsync(ShownCount + LoadLimit);
+            var shown = Messages.Where(x => x.Id != Guid.Empty).Select(x => x.Id).ToHashSet();
+            var older = window.Where(x => !shown.Contains(x.Id)).ToList();
+
+            // 从最旧的一条开始插：倒着插进 index 0，最终顺序才是从早到晚。
+            for (var i = older.Count - 1; i >= 0; i--)
+            {
+                Messages.Insert(0, ChatBubble.FromRecord(older[i]));
+            }
+
+            // 同样用总数收口：库里还有没显示过的，按钮就继续在。
+            HasMore = await _chat.CountAsync() > ShownCount;
+        }
+        catch (Exception ex)
+        {
+            Messages.Add(ChatBubble.System($"更早的消息没读出来：{ex.Message}"));
+        }
+        finally
+        {
+            IsPrepending = false;
+            IsLoadingMore = false;
+            // 插入期间每次 CollectionChanged 都被 IsPrepending 挡掉了，
+            // 这里补一次全量重算，把新接上的那一段日期分界对齐。
+            RefreshDayDividers();
+            WeakReferenceMessenger.Default.Send(new ChatHistoryPrepended());
+        }
+    }
+
+    /// <summary>
+    /// 重算每条气泡上方要不要显示日期条。
+    ///
+    /// 【为什么每次集合变了都整段重算】
+    /// 从顶部插一批旧消息之后，分界点会整段往后移：原来第一条顶着的"今天"，
+    /// 现在可能变成中间某条，而真正该顶日期条的是新插进来的最旧一条。
+    /// 只给新来的算会留下一条假的旧分界，整段重算最省心也最不容易错。
+    ///
+    /// 【系统提示不参与】
+    /// 连不上后端、删除失败这类话不是对话内容，也没有时间；
+    /// 让它顶一条日期条会把"哪天开始的对话"说错。
+    /// </summary>
+    private void RefreshDayDividers()
+    {
+        if (IsPrepending)
+        {
+            return;
+        }
+
+        var now = DateTime.Now;
+        DateOnly? previousDay = null;
+
+        foreach (var bubble in Messages)
+        {
+            if (bubble.IsSystem || bubble.CreatedAt is null)
+            {
+                bubble.SetDayDivider(false, string.Empty);
+                continue;
+            }
+
+            var day = ChatTime.LocalDay(bubble.CreatedAt.Value);
+            var local = bubble.CreatedAt.Value.ToLocalTime().DateTime;
+            var needsDivider = previousDay != day;
+
+            bubble.SetDayDivider(needsDivider,
+                needsDivider ? ChatTime.DayDivider(local, now) : string.Empty);
+
+            previousDay = day;
         }
     }
 
@@ -307,6 +434,9 @@ public partial class ChatViewModel : ObservableObject
         {
             await _chat.ClearAsync();
             Messages.Clear();
+            // 清空之后没有"更早的"了，按钮要跟着消失，
+            // 否则点一下只会白查一次库、什么也没翻出来。
+            HasMore = false;
         }
         catch (Exception ex)
         {
@@ -452,19 +582,23 @@ public partial class ChatViewModel : ObservableObject
 
             // 历史要带上：不延续上下文就了解不到实时情况（决策 D9）。
             // 只带最近若干条，超出部分截断。
+            // 【为什么每条要带 CreatedAt】
+            // 后端要用它把「这条是几点说的 / 距现在隔了多久 / 是不是跨了一夜」
+            // 由代码算好、写成看得见的字再喂给模型。只给一个「现在 HH:mm」让它自己推，
+            // 实测会把昨晚深夜和今早当成连续一场，上午还接着说晚安。
             var history = Messages
                 .Where(x => !x.IsSystem)
                 .TakeLast(HistoryLimit)
                 .Select(x => x.IsUser
-                    ? ChatMessageDto.User(x.Text)
-                    : ChatMessageDto.Assistant(x.Text))
+                    ? ChatMessageDto.User(x.Text, x.CreatedAt)
+                    : ChatMessageDto.Assistant(x.Text, x.CreatedAt))
                 .ToList();
 
             // 用户这句已经在 history 的最后一条里了，
             // 但显式再补一次更保险——万一上面 TakeLast 因为并发错过了它。
             if (history.Count == 0 || history[^1].Content != userText)
             {
-                history.Add(ChatMessageDto.User(userText));
+                history.Add(ChatMessageDto.User(userText, DateTimeOffset.Now));
             }
 
             // 【为什么只对「向后端要这一句话」重发】
@@ -745,6 +879,21 @@ public partial class ChatBubble : ObservableObject
     /// 直接格式化会得到比北京时间早 8 小时的数字——看着是时间，实际是错的。
     /// </summary>
     public string TimeText => CreatedAt?.ToLocalTime().ToString("HH:mm") ?? string.Empty;
+
+    /// <summary>这一条上面要不要顶一根日期条（每天只有最旧的一条顶）。</summary>
+    [ObservableProperty]
+    public partial bool ShowDayDivider { get; set; }
+
+    /// <summary>日期条上的字：今天 / 昨天 / 星期三 / 11月2日 / 2025年12月3日。</summary>
+    [ObservableProperty]
+    public partial string DayDividerText { get; set; } = string.Empty;
+
+    /// <summary>由 ViewModel 重算日期分界时一次设好这两个值。</summary>
+    public void SetDayDivider(bool show, string text)
+    {
+        ShowDayDivider = show;
+        DayDividerText = text;
+    }
 
     partial void OnCreatedAtChanged(DateTimeOffset? value)
     {

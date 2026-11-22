@@ -21,7 +21,12 @@ namespace DayManager.Api.Models;
 public sealed class AiAction
 {
     /// <summary>
-    /// 操作类型：create / set_status / reschedule / rename / delete。
+    /// 操作类型：create / set_status / reschedule / rename / delete / query。
+    ///
+    /// 【query 是唯一的只读动作】
+    /// 其余五个都会改数据、进撤销批次；query 只把某段日子的清单查回来给它看，
+    /// 不写库、不记 action_log。所以它**不经过 ItemTools**，由 AgentService 自己消化：
+    /// 查完把结果回喂给模型，再让它出最终答复（两轮）。
     /// </summary>
     public string Op { get; set; } = string.Empty;
 
@@ -34,8 +39,33 @@ public sealed class AiAction
     /// <summary>目标状态（英文枚举名）：pending / in_progress / done / skipped / abandoned。</summary>
     public string? Status { get; set; }
 
-    /// <summary>日期，yyyy-MM-dd。create 与 reschedule 需要。</summary>
+    /// <summary>
+    /// 日期，yyyy-MM-dd。create 与 reschedule 里表示「安排/挪到哪一天做」；
+    /// query 时是查询起始日。
+    ///
+    /// 【和 DueDate 的区别，别混】
+    /// 只说「12-15 交报告」「下周三之前」、没说哪天动手 → 用 DueDate，
+    /// 那是「只有截止日的事」：中间不属于任何一天，一直挂着但不算今天该做完。
+    /// 说「明天下午写」「15 号那天做」→ 用 Date，那是把事安排在了具体一天。
+    /// </summary>
     public string? Date { get; set; }
+
+    /// <summary>
+    /// 只有截止日，yyyy-MM-dd，可空。仅 create 使用。
+    ///
+    /// 【为什么不能复用 Date】
+    /// 复用的话系统分不清「12-15 那天做」和「12-15 是最后期限」——
+    /// 后者中间哪天做都行，一旦按 Date 建就会被当成那一天的事，
+    /// 到期前整天不出现、AI 还容易顺手把它摊派到各天去拆。
+    /// 单独一个字段，AI 才有一句明确的话能说「这条别定死在哪天」。
+    /// </summary>
+    public string? DueDate { get; set; }
+
+    /// <summary>
+    /// 查询结束日，yyyy-MM-dd，可空（不给就只查 date 这一天）。只用于 query。
+    /// 一次最多 31 天，超出的由 DayQuery 裁掉并说明。
+    /// </summary>
+    public string? DateTo { get; set; }
 
     /// <summary>具体几点，HH:mm。可空，给了就表示"到点开始"。</summary>
     public string? Time { get; set; }
@@ -45,6 +75,51 @@ public sealed class AiAction
 
     /// <summary>预计用时（分钟）。create 时可给。</summary>
     public int? EstimateMinutes { get; set; }
+
+    /// <summary>
+    /// 这条是不是阶段性目标（容器），可空。仅 create 使用。
+    ///
+    /// 【为什么单独一个字段，而不是让 AI 直接填枚举】
+    /// ① 形态（定日/定段/定点）由 date / dueDate / time 二选一推导，代码说了算，
+    /// 不让模型自己填枚举——它分不清「15 号做」和「15 号截止」，11-21 就栽在这。
+    /// ② 容器没有这种歧义：一条要么是装别的事的壳，要么是一件能做完的事。
+    /// 只把这一个布尔交给模型，其余分类仍由创建入口写死。
+    ///
+    /// 【可递归】阶段性目标本身也是一条记录，可以再挂到另一个阶段性目标下
+    /// （用 parentTitle），所以「数学竞赛 → 第一章 → 做题」这样的三层能建出来。
+    /// </summary>
+    public bool? IsStage { get; set; }
+
+    /// <summary>
+    /// 父任务（阶段性目标）的标题，可空。仅 create 使用。
+    /// 同一批 actions 里先建容器、再建子项，执行器按顺序跑，后一条能找到前一条。
+    /// 找不到就明确报错，不猜一个相近的（执行器「不猜」原则）。
+    /// </summary>
+    public string? ParentTitle { get; set; }
+
+    /// <summary>
+    /// 是不是「每次各算一次」的事（每天背单词、每天跑 5km），可空。仅 create 使用。
+    ///
+    /// 跟 IsStage 同一条规矩：只给模型一个布尔，枚举由创建入口写死，不让它自己填。
+    /// 它只是**声明**「每一次独立结算、漏做在那天封账、不滚到明天」；
+    /// RRule 的真实展开还没做——**不会自动生成后面几天的实例**，
+    /// 所以别在 reply 里许诺「已经排好一周」。
+    ///
+    /// 只适用于普通定日 / 定点待办；和 dueDate（定段）或 isStage（容器）同给会报错。
+    /// </summary>
+    public bool? RepeatsDaily { get; set; }
+
+    /// <summary>
+    /// 这条是不是「不判成败」的（0 点上床睡觉这类没有完成动作的约束），可空。仅 create 使用。
+    ///
+    /// **它不是另一类任务**，只是这条记录的一种待遇：不进完成率分母、不算今天该做完、
+    /// 不滚欠账、不许被点名催，也不递「先做 10 分钟」。
+    /// 之所以要个字段，是因为离线兜底和各条链路得能直接读到「别碰这条」，
+    /// 而不是靠标题里有没有「睡」字去猜（11-21 那张「先睡 10 分钟」就栽在猜上）。
+    ///
+    /// 只适用于普通定日 / 定点待办；和 dueDate（定段）或 isStage（容器）同给会报错。
+    /// </summary>
+    public bool? NoVerdict { get; set; }
 
     /// <summary>
     /// 所属项目名，可空。

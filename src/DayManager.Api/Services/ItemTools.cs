@@ -104,6 +104,14 @@ public sealed class ItemTools
             case "delete":
                 return await DeleteAsync(action, ct);
 
+            case "query":
+                // 【为什么这里不查，而是明确报错】
+                // query 是只读动作，由 AgentService 消化掉，根本不该传到这一层
+                // （这一层每走一步都要记 before/after 快照、进撤销批次）。
+                // 真漏到这里，说明上面过滤掉了但没滤干净——静默忽略会让排查的人
+                // 以为"查过了其实没查"，所以给一句指着源头的报错。
+                return (Fail("query", "query 是只读查询，应由 AgentService 处理，不走执行器。"), null);
+
             default:
                 // 【为什么不猜一个接近的操作】
                 // 模型输出了没定义的 op，最可能的原因是它没看懂工具说明，
@@ -121,8 +129,45 @@ public sealed class ItemTools
             return (Fail("create", "没给标题，建不出来。"), null);
         }
 
+        // 【只有截止日的事走哪条路】
+        // 用户说「12-15 交」而没说哪天动手 → AI 给 dueDate，不拆、不摊派、不落到某一天。
+        // 这里刻意不猜：dueDate 写了却解析不了，就明确报错让它重给，
+        // 绝不悄悄退化成「加到今天」——那会把一件悬着的事变成今天的欠账。
+        var dueDay = ParseDate(action.DueDate);
+        if (!string.IsNullOrWhiteSpace(action.DueDate) && dueDay is null)
+        {
+            return (Fail("create", $"截止日「{action.DueDate}」看不懂，要写成 yyyy-MM-dd。"), null);
+        }
+
+        // 「只有截止日」和「具体几点」是互斥的：给了钟点就说明它已经
+        // 被安排在某一刻开始，不再属于「中间哪天做都行」那一类。
+        // 同时给两样，说明模型没分清两种形态，报错比猜一个更不容易写坏数据。
+        if (dueDay is not null && !string.IsNullOrWhiteSpace(action.Time))
+        {
+            return (Fail("create", "只有截止日的事不要再给 time；要定几点就改用 date + time。"), null);
+        }
+
         var day = ParseDate(action.Date) ?? DateOnly.FromDateTime(DateTime.Now);
         var time = ParseTime(action.Time);
+
+        // 阶段性目标不能同时是「只有截止日」：一个是不属于任何一天的壳，
+        // 一个是挂在整段上的事，形态冲突。报错比猜一个更不容易写坏数据。
+        if (action.IsStage == true && dueDay is not null)
+        {
+            return (Fail("create", "阶段性目标是容器，别同时给 dueDate；要定阶段截止日就用 date。"), null);
+        }
+
+        // 父任务按标题找，找不到明确报错。「不猜」是执行器的硬规矩：
+        // 猜一个相近的标题，会把子任务挂到无关的事下面，而且界面上看不出来。
+        Guid? parentTaskId = null;
+        if (!string.IsNullOrWhiteSpace(action.ParentTitle))
+        {
+            parentTaskId = await ResolveParentTaskAsync(action.ParentTitle.Trim(), ct);
+            if (parentTaskId is null)
+            {
+                return (Fail("create", $"找不到叫「{action.ParentTitle.Trim()}」的阶段性目标；先在同一批里建它，再挂子项。"), null);
+            }
+        }
 
         // 挂项目：同一件事拆出来的几条写同一个名字，就会归到同一个项目下。
         Guid? projectId = null;
@@ -132,7 +177,39 @@ public sealed class ItemTools
                 action.Project.Trim(), ParseDate(action.ProjectTarget), ct);
         }
 
-        var item = await _items.AddToDayAsync(action.Title.Trim(), day, time, ct);
+        // 【两种完成方式开关只给正经待办】
+        // 定段（只有截止日）本来就不进分母、容器由子项汇总，各有自己的语义；
+        // 混着给说明模型没分清，报错比悄悄忽略更容易被发现、也更不容易写坏数据。
+        if ((action.RepeatsDaily == true || action.NoVerdict == true)
+            && (action.IsStage == true || dueDay is not null))
+        {
+            return (Fail("create",
+                "repeatsDaily / noVerdict 只能给普通待办；定段和容器不用这两个开关。"), null);
+        }
+
+        // 三条创建路径，形态各由入口写死，不让模型自己填：
+        //   isStage        → 容器（ByChildren，不进今日清单 / 分母）
+        //   dueDate        → 定段（只有截止日，常驻带）
+        //   date / time    → 定日 / 定点（正经待办，可再叠两个完成方式开关）
+        Item item;
+        if (action.IsStage == true)
+        {
+            item = await _items.AddContainerAsync(action.Title.Trim(),
+                ParseDate(action.Date), parentTaskId, projectId, ct);
+        }
+        else if (dueDay is not null)
+        {
+            item = await _items.AddDeadlineAsync(action.Title.Trim(), dueDay.Value, ct);
+        }
+        else
+        {
+            item = await _items.AddToDayAsync(action.Title.Trim(), day, time, ct,
+                completionMode: action.RepeatsDaily == true
+                    ? CompletionMode.PerOccurrence : null,
+                verdictMode: action.NoVerdict == true
+                    ? VerdictMode.Never : null,
+                parentTaskId: parentTaskId);
+        }
 
         // AddToDayAsync 不支持带项目（它是给用户手动添加用的），
         // 所以项目归属和估时都在这里补一次写。
@@ -172,9 +249,46 @@ public sealed class ItemTools
         // 这里是给用户看的结果文字，不是给机器读的，必须保留 24 小时制。
         // 另外前面要留一个空格——贴着日期写成 "10-3015:00" 看不出来那是几点。
         //
+        // 【结果文案也要把两种形态说开】
+        // 这句话会回喂给模型（动作执行结果），它照着写 reply。
+        // 要是截止日的事也说「加到 12-15」，模型下一句就会讲成
+        // 「已经安排在 15 号了」——用户以为那天才需要面对，正是要防的误会。
+        // 回喂给模型的这句要是漏了开关，它下一句 reply 就会把每日任务说成
+        // 「已安排今天」、把不判成败的说成「今天该做完」——等于白建。
+        var what = action.IsStage == true
+            ? "建了一个阶段性目标（容器，进度按子项汇总）"
+            : dueDay is not null
+                ? $"{dueDay.Value:MM-dd} 截止，之前一直挂着、不算今天该做完"
+                : $"加到 {day:MM-dd}" + (time is null ? "" : " " + time.Value.ToString(@"HH\:mm"))
+                  + (action.RepeatsDaily == true ? "（每次各算一次，漏做当天封账）" : "")
+                  + (action.NoVerdict == true ? "（不判成败，不算今天该做完）" : "");
+
         return (Ok("create", item.Id, item.Title,
-            $"加到 {day:MM-dd}" + (time is null ? "" : " " + time.Value.ToString(@"HH\:mm"))
+            what
+            + (action.ParentTitle is null ? "" : $"，挂在「{action.ParentTitle.Trim()}」下")
             + (action.Project is null ? "" : $"，归到「{action.Project.Trim()}」")), item);
+    }
+
+    /// <summary>
+    /// 按标题找阶段性目标（容器）。只认 CompletionMode=ByChildren 的记录，
+    /// 免得把一条普通待办当成父项，把层级挂歪。同名取最近建的那条。
+    ///
+    /// 【为什么按名字而不是 id】
+    /// AI 一次输出的 actions 是平铺的，它看不到系统刚生成的 Guid。
+    /// 让它用标题引用同批里先建的那条，是唯一不需要额外协议的办法；
+    /// 执行器按数组顺序跑，先建的容器此时已落库，查得到。
+    /// </summary>
+    private async Task<Guid?> ResolveParentTaskAsync(string title, CancellationToken ct)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        return await db.Items
+            .Where(x => x.Title == title
+                        && x.CompletionMode == CompletionMode.ByChildren
+                        && x.Status != DayManager.Core.Enums.ItemStatus.Abandoned)
+            .OrderByDescending(x => x.CreatedAt)
+            .Select(x => (Guid?)x.Id)
+            .FirstOrDefaultAsync(ct);
     }
 
     /// <summary>

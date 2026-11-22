@@ -103,6 +103,13 @@ public class ProjectRepository
                 // 见 DateHelper.EndOfDay 的说明：取零点的话任务在当天刚一开始就"已逾期"了。
                 DueAt = DateHelper.EndOfDay(scheduled.Date),
 
+                // 摊到各天的子任务是定日、做一次的叶子。
+                // 不写 Shape 会走 AddAsync 的时间兜底，虽然结果一样，
+                // 但「分类靠推断」正是 11-21 事故的起点，所有正经入口都显式写。
+                Shape = ItemShape.DayTask,
+                CompletionMode = CompletionMode.Once,
+                VerdictMode = VerdictMode.Judged,
+
                 EstimateMinutes = task.EstimateMinutes,
                 MinimalStep = task.MinimalStep,
                 Kind = task.Kind,
@@ -161,8 +168,13 @@ public class ProjectRepository
 
         // 第一条：每个项目每种状态各有几条。
         // 软删的不用管——AppDbContext 里配了全局查询过滤器，查出来的必然是没删的。
+        //
+        // 【只数叶子】容器（阶段性目标）挂在同一个项目下时，它自己没有完成按钮，
+        // 进度由下级汇总。把它算进分母，同一件事会算两次（父一条 + 子若干条），
+        // 进度条永远走不到 100%。这是 ② 可递归落地时必须同步改的一处。
         var counts = await db.Items
-            .Where(x => x.ProjectId != null && ids.Contains(x.ProjectId.Value))
+            .Where(x => x.ProjectId != null && ids.Contains(x.ProjectId.Value)
+                        && x.CompletionMode != CompletionMode.ByChildren)
             .GroupBy(x => new { x.ProjectId, x.Status })
             .Select(g => new { g.Key.ProjectId, g.Key.Status, Count = g.Count() })
             .ToListAsync(ct);
@@ -174,7 +186,8 @@ public class ProjectRepository
             .Where(x => x.ProjectId != null
                         && ids.Contains(x.ProjectId.Value)
                         && x.Status != ItemStatus.Done
-                        && x.Status != ItemStatus.Abandoned)
+                        && x.Status != ItemStatus.Abandoned
+                        && x.CompletionMode != CompletionMode.ByChildren)
             .GroupBy(x => x.ProjectId!.Value)
             .Select(g => new { ProjectId = g.Key, Next = g.Min(x => x.DueAt) })
             .ToDictionaryAsync(x => x.ProjectId, x => x.Next, ct);
