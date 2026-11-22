@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8" ?>
+<?xml version="1.0" encoding="utf-8" ?>
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
              xmlns:vm="clr-namespace:DayManager.App.ViewModels"
@@ -341,7 +341,7 @@
                                      IsVisible="{Binding ShowFloatingBand}">
                     <Label Text="一直悬着 · 还没到截止日"
                            Style="{StaticResource CardTitle}" />
-                    <Label Text="这些不算今天该做完，不用有压力；想动手就点一下。"
+                    <Label Text="这些不算今天该做完，想动手就点一下。"
                            Style="{StaticResource Caption}"
                            TextColor="{StaticResource MutedText}" />
 
@@ -470,7 +470,7 @@
                 <Button Grid.Column="0" Text="今天做"
                         Style="{StaticResource ChipButton}"
                         Command="{Binding PickShapeCommand}" CommandParameter="Day" />
-                <Button Grid.Column="1" Text="定点（带时间）"
+                <Button Grid.Column="1" Text="定点"
                         Style="{StaticResource ChipButton}"
                         Command="{Binding PickShapeCommand}" CommandParameter="Timed" />
                 <Button Grid.Column="2" Text="只有截止日"

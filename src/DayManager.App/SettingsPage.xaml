@@ -224,7 +224,7 @@
                         <Label Text="选完复制一份压成 256 存本机，原图删了也不影响。"
                                Style="{StaticResource Caption}" />
 
-                        <Label Text="下一句话就生效，不用重启。这一段能覆盖上面三档的篇幅和口气（要它别夸你就写「别夸我」），改不了输出格式、能改哪几样东西、不许编造和那些拆分规矩。"
+                        <Label Text="下一句话就生效，不用重启。能改篇幅和口气（比如写「别夸我」），改不了输出格式和那些硬规矩。"
                                Style="{StaticResource Caption}" />
                     </VerticalStackLayout>
                 </Border>
