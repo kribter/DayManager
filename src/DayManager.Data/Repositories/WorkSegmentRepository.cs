@@ -55,14 +55,7 @@ public class WorkSegmentRepository
         return rows;
     }
 
-    /// <summary>
-    /// 某一条任务一共分了几段做完（段数）。
-    ///
-    /// 【为什么关心段数，不只是总时长】
-    /// "一件事分五次才做完"和"一口气做完"花的分钟数可能一样，
-    /// 但前者说明中间被打断了四次——那是排程该知道的事，
-    /// 光看总数看不出来。
-    /// </summary>
+    /// <summary>某一条任务分了几段做完。冒烟测试用它验证「启动→暂停」是否真接上了 work_segments 表。</summary>
     public async Task<int> CountSegmentsAsync(Guid itemId, CancellationToken ct = default)
     {
         await using var db = await _factory.CreateDbContextAsync(ct);

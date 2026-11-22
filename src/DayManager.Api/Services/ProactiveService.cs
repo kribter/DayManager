@@ -354,8 +354,7 @@ public sealed class ProactiveService
     }
 
     /// <summary>网络闪断、限流这类"再试一次多半就好"的状态。</summary>
-    private static bool IsTransientStatus(int statusCode) =>
-        statusCode is 408 or 429 or 500 or 502 or 503 or 504;
+    private static bool IsTransientStatus(int statusCode) => AiProxy.IsTransient(statusCode);
 
     /// <summary>模型按要求返回的 JSON。</summary>
     private sealed class ProactiveReply
@@ -712,13 +711,5 @@ public sealed class ProactiveService
         return string.Join('\n', lines);
     }
 
-    private static string StatusName(DayManager.Core.Enums.ItemStatus status) => status switch
-    {
-        DayManager.Core.Enums.ItemStatus.Pending => "未开始",
-        DayManager.Core.Enums.ItemStatus.InProgress => "进行中",
-        DayManager.Core.Enums.ItemStatus.Done => "已完成",
-        DayManager.Core.Enums.ItemStatus.Skipped => "今天跳过",
-        DayManager.Core.Enums.ItemStatus.Abandoned => "放弃",
-        _ => status.ToString()
-    };
+    private static string StatusName(ItemStatus status) => status.ToDisplayName();
 }

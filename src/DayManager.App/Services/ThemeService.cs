@@ -35,13 +35,6 @@ public class ThemeService
         _policy = policy;
     }
 
-    /// <summary>启动时把上次的选择应用上。</summary>
-    public async Task ApplySavedAsync()
-    {
-        var saved = await _policy.GetRawAsync(PolicyKeys.AppTheme);
-        ApplyImmediate(saved);
-    }
-
     /// <summary>
     /// CreateWindow 用的同步版本：自己读库、自己应用。
     ///

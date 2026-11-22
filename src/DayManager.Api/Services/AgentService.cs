@@ -922,15 +922,7 @@ public sealed class AgentService
         return string.Join('\n', lines);
     }
 
-    private static string StatusName(ItemStatus status) => status switch
-    {
-        ItemStatus.Pending => "未开始",
-        ItemStatus.InProgress => "进行中",
-        ItemStatus.Done => "已完成",
-        ItemStatus.Skipped => "今天跳过",
-        ItemStatus.Abandoned => "不做了",
-        _ => status.ToString()
-    };
+    private static string StatusName(ItemStatus status) => status.ToDisplayName();
 
     /// <summary>给撤销列表用的一句话摘要，例如"改了 3 条"。</summary>
     private static string Summarize(IReadOnlyList<AiAction> actions)
@@ -1018,8 +1010,7 @@ public sealed class AgentService
     /// 429 和 5xx 值得重试；400/401/403 这类重发了也一样，不值得。
     /// 503 也不重试：它在本代理里还承担"没配密钥"的含义，重试只是白等半秒。
     /// </summary>
-    private static bool IsTransientStatus(int statusCode) =>
-        statusCode == 429 || (statusCode >= 500 && statusCode != StatusCodes.Status503ServiceUnavailable);
+    private static bool IsTransientStatus(int statusCode) => AiProxy.IsTransient(statusCode);
 
     /// <summary>
     /// 记一条"空内容"。控制台和文件各一份：控制台给开发时看，

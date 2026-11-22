@@ -78,7 +78,7 @@ public class ItemRepository
     /// <summary>取指定日期的清单。翻到任意一天（过去或未来）都走这里。</summary>
     public async Task<List<Item>> GetDayListAsync(DateOnly day, CancellationToken ct = default)
     {
-        var dayStart = StartOfDayAsLocalOffset(day);
+        var dayStart = DateHelper.StartOfDay(day);
         var dayEnd = dayStart.AddDays(1);
         var today = DateOnly.FromDateTime(DateTime.Now);
         var isFuture = day > today;
@@ -227,7 +227,7 @@ public class ItemRepository
     /// </summary>
     public async Task<List<Item>> GetDayReviewAsync(DateOnly day, CancellationToken ct = default)
     {
-        var dayStart = StartOfDayAsLocalOffset(day);
+        var dayStart = DateHelper.StartOfDay(day);
         var dayEnd = dayStart.AddDays(1);
 
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
@@ -371,7 +371,7 @@ public class ItemRepository
         // 所以这一条单独查，条件就是"跳过时刻落在这一天"。
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
-        var dayStart = StartOfDayAsLocalOffset(day);
+        var dayStart = DateHelper.StartOfDay(day);
         var dayEnd = dayStart.AddDays(1);
 
         var skippedToday = await db.Items.CountAsync(x =>
@@ -664,35 +664,14 @@ public class ItemRepository
     /// 改变一条记录的状态。这里是"启动延迟"指标的守门人。
     ///
     /// 【为什么要用 ??= 而不是 = 给 StartedAt 赋值】
-    /// ??= 的意思是"只在它还是空的时候赋值"。
-    /// 假设你在 9:00 点过一次"开始"，9:20 又手滑点了一下，
-    /// 如果用普通赋值，StartedAt 会被刷新成 9:20，
-    /// 算出来的启动延迟就从真实值缩水了二十分钟——数据静默失真，而且不可逆。
-    /// 首次开始时间是一旦产生就不可修改的事实，所以只能写一次。
-    /// </summary>
-    public async Task<Item?> SetStatusAsync(Guid id, ItemStatus status, CancellationToken ct = default)
-    {
-        return await SetStatusAsync(id, status, null, ct);
-    }
-
-    /// <summary>
-    /// 改变一条记录的状态。这里是"启动延迟"指标的守门人。
+    /// ??= 的意思是"只在它还是空的时候赋值"。首次开始时间一旦产生就不可修改，
+    /// 手滑点两次也不会把启动延迟刷新成错误值。
     ///
-    /// 【为什么要用 ??= 而不是 = 给 StartedAt 赋值】
-    /// ??= 的意思是"只在它还是空的时候赋值"。
-    /// 假设你在 9:00 点过一次"开始"，9:20 又手滑点了一下，
-    /// 如果用普通赋值，StartedAt 会被刷新成 9:20，
-    /// 算出来的启动延迟就从真实值缩水了二十分钟——数据静默失真，而且不可逆。
-    /// 首次开始时间是一旦产生就不可修改的事实，所以只能写一次。
-    ///
-    /// 【为什么跳过要单独收一个理由参数，而不是先设状态再改字段】
-    /// 因为"状态变成跳过"和"记下为什么跳过"必须同时发生。
-    /// 分成两步的话，中间任何一次异常都会留下一条"跳过了但没说为什么"的记录，
-    /// 而这种记录对 AI 毫无价值——它看到的是"又没做"，看不到"今天有原因"。
-    /// 一起提交，要么都成，要么都不成。
+    /// 【为什么跳过要单独收一个理由参数】
+    /// "状态变成跳过"和"记下为什么跳过"必须同时发生，一起提交，要么都成，要么都不成。
     /// </summary>
     /// <param name="skipReason">跳过的原因，只在设为"跳过"时生效。</param>
-    public async Task<Item?> SetStatusAsync(Guid id, ItemStatus status, string? skipReason,
+    public async Task<Item?> SetStatusAsync(Guid id, ItemStatus status, string? skipReason = null,
         CancellationToken ct = default)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
@@ -944,15 +923,18 @@ public class ItemRepository
 
         if (time is null)
         {
-            // 只给日期：它是"那天要做完"，给一个截止时刻，不留具体开始时间
+            // 只给日期：它是"那天要做完"，给一个截止时刻，不留具体开始时间。
+            // Shape 也要跟着改成定日——否则一条「只有截止日」的事被改到某天后，形态还是旧的。
             item.StartAt = null;
             item.DueAt = DateHelper.EndOfDay(day);
+            item.Shape = ItemShape.DayTask;
         }
         else
         {
-            // 给了几点：它是"那天那个时刻开始"，不再需要截止时间
+            // 给了几点：它是"那天那个时刻开始"，不再需要截止时间，形态改成定点。
             item.StartAt = DateHelper.StartOfDay(day).Add(time.Value);
             item.DueAt = null;
+            item.Shape = ItemShape.Timed;
         }
 
         await db.SaveChangesAsync(ct);
@@ -1039,26 +1021,6 @@ public class ItemRepository
     }
 
     // ---------- 日期换算的小工具 ----------
-
-    /// <summary>
-    /// 把"某一天"换算成一个确切的时刻。
-    ///
-    /// 【为什么要折腾这么一下】
-    /// DateTimeOffset 必须带偏移量才能表示一个确切瞬间，而单纯的"2026-09-27"没有偏移。
-    /// 所以显式用本地时区把这一天的零点补上偏移，得到类似
-    /// 2026-09-27T00:00:00+08:00 的值，才能拿去和数据库里的时间比大小。
-    ///
-    /// 【时区问题在哪一层被解决】
-    /// 在 AppDbContext 里：所有 DateTimeOffset 入库前都会转成 UTC 毫秒。
-    /// 也就是说数据库里存的是绝对时刻，两台不同时区的设备比大小都不会出错。
-    /// 这里只需要负责"把本地的一天"翻译成一个正确的瞬间即可，其余不必操心。
-    /// （如果不做那层转换，跨时区比较会出错——详见 AppDbContext 里的说明。）
-    /// </summary>
-    private static DateTimeOffset StartOfDayAsLocalOffset(DateOnly day)
-    {
-        // 实现统一放在 DateHelper 里，理由见那里的说明。
-        return DateHelper.StartOfDay(day);
-    }
 
     /// <summary>今天最后一刻（23:59:59.999），用作默认的截止时间。</summary>
     private static DateTimeOffset EndOfToday()

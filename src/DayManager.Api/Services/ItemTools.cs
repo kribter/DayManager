@@ -557,15 +557,7 @@ public sealed class ItemTools
         };
     }
 
-    private static string StatusName(ItemStatus status) => status switch
-    {
-        ItemStatus.Pending => "待办",
-        ItemStatus.InProgress => "进行中",
-        ItemStatus.Done => "完成",
-        ItemStatus.Skipped => "今天跳过",
-        ItemStatus.Abandoned => "不做了",
-        _ => status.ToString()
-    };
+    private static string StatusName(ItemStatus status) => status.ToDisplayName();
 
     private static ActionOutcome Ok(string op, Guid id, string title, string detail) => new()
     {

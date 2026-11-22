@@ -164,4 +164,20 @@ public sealed class AiProxy
             return AiProxyResult.Ok(body);
         }
     }
+
+    /// <summary>
+    /// 这些状态码值得原样重试一次：限流、超时、网关类错误。
+    /// 503 排除在外——它在 ChatAsync 里是「没配密钥 / 没配地址」的约定，重试只是白等。
+    /// 之前 AgentService 与 ProactiveService 各写一份且判据相反，这里统一。
+    /// </summary>
+    public static bool IsTransient(int statusCode)
+    {
+        if (statusCode == StatusCodes.Status408RequestTimeout
+            || statusCode == StatusCodes.Status429TooManyRequests)
+        {
+            return true;
+        }
+
+        return statusCode >= 500 && statusCode != StatusCodes.Status503ServiceUnavailable;
+    }
 }

@@ -1,4 +1,4 @@
-﻿using DayManager.App.Services;
+using DayManager.App.Services;
 using DayManager.App.Controls;
 using DayManager.App.ViewModels;
 using DayManager.Core.Intervention;
@@ -245,11 +245,7 @@ public static class MauiProgram
 				provider.GetRequiredService<ServerSettings>().BaseUrl,
 				SeedFileReader.RepoRoot));
 
-		// 任务拆解：把一件模糊的大事拆成能照着做的每日计划。
-		// 无状态（它只是拿着 ApiClient 去问 AI），所以做成单例。
-		builder.Services.AddSingleton<TaskDecomposer>();
-
-		// 说话之前先确保后端在，不在就自己拉起来。对话页和拆解页共用同一套逻辑。
+		// 说话之前先确保后端在，不在就自己拉起来。
 		builder.Services.AddSingleton<BackendGuard>();
 
 		// 界面深浅。跟随系统 / 强制浅色 / 强制深色，用户的选择存在策略表里。
@@ -264,8 +260,6 @@ public static class MauiProgram
 		// 不注册的话，容器会尝试找无参构造函数 → MainPage 又需要一个 MainViewModel → 直接崩。
 		// 这是用 Shell + DI 时最容易漏的一步。
 		builder.Services.AddTransient<MainPage>();
-		builder.Services.AddTransient<PlanPage>();
-		builder.Services.AddTransient<PlanViewModel>();
 
 		// 对话页是核心界面，默认落在它上面（决策 D12）。
 		builder.Services.AddTransient<ChatPage>();

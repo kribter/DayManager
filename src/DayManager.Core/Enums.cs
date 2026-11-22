@@ -311,3 +311,22 @@ public enum AppKind
     /// <summary>工作。永不提醒，哪怕内置名单里把它算成娱乐（比如用 B 站看网课）。</summary>
     Work = 2
 }
+
+/// <summary>
+/// ItemStatus 的中文显示名。全局唯一一份。
+/// 之前在三处（AgentService / ItemTools / ProactiveService）各写一份，已经漂移
+/// （Pending 有「未开始/待办」、Done 有「已完成/完成」、Abandoned 有「放弃/不做了」）。
+/// 要改措辞只改这里。
+/// </summary>
+public static class ItemStatusDisplay
+{
+    public static string ToDisplayName(this ItemStatus status) => status switch
+    {
+        ItemStatus.Pending => "未开始",
+        ItemStatus.InProgress => "进行中",
+        ItemStatus.Done => "已完成",
+        ItemStatus.Skipped => "今天跳过",
+        ItemStatus.Abandoned => "放弃",
+        _ => status.ToString()
+    };
+}

@@ -1,3 +1,5 @@
+using DayManager.Core.Planning;
+
 namespace DayManager.Core.Ai;
 
 /// <summary>
@@ -87,8 +89,7 @@ public static class ChatTime
     /// 不直接拿 DateTimeOffset 的 Date 比——库里存的是 UTC，
     /// 北京时间 23:49 在 UTC 里是当天 15:49，照 UTC 切会把跨夜的两条算成同一天。
     /// </summary>
-    public static DateOnly LocalDay(DateTimeOffset at) =>
-        DateOnly.FromDateTime(at.ToLocalTime().DateTime);
+    public static DateOnly LocalDay(DateTimeOffset at) => ItemPresence.LocalDay(at);
 
     /// <summary>
     /// 给一条历史消息加时间标注。标注是**系统加的**，不是用户说的原话，
