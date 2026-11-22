@@ -38,7 +38,16 @@ public sealed record ProjectSummary(
     int DoneCount,
     int ActiveCount,
     int AbandonedCount,
-    DateTimeOffset? NextDueAt);
+    DateTimeOffset? NextDueAt,
+    /// <summary>
+    /// 这个项目下还挂着几条**活着的**任务（含容器；软删的不算）。
+    ///
+    /// 【为什么需要一个单独的计数，而不是把三个状态数加起来】
+    /// 容器（阶段性目标）不参与进度，所以不在 Done/Active/Abandoned 任何一个里。
+    /// 而"能不能删"只认这一个数——它和 DeleteIfEmptyAsync 的判据是同一份，
+    /// 两边不一致就会出现"按钮显示着、点下去删不掉"（11-23 00:45 真事）。
+    /// </summary>
+    int TotalItemCount);
 
 public class ProjectRepository
 {
@@ -149,15 +158,43 @@ public class ProjectRepository
     /// 这里用两条 GROUP BY 把所有项目的统计一次取回，再在内存里拼起来，
     /// 恒定的两次查询，跟项目多少无关。
     /// </summary>
-    public async Task<List<ProjectSummary>> GetActiveWithProgressAsync(CancellationToken ct = default)
+    public Task<List<ProjectSummary>> GetActiveWithProgressAsync(CancellationToken ct = default) =>
+        GetWithProgressAsync(ProjectStatus.Active, ct);
+
+    /// <summary>
+    /// 已归档的项目 + 各自的进度。
+    ///
+    /// 【为什么归档的也要给进度】
+    /// 用户做完一件大事之后归档它，然后**没有任何地方能再看见"我做成过哪些"**——
+    /// 列表只查 Active，归档等于从界面上彻底消失（更讽刺的是 AI 那边反而看得见，
+    /// 见 GetAllWithItemsAsync）。这条补的就是那个去处。
+    ///
+    /// 进度还带着，是为了把「做完了」和「不想做了」分开：
+    /// 两者现在共用 Archived 一个状态值，没有字段能区分，
+    /// 只能看"子任务是不是全做完了"。
+    ///
+    /// 【为什么按 UpdatedAt 倒序】
+    /// 刚收起来的排前面。归档的项目没有"下次什么时候到期"，
+    /// 目标日期也多半过去了，对排序没意义。
+    /// </summary>
+    public Task<List<ProjectSummary>> GetArchivedWithProgressAsync(CancellationToken ct = default) =>
+        GetWithProgressAsync(ProjectStatus.Archived, ct);
+
+    private async Task<List<ProjectSummary>> GetWithProgressAsync(ProjectStatus status, CancellationToken ct)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
-        var projects = await db.Projects
-            .Where(p => p.Status == ProjectStatus.Active)
-            .OrderBy(p => p.TargetDate ?? DateTimeOffset.MaxValue)
-            .ThenBy(p => p.CreatedAt)
-            .ToListAsync(ct);
+        var query = db.Projects.Where(p => p.Status == status);
+
+        // 进行中按"离目标日期最近"，归档按"最近动过"。
+        var projects = status == ProjectStatus.Active
+            ? await query
+                .OrderBy(p => p.TargetDate ?? DateTimeOffset.MaxValue)
+                .ThenBy(p => p.CreatedAt)
+                .ToListAsync(ct)
+            : await query
+                .OrderByDescending(p => p.UpdatedAt)
+                .ToListAsync(ct);
 
         if (projects.Count == 0)
         {
@@ -192,6 +229,24 @@ public class ProjectRepository
             .Select(g => new { ProjectId = g.Key, Next = g.Min(x => x.DueAt) })
             .ToDictionaryAsync(x => x.ProjectId, x => x.Next, ct);
 
+        // 第三条：每个项目下**还挂着几条活着的**任务（含容器）。
+        //
+        // 【为什么这条要单列】
+        // 「能不能删」的闸门在 DeleteIfEmptyAsync，界面那个按钮的判据必须跟它一致，
+        // 否则会出现"按钮显示着、点下去仓储拒绝"——11-23 00:45 用户撞的正是这个：
+        // 当时拿 ActiveCount == 0 判空，而容器不计入 ActiveCount，
+        // 于是一个只挂着阶段性目标的项目看起来"空"、实际删不掉。
+        //
+        // 【为什么不算软删的】
+        // 软删就是"这条不要了"。拿它阻止删项目没有道理——
+        // 真实库里 8 个空壳全是这种：任务被删过一遍，界面显示 0/0，却删不掉。
+        // 它们的残壳会在 DeleteIfEmptyAsync 里被顺手物理清掉。
+        var itemTotals = await db.Items
+            .Where(x => x.ProjectId != null && ids.Contains(x.ProjectId.Value))
+            .GroupBy(x => x.ProjectId!.Value)
+            .Select(g => new { ProjectId = g.Key, Total = g.Count() })
+            .ToDictionaryAsync(x => x.ProjectId, x => x.Total, ct);
+
         var byProject = counts
             .GroupBy(x => x.ProjectId!.Value)
             .ToDictionary(g => g.Key, g => g.ToDictionary(x => x.Status, x => x.Count));
@@ -218,7 +273,8 @@ public class ProjectRepository
             return new ProjectSummary(
                 p.Id, p.Name, p.Color, p.TargetDate,
                 done, active, abandoned,
-                nextDue.TryGetValue(p.Id, out var next) ? next : null);
+                nextDue.TryGetValue(p.Id, out var next) ? next : null,
+                itemTotals.TryGetValue(p.Id, out var total) ? total : 0);
         }).ToList();
     }
 
@@ -343,6 +399,83 @@ public class ProjectRepository
         project.Status = ProjectStatus.Archived;
 
         await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// 把归档的项目放回进行中。
+    ///
+    /// 【为什么必须有这个方法】
+    /// 归档原来是**不可逆**的：菜单写「归档（不再显示）」、确认弹窗还给了「再想想」，
+    /// 但点下去之后界面上没有任何地方能把它放回来——只能去改数据库。
+    /// 一个可逆的措辞配一个不可逆的实现，比一开始就说不可逆更糟。
+    ///
+    /// 归档区的「恢复」按钮走这里。加它不是为了多一个功能，
+    /// 是因为"看得见已归档的"之后，下一步一定有人想点开看细节、或者放回去继续做。
+    /// </summary>
+    public async Task UnarchiveAsync(Guid projectId, CancellationToken ct = default)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var project = await db.Projects.FindAsync([projectId], ct);
+        if (project is null)
+        {
+            return;
+        }
+
+        project.Status = ProjectStatus.Active;
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// 真删一个项目 —— **只允许删"底下没有活着的任务"的**。
+    ///
+    /// 【什么叫"空"】
+    /// 只看未删的 items（含容器）。软删的不算——那是"已经不要了"的记录，
+    /// 拿它来阻止删项目没有道理：真实库里就有 8 个这样的空壳，
+    /// 任务全被删过一遍，界面上显示 0/0，却因为底下躺着软删行而删不掉。
+    ///
+    /// 【为什么要把软删的残壳一起物理清掉】
+    /// 项目删了之后，那些软删的 items 会留下 ProjectId 指向不存在的项目，成为孤儿行。
+    /// 它们不可见、也不影响任何统计，但将来真做"回收站 / 恢复"时会找不到归属。
+    /// 顺手清干净比留着强。
+    ///
+    /// 【为什么先断开 ParentTaskId 再删】
+    /// 父子自引用是 ClientSetNull，靠 EF 在客户端补；
+    /// 而 ExecuteDelete 走的是数据库批量删除、绕过了 EF。
+    /// 同一批里父和子一起删时，外键检查会撞车，所以先把引用断掉。
+    /// </summary>
+    public async Task<bool> DeleteIfEmptyAsync(Guid projectId, CancellationToken ct = default)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var project = await db.Projects.FindAsync([projectId], ct);
+        if (project is null)
+        {
+            return false;
+        }
+
+        // 有全局软删过滤器：这里问到的是"活着的"任务（含容器）。
+        var hasLive = await db.Items.AnyAsync(x => x.ProjectId == projectId, ct);
+
+        if (hasLive)
+        {
+            return false;
+        }
+
+        await db.Items
+            .IgnoreQueryFilters()
+            .Where(x => x.ProjectId == projectId)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.ParentTaskId, (Guid?)null), ct);
+
+        await db.Items
+            .IgnoreQueryFilters()
+            .Where(x => x.ProjectId == projectId)
+            .ExecuteDeleteAsync(ct);
+
+        db.Projects.Remove(project);
+        await db.SaveChangesAsync(ct);
+        return true;
     }
 
     /// <summary>

@@ -3523,6 +3523,154 @@ Console.WriteLine("=== 36. 收分类 + 大任务递归层级：主要是删，�
     try { File.Delete(dbFile41); } catch { }
 }
 
+// ===== 第 42 节：归档的大任务看得见了（11-23 用户「完成后直接归档消失」）=====
+// 归档以前等于从界面上彻底消失：列表只查 Active，收起来之后就再也找不到。
+// 更别扭的是 AI 那边一直看得见（GetAllWithItemsAsync 特意给了归档的），只有用户自己看不见。
+// 这节守三件事：归档的能查出来、按进度分得清"做成过的"和"搁下的"、能放回去。
+{
+    var dbFile42 = Path.Combine(Path.GetTempPath(), $"dm-smoke-arch-{Guid.NewGuid():N}.db");
+    var factory42 = new TestFactory(dbFile42);
+    await using (var db42 = factory42.CreateDbContext())
+    {
+        await db42.Database.EnsureCreatedAsync();
+    }
+
+    var projects42 = new ProjectRepository(factory42);
+    var items42 = new ItemRepository(factory42);
+
+    // ① 做完了才归档的：两条子任务都完成
+    var done42 = await projects42.CreateAsync("做成过的大任务", null);
+    var d142 = await items42.AddAsync("第一部分", projectId: done42.Id);
+    var d242 = await items42.AddAsync("第二部分", projectId: done42.Id);
+    await items42.ToggleDoneAsync(d142.Id);
+    await items42.ToggleDoneAsync(d242.Id);
+    await projects42.ArchiveAsync(done42.Id);
+
+    // ② 没做完就归档的：只完成一条
+    var half42 = await projects42.CreateAsync("搁下的大任务", null);
+    var h142 = await items42.AddAsync("做过的", projectId: half42.Id);
+    await items42.AddAsync("没做的", projectId: half42.Id);
+    await items42.ToggleDoneAsync(h142.Id);
+    await projects42.ArchiveAsync(half42.Id);
+
+    var archived42 = await projects42.GetArchivedWithProgressAsync();
+    Check("归档的项目能被查出来（以前列表只查进行中，归档=消失）", archived42.Count == 2);
+
+    var a42 = archived42.FirstOrDefault(x => x.Name == "做成过的大任务");
+    var b42 = archived42.FirstOrDefault(x => x.Name == "搁下的大任务");
+
+    Check("「做成过的」判据：子任务全做完（done == active 且 active > 0）",
+        a42 is not null && a42.ActiveCount == 2 && a42.DoneCount == 2);
+    Check("「搁下的」判据：还有没做完的",
+        b42 is not null && b42.ActiveCount == 2 && b42.DoneCount == 1);
+
+    var active42 = await projects42.GetActiveWithProgressAsync();
+    Check("归档的不再出现在进行中列表里",
+        active42.All(x => x.Name != "做成过的大任务"));
+
+    // ③ 恢复：归档原来是不可逆的
+    await projects42.UnarchiveAsync(done42.Id);
+    var back42 = await projects42.GetActiveWithProgressAsync();
+    Check("「恢复」能把它放回进行中（原来只能改数据库）",
+        back42.Any(x => x.Name == "做成过的大任务"));
+
+    // ④ 界面结构：两件事要靠扫描守住
+    var src42 = FindSrcRoot();
+    string Read42(string rel) => src42 is null ? "" : File.ReadAllText(Path.Combine(src42, rel));
+    var vm42 = Read42(Path.Combine("DayManager.App", "ViewModels", "ProjectsViewModel.cs"));
+    var page42 = Read42(Path.Combine("DayManager.App", "ProjectsPage.xaml"));
+
+    Check("归档分成两堆，靠进度判断而不是加状态字段",
+        vm42.Contains("ArchivedDone") && vm42.Contains("ArchivedShelved")
+        && vm42.Contains("s.ActiveCount > 0 && s.DoneCount == s.ActiveCount"));
+    Check("空提示连归档一起判（全归档了不说「还没有大任务」）",
+        vm42.Contains("Projects.Count == 0")
+        && vm42.Contains("ArchivedDone.Count == 0")
+        && vm42.Contains("ArchivedShelved.Count == 0"));
+    // 【为什么这条要先剥 XML 注释】
+    // 页面顶部那段注释正在解释"为什么不再用 CollectionView"——它自己就带着这个词。
+    // 直接 Contains 会被注释撞红（11-22 符号、11-23 文案，今天第三次）。
+    // 扫源码的断言一律先剥注释，这样注释才可以自由引用旧写法。
+    var page42NoComment = System.Text.RegularExpressions.Regex.Replace(
+        page42, "<!--.*?-->", string.Empty,
+        System.Text.RegularExpressions.RegexOptions.Singleline);
+
+    Check("大任务页不再用 CollectionView（空列表时它的 Header/Footer 不滚动）",
+        !page42NoComment.Contains("CollectionView")
+        && page42NoComment.Contains("<ScrollView Grid.Row=\"0\">"));
+    Check("归档行给了「恢复」入口，不是只能干看着",
+        page42.Contains("Path=UnarchiveCommand")
+        && vm42.Contains("UnarchiveAsync"));
+    Check("归档行和进行中卡片共用一份进度文案（不另写一套）",
+        page42.Contains("ArchivedRowTemplate")
+        && page42.Contains("{Binding ProgressText}"));
+
+    // ⑤ 删除：只对空项目开放。
+    // 删有内容的项目不是"干净地没了"——外键是 SetNull，底下任务会变成无主的零散条目。
+    var empty42 = await projects42.CreateAsync("空壳项目", null);
+    await projects42.ArchiveAsync(empty42.Id);
+
+    Check("空项目可以真删（归档只能让它换个地方继续堆着）",
+        await projects42.DeleteIfEmptyAsync(empty42.Id));
+
+    Check("有子任务的项目拒绝删除（否则任务会散成无主碎片）",
+        !await projects42.DeleteIfEmptyAsync(half42.Id));
+
+    Check("删项目时把软删留下的残壳一起物理清掉，不留孤儿行",
+        Read42(Path.Combine("DayManager.Data", "Repositories", "ProjectRepository.cs"))
+            .Contains("ExecuteDeleteAsync"));
+
+    Check("归档行只在空项目上给「删除」，其余只有「恢复」",
+        page42.Contains("IsVisible=\"{Binding CanDelete}\"")
+        && page42.Contains("Path=DeleteArchivedCommand"));
+
+    Check("归档区默认展开，且标题里直接写出分类（收起时看不到「搁下的」）",
+        vm42.Contains("IsArchivedExpanded = true")
+        && vm42.Contains("做成 {done}"));
+
+    // ⑥ 只有容器（阶段性目标）的项目：ActiveCount 是 0，但它不是空的。
+    // 11-23 00:45 用户报「删除不了」，根因就是这里——
+    // 界面拿 ActiveCount == 0 判空，仓储查的是全部 items，两边不一致：
+    // 按钮显示着，点下去仓储拒绝，用户看到的是"点了没反应"。
+    var onlyStage42 = await projects42.CreateAsync("只有阶段的项目", null);
+    await items42.AddContainerAsync("第一章", projectId: onlyStage42.Id);
+    await projects42.ArchiveAsync(onlyStage42.Id);
+
+    var archivedStage42 = await projects42.GetArchivedWithProgressAsync();
+    var stage42 = archivedStage42.FirstOrDefault(x => x.Name == "只有阶段的项目");
+
+    Check("只有阶段的项目：ActiveCount == 0，但它不是空的（TotalItemCount == 1）",
+        stage42 is not null && stage42.ActiveCount == 0 && stage42.TotalItemCount == 1);
+
+    Check("所以删除必须拒绝它（界面判据现已与仓储对齐）",
+        !await projects42.DeleteIfEmptyAsync(onlyStage42.Id));
+
+    // ⑦ 任务被删光（只剩软删记录）的项目：能删，而且残壳要一起清掉。
+    // 真实库里 8 个空壳全是这种——不然界面上永远显示 0/0、又永远删不掉。
+    var ghost42 = await projects42.CreateAsync("删过任务的项目", null);
+    var g142 = await items42.AddAsync("已经被删掉的", projectId: ghost42.Id);
+    await items42.SoftDeleteAsync(g142.Id);
+    await projects42.ArchiveAsync(ghost42.Id);
+
+    var ghostList42 = await projects42.GetArchivedWithProgressAsync();
+    var ghostCard42 = ghostList42.FirstOrDefault(x => x.Name == "删过任务的项目");
+
+    Check("软删过的项目算「空」：TotalItemCount 只数活着的",
+        ghostCard42 is not null && ghostCard42.TotalItemCount == 0);
+
+    var removed42 = await projects42.DeleteIfEmptyAsync(ghost42.Id);
+    var ghostLeft42 = await projects42.GetArchivedWithProgressAsync();
+
+    Check("它能被删掉（以前因为底下躺着软删行而删不掉）",
+        removed42 && ghostLeft42.All(x => x.Name != "删过任务的项目"));
+
+    await using (var dbChk42 = factory42.CreateDbContext())
+    {
+        var orphans = dbChk42.Items.IgnoreQueryFilters().Count(x => x.ProjectId == ghost42.Id);
+        Check("删完不留孤儿行（软删的残壳一起清掉）", orphans == 0);
+    }
+}
+
 Console.WriteLine();
 Console.WriteLine($"===== 结果：通过 {passed} 项，失败 {failed} 项 =====");
 

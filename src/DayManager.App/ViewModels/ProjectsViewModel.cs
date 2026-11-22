@@ -31,6 +31,9 @@ public partial class ProjectsViewModel : ObservableObject
     {
         _projects = projects;
 
+        // 默认展开：收起时只看得见总数，用户会以为"搁下的"没做出来（11-23 00:50 原样发生过）。
+        IsArchivedExpanded = true;
+
         // 和日程页同一个道理：AI 在对话里改了数据，这一页必须立刻跟着变。
         // 不能指望切 Tab 触发 OnAppearing——Shell 不保证。
         WeakReferenceMessenger.Default.Register<ItemsChangedMessage>(
@@ -44,6 +47,75 @@ public partial class ProjectsViewModel : ObservableObject
     }
 
     public ObservableCollection<ProjectCardViewModel> Projects { get; } = new();
+
+    /// <summary>
+    /// 「做成过的」——子任务全做完才归档的那些。
+    ///
+    /// 【为什么归档的也要摆出来】
+    /// 归档原先是"从界面上彻底消失"：列表只查进行中，收起来之后就再也找不到了。
+    /// 而"我做成过哪些大事"恰恰是这个软件最该给人的正反馈之一——
+    /// 它比完成率更能说明问题，因为一件大事的完成跨了好几天、好几屏。
+    /// （更别扭的是 AI 那边一直看得见归档项目，只有用户自己看不见。）
+    ///
+    /// 【为什么分两堆，而不是一堆】
+    /// Archived 一个状态值里混着两种情况："做完了收起来"和"不想做了收起来"。
+    /// 它们对用户的意义完全相反，混在一起会让"做成过"这件事失真。
+    /// 区分不需要新字段——看子任务是不是全做完就够了（ActiveCount 已排除放弃项）。
+    /// </summary>
+    public ObservableCollection<ProjectCardViewModel> ArchivedDone { get; } = new();
+
+    /// <summary>「搁下的」——还有没做完的就收起来了。</summary>
+    public ObservableCollection<ProjectCardViewModel> ArchivedShelved { get; } = new();
+
+    /// <summary>
+    /// 归档区要不要展开。
+    ///
+    /// 【为什么默认展开】
+    /// 原来默认收起，理由是"别天天占屏幕"。但收起状态下只看得见一个总数，
+    /// 用户根本不知道里头分了"做成过的"和"搁下的"——11-23 00:50 他截了张图问
+    /// "看不到搁置的"，就是被这个收起挡住了。
+    /// 归档区总共就几条，展开也就两百来像素，不值得为省这点空间把内容藏起来。
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ArchivedToggleText))]
+    public partial bool IsArchivedExpanded { get; set; }
+
+    public bool HasArchived => ArchivedDone.Count + ArchivedShelved.Count > 0;
+
+    public bool HasArchivedDone => ArchivedDone.Count > 0;
+
+    public bool HasArchivedShelved => ArchivedShelved.Count > 0;
+
+    /// <summary>
+    /// 「已归档 · 6 个（做成 5 · 搁下 1）」。
+    ///
+    /// 【为什么把分类写进标题】
+    /// 收起时也要能一眼看出两边各有几条。只写总数的话，
+    /// 用户得点开才知道里面有没有"搁下的"，而"点开"本身就是一道门槛。
+    /// </summary>
+    public string ArchivedHeaderText
+    {
+        get
+        {
+            var done = ArchivedDone.Count;
+            var shelved = ArchivedShelved.Count;
+            var total = done + shelved;
+
+            if (total == 0)
+            {
+                return "已归档";
+            }
+
+            var detail = done > 0 && shelved > 0
+                ? $"（做成 {done} · 搁下 {shelved}）"
+                : done > 0 ? "（都是做成过的）" : "（都是搁下的）";
+
+            return $"已归档 · {total} 个{detail}";
+        }
+    }
+
+    /// <summary>展开/收起按钮上的字。后缀用小写 v，同日程页那条规矩：不用字体里可能缺的字形。</summary>
+    public string ArchivedToggleText => IsArchivedExpanded ? "收起 v" : "展开 v";
 
     [ObservableProperty]
     public partial bool IsBusy { get; set; }
@@ -70,7 +142,41 @@ public partial class ProjectsViewModel : ObservableObject
                 Projects.Add(new ProjectCardViewModel(s));
             }
 
-            IsEmpty = Projects.Count == 0;
+            // 归档的那批：给"我做成过什么"一个去处。
+            var archived = await _projects.GetArchivedWithProgressAsync();
+
+            ArchivedDone.Clear();
+            ArchivedShelved.Clear();
+            foreach (var s in archived)
+            {
+                var card = new ProjectCardViewModel(s);
+
+                // 【判"做完了"为什么用 done == active】
+                // ActiveCount 已经排除了放弃的子任务（见仓储里那段注释），
+                // 所以"全做完"就是两者相等。active == 0 不算做成过——
+                // 一条子任务都没拆就归档，那不叫完成，叫还没开始就不要了。
+                if (s.ActiveCount > 0 && s.DoneCount == s.ActiveCount)
+                {
+                    ArchivedDone.Add(card);
+                }
+                else
+                {
+                    ArchivedShelved.Add(card);
+                }
+            }
+
+            // 【空提示要连归档一起判】
+            // 只看进行中，会把"做完了三件大事、全都收起来"的那一天说成"还没有大任务"——
+            // 那是最伤人的一句话（同日程页"全做完却说今天还没有安排"那个坑）。
+            IsEmpty = Projects.Count == 0
+                      && ArchivedDone.Count == 0
+                      && ArchivedShelved.Count == 0;
+
+            // 这几个是计算属性，集合变了不会自动通知。
+            OnPropertyChanged(nameof(HasArchived));
+            OnPropertyChanged(nameof(HasArchivedDone));
+            OnPropertyChanged(nameof(HasArchivedShelved));
+            OnPropertyChanged(nameof(ArchivedHeaderText));
         }
         catch (Exception ex)
         {
@@ -99,6 +205,96 @@ public partial class ProjectsViewModel : ObservableObject
         try
         {
             await Shell.Current.GoToAsync($"ProjectDetailPage?projectId={card.Id}");
+        }
+        catch (Exception ex)
+        {
+            await ReportErrorAsync(ex);
+        }
+    }
+
+    /// <summary>展开 / 收起归档区。</summary>
+    [RelayCommand]
+    private void ToggleArchived() => IsArchivedExpanded = !IsArchivedExpanded;
+
+    /// <summary>
+    /// 把归档的项目放回进行中。
+    ///
+    /// 【为什么这个按钮必须有】
+    /// 归档原先是不可逆的：确认弹窗给了「再想想」，但点下去之后界面上没有任何地方能回来。
+    /// 现在归档区看得见了，下一步一定有人想把它放回去接着做——
+    /// 没有这个按钮，他能做的只有再新建一个同名项目，然后两套子任务并存，
+    /// 进度也分成两个永远到不了 100% 的半截。
+    /// </summary>
+    [RelayCommand]
+    private async Task UnarchiveAsync(ProjectCardViewModel card)
+    {
+        if (card is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _projects.UnarchiveAsync(card.Id);
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            await ReportErrorAsync(ex);
+        }
+    }
+
+    /// <summary>
+    /// 真删一个空项目。
+    ///
+    /// 【为什么归档有、删除也要有】
+    /// 归档只是"收起来"，垃圾还会一直堆在那儿——真实库里就有 9 个建了没拆的空壳
+    /// （`adsada`、三个同名「数据结构期末复习」），它们会把"做成过的"那 6 个真成就淹掉。
+    /// 空项目删了不丢任何东西，而归档只能让它们换一个地方待着。
+    ///
+    /// 【为什么必须弹确认】
+    /// 归档可逆、删除不可逆。这个区别得让用户当场看见，
+    /// 而不是点完才发现"原来这个回不来"。
+    /// </summary>
+    [RelayCommand]
+    private async Task DeleteArchivedAsync(ProjectCardViewModel card)
+    {
+        if (card is null)
+        {
+            return;
+        }
+
+        var page = CurrentPage;
+        if (page is null)
+        {
+            return;
+        }
+
+        var ok = await page.DisplayAlertAsync(
+            "删除",
+            $"「{card.Name}」会被真的删掉，不是收起来。它下面没有任务，所以不会丢别的东西。",
+            "删除",
+            "算了");
+
+        if (!ok)
+        {
+            return;
+        }
+
+        try
+        {
+            var deleted = await _projects.DeleteIfEmptyAsync(card.Id);
+
+            if (!deleted)
+            {
+                // 【为什么不静默失败】
+                // 界面判空是粗判（只看非容器子任务），库里可能还挂着阶段。
+                // 这时候悄悄什么都不做，用户会以为删了，下次刷新它又在那儿——
+                // 那比直接说"删不了"更让人怀疑软件坏了。
+                await page.DisplayAlertAsync("没能删", "这个项目下面还有任务或阶段，先清空再来删。", "好");
+            }
+
+            await LoadAsync();
         }
         catch (Exception ex)
         {
@@ -391,6 +587,14 @@ public partial class ProjectCardViewModel : ObservableObject
 
         HasProgress = active > 0;
 
+        // 【什么时候允许"真删"】
+        // 判据必须和仓储的 DeleteIfEmptyAsync 完全一致：一条 items 都没有，含容器和软删。
+        // 【11-23 00:45 的教训】原来这里写的是 active == 0，而容器和软删都不计入 active，
+        // 于是一个只挂着阶段性目标的项目看起来"空"，按钮出现了、点下去却被仓储拒绝——
+        // 用户看到的就是"删除不了"，而两边都没报错。
+        // 判据不一致比判据错更难查：它不在同一处，也没有任何提示。
+        CanDelete = summary.TotalItemCount == 0;
+
         (TargetText, TargetColor) = BuildTargetText(summary.TargetDate);
         NextText = BuildNextText(summary.NextDueAt);
     }
@@ -414,6 +618,12 @@ public partial class ProjectCardViewModel : ObservableObject
     public string ProgressText { get; }
 
     public bool HasProgress { get; }
+
+    /// <summary>
+    /// 能不能真删。只有一条子任务都没有的项目才为真。
+    /// 判据的完整版在仓储里（连软删和容器都查），这里只决定按钮显不显示。
+    /// </summary>
+    public bool CanDelete { get; }
 
     public string TargetText { get; }
 

@@ -8,6 +8,65 @@
              Shell.NavBarIsVisible="False"
              Title="大任务">
 
+    <ContentPage.Resources>
+        <!--
+          ============ 归档行模板（做成过的 / 搁下的，两堆共用）============
+          【为什么是"行"而不是原来的大卡片】
+          归档区回答的是"我做成了哪些事"，不是"那件事推进到哪了"。
+          它不需要进度条和目标日期——那些是做的时候盯的，做完了只剩一句"几件都做完了"。
+          做成一排轻行，几十个归档也不会淹没页面。
+          点一下仍能进详情，看当初拆了哪些子任务。
+        -->
+        <DataTemplate x:Key="ArchivedRowTemplate" x:DataType="vm:ProjectCardViewModel">
+            <Grid ColumnDefinitions="*,Auto,Auto,Auto"
+                  ColumnSpacing="8"
+                  Padding="10,9">
+
+                <Grid.GestureRecognizers>
+                    <TapGestureRecognizer
+                        Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ProjectsViewModel}}, Path=OpenCommand}"
+                        CommandParameter="{Binding .}" />
+                </Grid.GestureRecognizers>
+
+                <Label Grid.Column="0"
+                       Text="{Binding Name}"
+                       FontSize="14"
+                       LineBreakMode="TailTruncation"
+                       VerticalOptions="Center" />
+
+                <Label Grid.Column="1"
+                       Text="{Binding ProgressText}"
+                       Style="{StaticResource Caption}"
+                       VerticalOptions="Center" />
+
+                <!-- 【为什么删除只对空项目出现】
+                     删一个有内容的项目不是"干净地没了"：外键是 SetNull，
+                     底下的任务会变成无主的零散条目散在日程里，比不删更乱。
+                     所以只给一条子任务都没有的开放删除——它们本来就是垃圾，
+                     删了不丢任何东西（归档只能让它们换个地方继续堆着）。 -->
+                <Button Grid.Column="2"
+                        Text="删除"
+                        Style="{StaticResource ChipButton}"
+                        WidthRequest="52"
+                        IsVisible="{Binding CanDelete}"
+                        ToolTipProperties.Text="真的删掉（它下面没有任务）"
+                        Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ProjectsViewModel}}, Path=DeleteArchivedCommand}"
+                        CommandParameter="{Binding .}" />
+
+                <!-- 【为什么给「恢复」而不是只能眼看】
+                     归档原来是不可逆的：确认弹窗给了「再想想」，点下去却没有任何地方能回来。
+                     现在看得见了，下一步一定有人想放回去接着做。 -->
+                <Button Grid.Column="3"
+                        Text="恢复"
+                        Style="{StaticResource ChipButton}"
+                        WidthRequest="52"
+                        ToolTipProperties.Text="放回进行中，它会重新出现在上面的列表里"
+                        Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ProjectsViewModel}}, Path=UnarchiveCommand}"
+                        CommandParameter="{Binding .}" />
+            </Grid>
+        </DataTemplate>
+    </ContentPage.Resources>
+
     <!--
       ============================================================
       大任务列表。
@@ -32,14 +91,77 @@
           Padding="18"
           RowSpacing="14">
 
-        <CollectionView Grid.Row="0"
-                        ItemsSource="{Binding Projects}"
-                        SelectionMode="None">
+        <!-- 【为什么不再是 CollectionView（11-23 改）】
+             归档区要挂在列表下面。用 CollectionView.Footer 挂的话，
+             "所有大任务都归档了、进行中一个都没有"的那一天，
+             Footer 会照常画出来却完全不参与滚动——鼠标滚轮没反应，
+             归档区永远看不全。11-22 晚上日程页刚踩过一次同样的坑。
+             改成一个 ScrollView 装三段之后，页面上只有一层滚动容器。 -->
+        <ScrollView Grid.Row="0">
+            <VerticalStackLayout Spacing="0">
 
-            <CollectionView.EmptyView>
+                <!-- ① 进行中的大任务 -->
+                <VerticalStackLayout BindableLayout.ItemsSource="{Binding Projects}">
+                    <BindableLayout.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ProjectCardViewModel">
+                            <Border Style="{StaticResource CardStyle}"
+                                    Padding="16,14"
+                                    Margin="0,5">
+                                <Border.StrokeShape>
+                                    <RoundRectangle CornerRadius="12" />
+                                </Border.StrokeShape>
+
+                                <!-- 点整张卡片进详情。 -->
+                                <Border.GestureRecognizers>
+                                    <TapGestureRecognizer
+                                        Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ProjectsViewModel}}, Path=OpenCommand}"
+                                        CommandParameter="{Binding .}" />
+                                </Border.GestureRecognizers>
+
+                                <VerticalStackLayout Spacing="7">
+                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                        <Label Grid.Column="0"
+                                               Text="{Binding Name}"
+                                               FontSize="16"
+                                               FontAttributes="Bold"
+                                               LineBreakMode="TailTruncation"
+                                               VerticalOptions="Center" />
+
+                                        <Button Grid.Column="1"
+                                                Text="更多"
+                                                Style="{StaticResource ChipButton}"
+                                                WidthRequest="46"
+                                                ToolTipProperties.Text="重命名 / 改日期 / 归档"
+                                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ProjectsViewModel}}, Path=ShowActionsCommand}"
+                                                CommandParameter="{Binding .}" />
+                                    </Grid>
+
+                                    <ProgressBar Progress="{Binding ProgressRatio}"
+                                                 HeightRequest="6"
+                                                 ProgressColor="{StaticResource DoneGreen}"
+                                                 IsVisible="{Binding HasProgress}" />
+
+                                    <HorizontalStackLayout Spacing="10">
+                                        <Label Text="{Binding TargetText}"
+                                               TextColor="{Binding TargetColor}"
+                                               Style="{StaticResource Caption}" />
+                                        <Label Text="{Binding ProgressText}"
+                                               Style="{StaticResource Caption}" />
+                                    </HorizontalStackLayout>
+
+                                    <Label Text="{Binding NextText}"
+                                           Style="{StaticResource Caption}" />
+                                </VerticalStackLayout>
+                            </Border>
+                        </DataTemplate>
+                    </BindableLayout.ItemTemplate>
+                </VerticalStackLayout>
+
+                <!-- ② 一个都没有时的提示。
+                     【为什么单独判一次】"做完了三件大事、全归档了"的那一天，
+                     进行中确实是空的，但那时候说"还没有大任务"是把一整天抹掉。 -->
                 <VerticalStackLayout Spacing="6"
-                                     HorizontalOptions="Center"
-                                     VerticalOptions="Center"
+                                     IsVisible="{Binding IsEmpty}"
                                      Margin="0,40,0,0">
                     <Label Text="还没有大任务。"
                            Style="{StaticResource Caption}"
@@ -54,62 +176,60 @@
                            Style="{StaticResource Caption}"
                            HorizontalTextAlignment="Center" />
                 </VerticalStackLayout>
-            </CollectionView.EmptyView>
 
-            <CollectionView.ItemTemplate>
-                <DataTemplate x:DataType="vm:ProjectCardViewModel">
-                    <Border Style="{StaticResource CardStyle}"
-                            Padding="16,14"
-                            Margin="0,5">
-                        <Border.StrokeShape>
-                            <RoundRectangle CornerRadius="12" />
-                        </Border.StrokeShape>
+                <!-- ③ 已归档
+                     【为什么以前没有这一块】归档 = 从界面上彻底消失（列表只查进行中）。
+                     于是"我做成过哪些大任务"这件事，只有 AI 知道、用户自己看不到。
+                     这里是"看见轨迹"的第一块，也是最实的一块：
+                     不是打卡记录，是"这几个大任务你真做完了"。 -->
+                <VerticalStackLayout Spacing="2"
+                                     Margin="0,18,0,0"
+                                     IsVisible="{Binding HasArchived}">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <Label Grid.Column="0"
+                               Text="{Binding ArchivedHeaderText}"
+                               Style="{StaticResource CardTitle}"
+                               VerticalOptions="Center" />
+                        <Button Grid.Column="1"
+                                Text="{Binding ArchivedToggleText}"
+                                Style="{StaticResource ChipButton}"
+                                WidthRequest="66"
+                                ToolTipProperties.Text="展开看看做完过哪些，或把某个放回进行中"
+                                Command="{Binding ToggleArchivedCommand}" />
+                    </Grid>
 
-                        <!-- 点整张卡片进详情。 -->
-                        <Border.GestureRecognizers>
-                            <TapGestureRecognizer
-                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ProjectsViewModel}}, Path=OpenCommand}"
-                                CommandParameter="{Binding .}" />
-                        </Border.GestureRecognizers>
+                    <VerticalStackLayout Spacing="8"
+                                         IsVisible="{Binding IsArchivedExpanded}">
 
-                        <VerticalStackLayout Spacing="7">
-                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                                <Label Grid.Column="0"
-                                       Text="{Binding Name}"
-                                       FontSize="16"
-                                       FontAttributes="Bold"
-                                       LineBreakMode="TailTruncation"
-                                       VerticalOptions="Center" />
-
-                                <Button Grid.Column="1"
-                                        Text="更多"
-                                        Style="{StaticResource ChipButton}"
-                                        WidthRequest="46"
-                                        ToolTipProperties.Text="重命名 / 改日期 / 归档"
-                                        Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ProjectsViewModel}}, Path=ShowActionsCommand}"
-                                        CommandParameter="{Binding .}" />
-                            </Grid>
-
-                            <ProgressBar Progress="{Binding ProgressRatio}"
-                                         HeightRequest="6"
-                                         ProgressColor="{StaticResource DoneGreen}"
-                                         IsVisible="{Binding HasProgress}" />
-
-                            <HorizontalStackLayout Spacing="10">
-                                <Label Text="{Binding TargetText}"
-                                       TextColor="{Binding TargetColor}"
-                                       Style="{StaticResource Caption}" />
-                                <Label Text="{Binding ProgressText}"
-                                       Style="{StaticResource Caption}" />
-                            </HorizontalStackLayout>
-
-                            <Label Text="{Binding NextText}"
-                                   Style="{StaticResource Caption}" />
+                        <!-- 做成过的：子任务全做完才归档的 -->
+                        <VerticalStackLayout Spacing="0"
+                                             IsVisible="{Binding HasArchivedDone}">
+                            <Label Text="做成过的"
+                                   Style="{StaticResource Caption}"
+                                   TextColor="{StaticResource MutedText}"
+                                   Padding="10,6,0,2" />
+                            <VerticalStackLayout
+                                BindableLayout.ItemsSource="{Binding ArchivedDone}"
+                                BindableLayout.ItemTemplate="{StaticResource ArchivedRowTemplate}" />
                         </VerticalStackLayout>
-                    </Border>
-                </DataTemplate>
-            </CollectionView.ItemTemplate>
-        </CollectionView>
+
+                        <!-- 搁下的：还有没做完的就收起来了 -->
+                        <VerticalStackLayout Spacing="0"
+                                             IsVisible="{Binding HasArchivedShelved}">
+                            <Label Text="搁下的"
+                                   Style="{StaticResource Caption}"
+                                   TextColor="{StaticResource MutedText}"
+                                   Padding="10,6,0,2" />
+                            <VerticalStackLayout
+                                BindableLayout.ItemsSource="{Binding ArchivedShelved}"
+                                BindableLayout.ItemTemplate="{StaticResource ArchivedRowTemplate}" />
+                        </VerticalStackLayout>
+
+                    </VerticalStackLayout>
+                </VerticalStackLayout>
+
+            </VerticalStackLayout>
+        </ScrollView>
 
         <Button Grid.Row="1"
                 Text="新建大任务"
