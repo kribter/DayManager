@@ -62,29 +62,8 @@ public static class MauiProgram
 
 	// ================= 数据库注册 =================
 
-		// 【Windows 端固定放在项目下的 data\，手机端走系统标准目录】
-		//
-		// 为什么 Windows 端可以写死：这是给你自己用的程序，项目位置不会变。
-		// 写死之后，不管你是双击 start.bat、直接点 exe、还是在 Visual Studio 里按 F5，
-		// 用的都是同一个数据库。
-		//
-		// 【这里删掉过一个设计，值得记住为什么】
-		// 原先是读环境变量 DAYMANAGER_DATA_DIR，设了就用环境变量、没设就用默认目录。
-		// 看起来更灵活，实际是个坑：从 bat 启动（有变量）和直接点 exe（没变量）
-		// 会落到两个不同的库，表现为「清单突然空了」，第一反应还以为数据丢了。
-		// 结论：这种基础配置，单一来源比灵活重要得多，能写死就写死。
-		//
-		// 为什么手机端不能写死：Android 上没有 F: 这种盘符，往任意目录写文件也会被系统拒绝。
-		// FileSystem.AppDataDirectory 会给出「本应用专属、有读写权限」的正确目录。
-		//
-		// 为什么用运行时判断而不是 #if WINDOWS：编译符号的名字容易记错，
-		// 写错了不会报错，只会静默走错分支——运行时判断没有这个风险。
-		//
-		// 【为什么这里多了一个"老目录还在不在"的判断】
-		// 打包发给别人时，对方电脑上当然没有 F:\DayManager\data，
-		// 写死的结果是：要么建目录失败直接崩，要么往人家 F 盘里乱写东西。
-		// 所以老目录在（也就是还在本机开发）就沿用，不在就落到系统给的应用数据目录
-		// ——这样同一份代码，自己跑和发给别人跑都不会走错。
+		// 数据库位置：Windows 写死 data\（单一来源比环境变量灵活更稳，删掉过 DAYMANAGER_DATA_DIR）；
+		// 老目录在就用它、不在就落 %LOCALAPPDATA%（发给别人不崩）。Android 走 FileSystem.AppDataDirectory。
 		var legacyDir = Path.Combine(SeedFileReader.RepoRoot, "data");
 		var portableDir = Path.Combine(
 			Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
