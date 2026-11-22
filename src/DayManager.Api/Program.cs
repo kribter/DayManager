@@ -116,6 +116,18 @@ builder.Services.AddSingleton<ProfileService>();
 // AI 建任务时要能把它挂到项目下（否则大任务页永远是空的）。
 builder.Services.AddSingleton<DayManager.Data.Repositories.ProjectRepository>();
 builder.Services.AddSingleton<ItemTools>();
+
+// 【这一行是 11-23 00:05 补的，漏了它整条对话链路都是 500】
+// 提示词构建 11-22 深夜从 AgentService 拆成了独立类（AgentService 1109→667 行），
+// 但这里忘了注册。后果很隐蔽：
+//   AgentService 的构造函数要 AgentPromptBuilder，容器解析不出来就抛异常，
+//   /api/ai/agent 直接 500、响应体还是空的（连报错都看不到）；
+//   而 /api/ai/chat 不走 AgentService，照样 401/200——于是看起来像"AI 连不上"，
+//   实际上 AI 一次都没被调用到，请求在 DI 那一步就炸了。
+// 教训：拆出新类之后，除了改调用方，还要检查它是不是被注入的。
+// 冒烟测不到这一层（它不启动 ASP.NET、不跑容器），只有真发一次请求才炸得出来。
+builder.Services.AddSingleton<AgentPromptBuilder>();
+
 builder.Services.AddSingleton<AgentService>();
 
 // 【为什么是 Singleton】

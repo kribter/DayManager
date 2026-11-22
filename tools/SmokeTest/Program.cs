@@ -1254,10 +1254,19 @@ Item It(string title, DateTimeOffset? startAt = null, bool allDay = false,
         ItemStatus status = ItemStatus.Pending, DateTimeOffset? startedAt = null)
     => new() { Title = title, StartAt = startAt, IsAllDay = allDay, Status = status, StartedAt = startedAt };
 
+// 【这一条为什么要自己造一个"现在"，不用全局 iNow】
+// iNow 是 DateTimeOffset.Now。这条断言拿「今天 23:59 开始」去比它，
+// 于是每天 23:54–23:59 这 6 分钟里（5 分钟缓冲一盖），它必然判成"能点名"——
+// 冒烟会毫无理由地红，而代码一行没改。11-22 23:55 真撞过一次：
+// 别人刚跑过是 653 全过，我隔二十分钟再跑就 652 + 1 失败，查了半天才发现是时钟。
+// 固定成"当天 18:00"之后，这条断言在任何时刻跑都是同一个结果。
+// 注意别动全局 iNow：InterventionDecider 那几处 lastNotified 还依赖它。
+var iAfternoon = new DateTimeOffset(iNow.Date.AddHours(18), iNow.Offset);
+
 Check("排到半夜才开始的事，下午不会被点名",
     NudgeTargetPicker.Pick(
-        new[] { It("12点前躺下，手机放到够不着的地方", startAt: iNow.Date.AddHours(23).AddMinutes(59)) },
-        iNow) is null,
+        new[] { It("12点前躺下，手机放到够不着的地方", startAt: iAfternoon.Date.AddHours(23).AddMinutes(59)) },
+        iAfternoon) is null,
     "这条就是当时的真实数据：它在那天清單里排第一，直接被点名了");
 
 Check("没排时间的纯待办随时可以点名",
