@@ -82,20 +82,39 @@ public static class ItemPresence
         LocalDay(dueAt).DayNumber - today.DayNumber;
 
     /// <summary>
-    /// 常驻带副标题。「还有 6 天 · 12月15日 截止」。
+    /// 截止那一天怎么写。「12月15日」，跨年时补上年份。
+    ///
+    /// 【为什么要单独抽出来】
+    /// 界面现在把形态词放在最前面（「期限 · 还有 6 天 · 12月15日」），
+    /// 后面再接一句"截止"就成了「期限……截止」，同一个意思说两遍。
+    /// 而 AI 提示词里那句必须保留"截止"才读得通（它没有形态词打头）。
+    /// 所以拆成"只给日期"和"整句"两层：界面取前者，AI 取后者，跨年规则仍只有一份。
+    /// </summary>
+    public static string DeadlineDayText(DateTimeOffset dueAt, DateOnly today)
+    {
+        var local = dueAt.ToLocalTime();
+        return local.Year != today.Year
+            ? $"{local.Year}年{local.Month}月{local.Day}日"
+            : $"{local.Month}月{local.Day}日";
+    }
+
+    /// <summary>
+    /// 界面用的短句：「还有 6 天 · 12月15日」。
+    ///
+    /// 界面上形态词已经写在最前面（「期限 · 还有 6 天 · 12月15日」），
+    /// 后面再接"截止"就成了同义反复，所以界面取这一句；
+    /// AI 提示词里没有形态词打头，取下面的 DeadlineLine 才读得通。
+    /// </summary>
+    public static string DeadlineShortLine(DateTimeOffset dueAt, DateOnly today) =>
+        $"还有 {DaysLeft(dueAt, today)} 天 · {DeadlineDayText(dueAt, today)}";
+
+    /// <summary>
+    /// 常驻带整句。「还有 6 天 · 12月15日 截止」。
     ///
     /// 【为什么天数要代码算】
     /// 同「时间差交给代码」那条硬规矩：不让它（也不让模型）自己推。
     /// 跨年补上年份，免得 1 月看到「12月15日」以为早过了。
     /// </summary>
-    public static string DeadlineLine(DateTimeOffset dueAt, DateOnly today)
-    {
-        var local = dueAt.ToLocalTime();
-        var days = DaysLeft(dueAt, today);
-        var date = local.Year != today.Year
-            ? $"{local.Year}年{local.Month}月{local.Day}日"
-            : $"{local.Month}月{local.Day}日";
-
-        return $"还有 {days} 天 · {date} 截止";
-    }
+    public static string DeadlineLine(DateTimeOffset dueAt, DateOnly today) =>
+        DeadlineShortLine(dueAt, today) + " 截止";
 }

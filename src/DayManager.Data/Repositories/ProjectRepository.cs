@@ -226,6 +226,44 @@ public class ProjectRepository
         stat is not null && stat.TryGetValue(status, out var n) ? n : 0;
 
     /// <summary>
+    /// 所有项目（含归档）以及挂在各自下面的任务，一次取回。
+    ///
+    /// 【为什么要有这个，而不是让调用方循环 GetItemsAsync】
+    /// 循环调用就是「项目数 + 1」次数据库往返；项目会越攒越多，
+    /// 而对话每轮都要拼一次视野。这里两条查询把项目和带归属的任务一次取回、
+    /// 在内存里分组，往返次数跟项目多少无关（和 GetActiveWithProgressAsync 同一个理由）。
+    ///
+    /// 【为什么连归档的也给】
+    /// 「软件里所有信息 AI 都能看到」是定过的口径。他问「之前那个竞赛归到哪了」时，
+    /// 归档项目同样是答案；只给进行中的，模型又会答一次「我看不到」。
+    /// 这里只是把已有的信息读出来喂给 AI，不加字段、不加动作、不改数据模型。
+    /// </summary>
+    public async Task<List<(Project Project, List<Item> Items)>> GetAllWithItemsAsync(
+        CancellationToken ct = default)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        // 进行中的排前面，归档的沉底。不依赖枚举的具体数值。
+        var projects = await db.Projects
+            .OrderBy(p => p.Status == ProjectStatus.Archived ? 1 : 0)
+            .ThenBy(p => p.CreatedAt)
+            .ToListAsync(ct);
+
+        var ids = projects.Select(p => p.Id).ToList();
+        var items = await db.Items
+            .Where(x => x.ProjectId != null && ids.Contains(x.ProjectId.Value))
+            .ToListAsync(ct);
+
+        return projects.Select(p => (
+            p,
+            items.Where(i => i.ProjectId == p.Id)
+                 .OrderBy(i => i.SortOrder)
+                 .ThenBy(i => i.CreatedAt)
+                 .ToList()))
+            .ToList();
+    }
+
+    /// <summary>
     /// 一个项目下面的所有任务，没做完的排在前面。
     ///
     /// 【为什么要把做完的沉到底，而不是按时间排】

@@ -2557,10 +2557,13 @@ Console.WriteLine("=== 32. 只有截止日的事：常驻带 / 完成语义 / �
     Check("常驻项完成之后整页重查（搬进「今天做完的事」）",
         mainVm32.Contains("wasFloating") && mainVm32.Contains("await LoadAsync()"));
     Check("常驻项副标题走 Core 纯函数，不显示逾期",
-        itemVm32.Contains("ItemPresence.DeadlineLine") && itemVm32.Contains("isFloating"));
+        itemVm32.Contains("ItemPresence.DeadlineShortLine") && itemVm32.Contains("isFloating"));
     Check("走表的常驻项也刷已进行分钟数", mainVm32.Contains("TodayItems.Concat(FloatingItems)"));
-    Check("XAML 里常驻带挂在 Header 上", page32.Contains("CollectionView.Header")
-        && page32.Contains("FloatingItems"));
+    // 原先断言它挂在 CollectionView.Header 上；22:22 实测空列表时 Header/Footer
+    // 不参与滚动，整块改成了单一 ScrollView 的三段，这条跟着改成守"它仍是第一段"。
+    Check("XAML 里常驻带在清单区最上面一段，且按 ShowFloatingBand 收起",
+        page32.Contains("FloatingItems")
+        && page32.Contains("IsVisible=\"{Binding ShowFloatingBand}\""));
     Check("XAML 里常驻带给了两个入口", page32.Contains("ToggleCompleteCommand")
         && page32.Contains("StartFocusCommand"));
     // 资源键写错会编译 0 错 0 警、运行时整页炸，这件事第 26 节已经
@@ -3133,6 +3136,374 @@ Console.WriteLine("=== 36. 收分类 + 大任务递归层级：主要是删，�
     Check("RRule 真实展开仍留白（提示词里那句没被偷偷做掉）",
         agent36.Contains("现在还不会自动生成后面几天的实例"));
     Check("范围守约：主动开口链路没被顺手改掉", !proactive36.Contains("ProjectTree"));
+}
+
+// ===== 第 37 节：AI 看不见大任务（2026-11-22 用户截图 + 「你先把这个修了吧」）=====
+// 上一批只把「阶段性目标（容器）」喂进了系统提示，项目名 / 归属 / 项目下任务一条都没给，
+// 模型视野里只剩一个孤零零的容器名，只好答「我看不到」、让他截图。
+// 这节守的是「只补视野」：不加字段、不加迁移、不加动作、不改数据模型。
+{
+    var src37 = FindSrcRoot();
+    string Read37(string rel) => src37 is null ? "" : File.ReadAllText(Path.Combine(src37, rel));
+    var agent37 = Read37(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var prog37 = Read37(Path.Combine("DayManager.Api", "Program.cs"));
+    var repo37 = Read37(Path.Combine("DayManager.Data", "Repositories", "ProjectRepository.cs"));
+    var proactive37 = Read37(Path.Combine("DayManager.Api", "Services", "ProactiveService.cs"));
+
+    // ① 链路：注入 → 取数 → 传参 → 拼段 → 视野句。
+    Check("AgentService 注入 ProjectRepository，DI 里本来就有，不用改注册",
+        agent37.Contains("private readonly ProjectRepository _projects;")
+        && agent37.Contains("ProjectRepository projects,")
+        && prog37.Contains("AddSingleton<DayManager.Data.Repositories.ProjectRepository>()"));
+    Check("ChatAsync 取全部项目 + 项目下任务，并喂进系统提示词",
+        agent37.Contains("var projectGroups = await _projects.GetAllWithItemsAsync(ct);")
+        && agent37.Contains("stages, projectGroups, ct)"));
+    Check("提示词有一段【大任务】，项目名 / 完整 id / 任务 / 状态 / 容器标注都给全",
+        agent37.Contains("【大任务（项目）】")
+        && agent37.Contains("            projectText,")
+        && agent37.Contains("{p.Id} | {p.Name}")
+        && agent37.Contains("{i.Id} | {i.Title}")
+        && agent37.Contains("StatusName(i.Status)")
+        && agent37.Contains("ItemAxes.IsContainer(i)"));
+    Check("视野里的 id 一律完整 Guid，短 id 那个回归不再出现",
+        !agent37.Contains("ShortId("));
+    Check("同名项目靠 id 区分、归档也列、明确别再让用户截图",
+        agent37.Contains("同名项目靠 id 区分")
+        && agent37.Contains("已归档的也列出来")
+        && agent37.Contains("不要再让他截图"));
+    Check("大任务段不算今天该做完，别拿进度催他",
+        agent37.Contains("这些是归拢事情的壳，**不算今天该做完、别拿进度去催**"));
+    Check("【你的视野】把大任务算进默认视野，不再只说两段",
+        agent37.Contains("上面三段「一直悬着」「阶段性目标」「大任务」")
+        && !agent37.Contains("上面两段「一直悬着」"));
+
+    // ② 范围守约：六种动作没变、query 仍只读、主动开口没被顺手改、新方法只读。
+    Check("范围守约：可用操作仍是六种，query 仍只读",
+        agent37.Contains("可用的操作有这六种")
+        && agent37.Contains("- query      查清单，**只读**"));
+    Check("范围守约：主动开口链路没被顺手带上项目视野",
+        !proactive37.Contains("GetAllWithItemsAsync")
+        && !proactive37.Contains("projectGroups"));
+    var start37 = repo37.IndexOf("public async Task<List<(Project Project, List<Item> Items)>>");
+    var body37 = start37 < 0 ? "" : repo37.Substring(start37, Math.Min(1200, repo37.Length - start37));
+    Check("范围守约：新方法是只读查询，不写库、不建实体",
+        !body37.Contains("SaveChanges") && !body37.Contains("db.Projects.Add")
+        && !body37.Contains("new Item"));
+
+    // ③ 真实临时库：同名项目、归档项目、无归属任务都要分得清。
+    var dbFile37 = Path.Combine(Path.GetTempPath(), $"dm-smoke-vision-{Guid.NewGuid():N}.db");
+    var factory37 = new TestFactory(dbFile37);
+    await using (var db37 = factory37.CreateDbContext())
+    {
+        await db37.Database.EnsureCreatedAsync();
+    }
+    var a37 = Guid.NewGuid(); var b37 = Guid.NewGuid(); var c37 = Guid.NewGuid();
+    await using (var seed37 = factory37.CreateDbContext())
+    {
+        seed37.Projects.AddRange(
+            new Project { Id = a37, Name = "aaa", Status = ProjectStatus.Active },
+            new Project { Id = b37, Name = "abc", Status = ProjectStatus.Active },
+            new Project { Id = c37, Name = "aaa", Status = ProjectStatus.Archived });
+        seed37.Items.AddRange(
+            new Item { Id = Guid.NewGuid(), Title = "挂 aaa 的容器", ProjectId = a37,
+                CompletionMode = CompletionMode.ByChildren, Shape = ItemShape.DayTask },
+            new Item { Id = Guid.NewGuid(), Title = "挂 aaa 的普通任务", ProjectId = a37,
+                Shape = ItemShape.DayTask },
+            new Item { Id = Guid.NewGuid(), Title = "挂 abc 的任务", ProjectId = b37,
+                Shape = ItemShape.DayTask },
+            new Item { Id = Guid.NewGuid(), Title = "挂归档 aaa 的任务", ProjectId = c37,
+                Shape = ItemShape.DayTask },
+            new Item { Id = Guid.NewGuid(), Title = "不属于任何项目", Shape = ItemShape.DayTask });
+        await seed37.SaveChangesAsync();
+    }
+    var projRepo37 = new ProjectRepository(factory37);
+    var groups37 = await projRepo37.GetAllWithItemsAsync();
+    Check("全部 3 个项目都取回（含归档），进行中排前面",
+        groups37.Count == 3
+        && groups37[0].Project.Status == ProjectStatus.Active
+        && groups37[1].Project.Status == ProjectStatus.Active
+        && groups37[2].Project.Status == ProjectStatus.Archived);
+    Check("两个同名 aaa 靠 Id 分开，各自只带自己的任务",
+        groups37.Count(g => g.Project.Name == "aaa") == 2
+        && groups37.Single(g => g.Project.Id == a37).Items.Count == 2
+        && groups37.Single(g => g.Project.Id == c37).Items.Count == 1);
+    Check("容器也列在项目下面，不属于任何项目的 item 不混进来",
+        groups37.Single(g => g.Project.Id == a37).Items
+            .Any(x => x.CompletionMode == CompletionMode.ByChildren)
+        && groups37.Sum(g => g.Items.Count) == 4);
+    try { File.Delete(dbFile37); } catch { }
+}
+
+// ===== 第 38 节：视野里明明有，模型却还说「看不到」（16:36 截图 + 本机 mock 抓包实证）=====
+// 上一节把项目数据补进了系统提示，本机用一个假 AI 端点抓下真实报文，确认 prompt 里
+// aaa / abc / abd 及归属全都在。可同一个会话前几轮 AI 自己反复说过「看不到」，
+// 他问「你现在能看到了吗」这种关于 AI 自身状态的元问题时，模型顺着旧结论又答「还是没有」。
+// 这节守反锚定：靠后一条 system 直接报项目数和具体名字；顺带修掉自己埋的短 id 回归
+// （项目下任务原先给 8 位短 id，模型拿去 delete，ItemTools 要完整 Guid → 找不到记录）。
+{
+    var src38 = FindSrcRoot();
+    string Read38(string rel) => src38 is null ? "" : File.ReadAllText(Path.Combine(src38, rel));
+    var agent38 = Read38(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var tools38 = Read38(Path.Combine("DayManager.Api", "Services", "ItemTools.cs"));
+    var proactive38 = Read38(Path.Combine("DayManager.Api", "Services", "ProactiveService.cs"));
+
+    Check("靠后有一条【视野校正】system，直接报项目数和能引用的具体名字",
+        agent38.Contains("【视野校正】")
+        && agent38.Contains("你现在看得见 {projectGroups.Count} 个大任务")
+        && agent38.Contains("projectGroups.Take(5).Select(g => g.Project.Name)")
+        && agent38.Contains("名字包括 {projectNames} 等"));
+    Check("视野校正专治「你现在能看到了吗 / 你再看看」这类元问题",
+        agent38.Contains("他问「你现在能看到了吗」「你再看看」时，照这段答「能」")
+        && agent38.Contains("别说看不到、别让他截图"));
+    Check("视野校正在历史与坐标之后、格式提醒之前（靠后权重最高）",
+        agent38.IndexOf("【视野校正】") > agent38.IndexOf("foreach (var m in recentHistory)")
+        && agent38.IndexOf("【视野校正】") > 0
+        && agent38.IndexOf("输出必须是那个 JSON") > agent38.IndexOf("【视野校正】"));
+    Check("【大任务】段显式推翻前几轮的旧结论",
+        agent38.Contains("**你现在看得见它们。**")
+        && agent38.Contains("那是旧信息，以本段为准"));
+    Check("容器和项目不再被混成一个壳",
+        agent38.Contains("**这些不是大任务**")
+        && agent38.Contains("阶段性目标是另一类壳，别混"));
+    Check("视野里凡要拿去动手的 id 给完整 Guid，和 ItemTools 的口径一致",
+        !agent38.Contains("ShortId(")
+        && agent38.Contains("{i.Id} | {i.Title}")
+        && tools38.Contains("FindAsync(Guid id"));
+    Check("范围守约：没加动作、没碰主动开口链路、没改数据模型",
+        agent38.Contains("可用的操作有这六种")
+        && !proactive38.Contains("【视野校正】")
+        && !proactive38.Contains("projectGroups")
+        && !agent38.Contains("AddContainerAsync"));
+}
+
+// ===== 第 39 节：清单上四种形态一眼可辨（今天 / 定点 / 期限 / 每天）=====
+// 起因是真事：真实库里「背单词」（每天）和一条普通今天待办，时间字段一模一样
+// （StartAt 空 + DueAt 今天 23:59），界面上都渲染成「尚未安排时间」——
+// 他做完回看时完全分不清这条明天还会不会自己回来。
+// 这节守两件事：形态词只从声明读（完成方式优先于时间形态），以及界面真的用上了它。
+{
+    var src39 = FindSrcRoot();
+    string Read39(string rel) => src39 is null ? "" : File.ReadAllText(Path.Combine(src39, rel));
+
+    // 【为什么不建临时库】形态词是纯函数（Core/Planning/ItemLabels），
+    // 输入就是一条记录，落库口径在第 33 / 36 节已经测过。
+    // 这里只测"读出来说的是哪两个字"。
+    var day39 = new Item
+    {
+        Title = "写作业",
+        Shape = ItemShape.DayTask,
+        CompletionMode = CompletionMode.Once
+    };
+    Check("今天做 → 不给词（清单本身就是今天，写了是废话）",
+        ItemLabels.ShapeLabel(day39) is null);
+
+    var timed39 = new Item
+    {
+        Title = "九点开会",
+        Shape = ItemShape.Timed,
+        CompletionMode = CompletionMode.Once
+    };
+    Check("定点 → 「定点」", ItemLabels.ShapeLabel(timed39) == "定点");
+
+    var deadline39 = new Item
+    {
+        Title = "交报告",
+        Shape = ItemShape.DeadlineOnly,
+        CompletionMode = CompletionMode.Once
+    };
+    Check("只有截止日 → 「期限」", ItemLabels.ShapeLabel(deadline39) == "期限");
+
+    // 【最关键的一条】「每天」靠 CompletionMode 声明，它底下 Shape 仍是 DayTask。
+    // 先读 Shape 就会把它说成「今天」——那正是这个 bug 的形态。
+    var daily39 = new Item
+    {
+        Title = "背单词",
+        Shape = ItemShape.DayTask,
+        CompletionMode = CompletionMode.PerOccurrence
+    };
+    Check("每天 → 「每天」，不会被 Shape 读成「今天」",
+        ItemLabels.ShapeLabel(daily39) == "每天");
+
+    var container39 = new Item
+    {
+        Title = "第一章",
+        Shape = ItemShape.DayTask,
+        CompletionMode = CompletionMode.ByChildren
+    };
+    Check("容器不给形态词（它不进清单，靠缩进和下级进度自辨）",
+        ItemLabels.ShapeLabel(container39) is null);
+
+    var unanchored39 = new Item
+    {
+        Title = "历史空转值",
+        Shape = ItemShape.Unanchored,
+        CompletionMode = CompletionMode.Once
+    };
+    Check("Unanchored（真实库 0 条）同样不给词",
+        ItemLabels.ShapeLabel(unanchored39) is null);
+
+    var vm39 = Read39(Path.Combine("DayManager.App", "ViewModels", "ItemViewModel.cs"));
+    Check("副标题第一段就是形态词，判定走 Core 不另写一遍",
+        vm39.Contains("ItemLabels.ShapeLabel(_item)")
+        && vm39.IndexOf("ItemLabels.ShapeLabel(_item)", StringComparison.Ordinal)
+           < vm39.IndexOf("DurationText.Format", StringComparison.Ordinal));
+    Check("「尚未安排时间」这个假话已经删掉（把它讲成了「没排」）",
+        !vm39.Contains("尚未安排时间"));
+    Check("期限当天补一句「今天截止」，否则和普通待办看不出区别",
+        vm39.Contains("今天截止")
+        && vm39.Contains("_item.Shape == ItemShape.DeadlineOnly"));
+    Check("期限行：日程页取短句（前面有「期限」），详情页取整句（那里没形态词）",
+        vm39.Contains("ItemPresence.DeadlineShortLine")
+        && vm39.Contains(": ItemPresence.DeadlineLine"));
+
+    var pd39 = Read39(Path.Combine("DayManager.App", "ViewModels", "ProjectDetailViewModel.cs"));
+    Check("大任务详情页关掉形态词（层级靠缩进表达）",
+        pd39.Contains("HideShapeLabel()"));
+    Check("详情页加子任务不再被兜底塞成「今天到期」",
+        pd39.Contains("keepNoDueAt: true"));
+
+    var repo39 = Read39(Path.Combine("DayManager.Data", "Repositories", "ItemRepository.cs"));
+    Check("清单查询：属于大任务又没定日期的条目，不进今天（防下次再加又冒出来）",
+        repo39.Contains("&& x.ProjectId == null")
+        && repo39.Contains("&& x.ParentTaskId == null"));
+
+    var presence39 = Read39(Path.Combine("DayManager.Core", "Planning", "ItemPresence.cs"));
+    Check("AI 那条整句仍带「截止」，没被界面的短句连累",
+        presence39.Contains("DeadlineShortLine(dueAt, today) + \" 截止\""));
+}
+
+// ===== 第 40 节：做完的事单独一段（22:00 用户问「ddl 完成了之后去哪里了」）=====
+// 之前完成的行混在未完成中间，只靠灰字和删除线区分；排序按 DueAt 走，
+// 一条提前完成的「只有截止日」会掉到清单最末尾——看起来就是"点完就没了"。
+// 这节守三件事：有固定去处、完成率不被分组算错、全做完时不说"今天还没有安排"。
+{
+    var src40 = FindSrcRoot();
+    string Read40(string rel) => src40 is null ? "" : File.ReadAllText(Path.Combine(src40, rel));
+    var mainVm40 = Read40(Path.Combine("DayManager.App", "ViewModels", "MainViewModel.cs"));
+    var page40 = Read40(Path.Combine("DayManager.App", "MainPage.xaml"));
+    var itemVm40 = Read40(Path.Combine("DayManager.App", "ViewModels", "ItemViewModel.cs"));
+
+    Check("做完的事有独立集合，不和未完成的混在一张清单里",
+        mainVm40.Contains("ObservableCollection<ItemViewModel> DoneItems")
+        && mainVm40.Contains("DoneItems.Clear()")
+        && mainVm40.Contains("DoneItems.Add(vm)"));
+
+    Check("完成率分母 = 未完成 + 已完成（分组最容易把分母算成 0/0）",
+        mainVm40.Contains("var total = TodayItems.Count + DoneItems.Count")
+        && mainVm40.Contains("var done = DoneItems.Count"));
+
+    Check("全做完了不弹「今天还没有安排」：空提示要条件化",
+        mainVm40.Contains("ShowEmptyHint => TodayItems.Count == 0 && DoneItems.Count == 0")
+        && page40.Contains("IsVisible=\"{Binding ShowEmptyHint}\""));
+
+    Check("勾完成就地搬段，不整页重查（保住滚动位置）",
+        mainVm40.Contains("TodayItems.Remove(item)")
+        && mainVm40.Contains("DoneItems.Insert(0, item)"));
+
+    Check("取消完成走重查，回到按日期排好的位置",
+        mainVm40.Contains("【取消完成：整页重查】"));
+
+    Check("清单区是单一 ScrollView 的三段（CollectionView 的 Header/Footer 在空列表下不滚动）",
+        page40.Contains("<ScrollView Grid.Row=\"3\">")
+        && page40.Contains("BindableLayout.ItemsSource=\"{Binding TodayItems}\"")
+        && page40.Contains("BindableLayout.ItemsSource=\"{Binding DoneItems}\"")
+        && !page40.Contains("CollectionView.Header")
+        && !page40.Contains("CollectionView.Footer"));
+
+    Check("两段共用同一份行模板（各抄一份迟早有一处忘改）",
+        page40.Contains("x:Key=\"ItemRowTemplate\"")
+        && System.Text.RegularExpressions.Regex.Matches(
+               page40, "StaticResource ItemRowTemplate").Count == 2);
+
+    Check("底部标题跟着翻页变，翻到过去不写「今天」",
+        mainVm40.Contains("DoneSectionTitle => IsViewingToday")
+        && page40.Contains("{Binding DoneSectionTitle}"));
+
+    Check("已完成的行不再挂「截止 / 逾期」",
+        itemVm40.Contains("已经做完的事，到这里就结束"));
+}
+
+// ===== 第 41 节：「每天」的第二天还在不在（22:33 用户问「背单词怎么在明天看不见」）=====
+// 界面 11-22 就给了「每天」入口，但只写进当天那一条，后面没人延续——
+// 库里 RRule 空、RecurrenceParentId 空，第二天查清单自然没有它。
+// 一个点得出来却不兑现的入口，比没有这个入口更糟。
+// 这节守三件事：第二天会补出新的一条、昨天那条留在历史、重复调用不会多建。
+{
+    var dbFile41 = Path.Combine(Path.GetTempPath(), $"dm-smoke-daily-{Guid.NewGuid():N}.db");
+    var factory41 = new TestFactory(dbFile41);
+    await using (var db41 = factory41.CreateDbContext())
+    {
+        await db41.Database.EnsureCreatedAsync();
+    }
+
+    var repo41 = new ItemRepository(factory41);
+    var today41 = DateOnly.FromDateTime(DateTime.Now);
+    var yesterday41 = today41.AddDays(-1);
+
+    // ① 昨天建了一条「每天」，并且已经做完了
+    var old41 = await repo41.AddToDayAsync("背单词", yesterday41,
+        completionMode: CompletionMode.PerOccurrence);
+    await repo41.ToggleDoneAsync(old41.Id);
+
+    // ② 今天打开：应该补出今天这一条
+    var created41 = await repo41.EnsureDailyInstancesAsync(today41);
+    Check("跨天会给「每天」补出今天这一条", created41 == 1);
+
+    var todayList41 = await repo41.GetDayListAsync(today41);
+
+    // 【为什么按 Id 排除旧的那条，而不是 FirstOrDefault 取第一条】
+    // 旧那条是"今天被标完成"的，按 completedThatDay 口径也会出现在今天的清单里
+    // （真实场景里它就是"今天做完的事"）。直接取第一条拿到的是它，不是新补的。
+    var fresh41 = todayList41.FirstOrDefault(x => x.Title == "背单词" && x.Id != old41.Id);
+
+    Check("补出来的那条真的进了今天的清单，而且是待办",
+        fresh41 is not null
+        && fresh41.Status == ItemStatus.Pending
+        && fresh41.CompletionMode == CompletionMode.PerOccurrence);
+
+    Check("补出来的那条日期是今天，不是照抄昨天",
+        fresh41?.DueAt is { } d41 && ItemPresence.LocalDay(d41) == today41);
+
+    Check("用 RecurrenceParentId 串到前一条上（历史才查得出来）",
+        fresh41?.RecurrenceParentId == old41.Id
+        && fresh41?.OriginalStart is not null);
+
+    // ③ 昨天那条保持原样。
+    // 【为什么不能拿 GetDayListAsync(昨天) 查】
+    // 那条的 CompletedAt 是"现在"，落在今天；按天的清单里它属于今天做完的事，
+    // 翻到昨天是看不到的（这是既有口径，不是这轮的改动）。所以直接读实体。
+    await using (var db41b = factory41.CreateDbContext())
+    {
+        var oldIn41 = await db41b.Items.FindAsync(old41.Id);
+        Check("昨天那条仍是已完成，没被改写、没被搬走",
+            oldIn41 is not null && oldIn41.Status == ItemStatus.Done);
+    }
+
+    // ④ 同一天再调一次，不该多建
+    var again41 = await repo41.EnsureDailyInstancesAsync(today41);
+    Check("同一天重复调用是幂等的（昨天那条已有后继就跳过）", again41 == 0);
+
+    await using (var db41c = factory41.CreateDbContext())
+    {
+        var count41 = db41c.Items.Count(x => x.Title == "背单词" && x.DeletedAt == null);
+        Check("库里总共两条：昨天一条、今天一条", count41 == 2);
+    }
+
+    // ⑤ 今天刚建的「每天」不该被自己再补一条
+    await repo41.AddToDayAsync("喝水", today41, completionMode: CompletionMode.PerOccurrence);
+    var self41 = await repo41.EnsureDailyInstancesAsync(today41);
+    Check("今天刚建的「每天」不会被补成两条", self41 == 0);
+
+    // ⑥ 不判成败的「每天」不补实例。
+    // 它靠 EntersDayList 就被挡在清单外了，补出来只是一条谁也看不见的记录——
+    // 22:37 真实库上真发生过："0点上床睡觉"和"背单词"一起被补了出来。
+    await repo41.AddToDayAsync("0点上床睡觉", yesterday41,
+        completionMode: CompletionMode.PerOccurrence,
+        verdictMode: VerdictMode.Never);
+    var never41 = await repo41.EnsureDailyInstancesAsync(today41);
+    Check("不判成败的「每天」不补实例（它本来就不进清单）", never41 == 0);
+
+    try { File.Delete(dbFile41); } catch { }
 }
 
 Console.WriteLine();

@@ -138,6 +138,25 @@ using (var scope = app.Services.CreateScope())
     await db.Database.MigrateAsync();
 }
 
+// 把「每天」的记录补到今天。
+//
+// 【为什么后端也要做一遍，客户端不是已经做了吗】
+// 两边的触发时机不一样：客户端是"有人打开它"时才补，
+// 而后端可能先启动、也可能整夜开着没人碰。
+// AI 主动开口、对话里的【今天的清单】读的是同一份数据——
+// 这里补一次，才能保证"谁先启动，看到的都一样"。
+// 它是幂等的（昨天那条已经有后继就跳过），重复执行不会多出一条。
+using (var scope = app.Services.CreateScope())
+{
+    var items = scope.ServiceProvider.GetRequiredService<DayManager.Data.Repositories.ItemRepository>();
+    var created = await items.EnsureDailyInstancesAsync(DateOnly.FromDateTime(DateTime.Now));
+
+    if (created > 0)
+    {
+        app.Logger.LogInformation("每天任务补出 {Count} 条", created);
+    }
+}
+
 // ------------------------------------------------------------------
 // 极简认证：固定 token
 //
@@ -365,6 +384,25 @@ app.MapPost("/api/items", async (
 
     var item = await items.AddToDayAsync(request.Title.Trim(), day, time, ct);
     return Results.Ok(item);
+});
+
+// 手动补「每天」的实例。
+//
+// 【为什么除了自动补，还要留一个接口】
+// 自动补只在"打开软件"和"后端启动"两个时机跑，想当场确认效果就得等一天。
+// 留一个入口：既能立刻验证，将来手机端只走 HTTP 时也是同一条路。
+// date 可以指定要补到哪一天，不给就是今天。
+app.MapPost("/api/items/ensure-daily", async (
+    string? date,
+    DayManager.Data.Repositories.ItemRepository items,
+    CancellationToken ct) =>
+{
+    var day = DateTime.TryParse(date, out var parsed)
+        ? DateOnly.FromDateTime(parsed)
+        : DateOnly.FromDateTime(DateTime.Now);
+
+    var created = await items.EnsureDailyInstancesAsync(day, ct);
+    return Results.Ok(new { date = day, created });
 });
 
 app.MapPost("/api/items/{id:guid}/status", async (

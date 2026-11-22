@@ -167,12 +167,41 @@ public partial class MainViewModel : ObservableObject
     /// 「一直悬着、还没到截止日的事」—— 独立一带，不并进 TodayItems。
     ///
     /// 【为什么必须是两个集合，而不是往 TodayItems 里塞一种特殊行】
-    /// 完成率的分母就是 TodayItems.Count（见 UpdateSummary）。
+    /// 完成率的分母是「今天一共安排了几件」，不含常驻项（见 UpdateSummary）。
     /// 常驻项一旦混进去，就会天天被算成「今天又没做完的一件」，
     /// 正好是 5.2 里最要避免的那一串欠账。分开装，分母一行都不用改。
     /// 它们也不滚动在主清单里，是靠 BindableLayout 列在清单上方的一小带。
     /// </summary>
     public ObservableCollection<ItemViewModel> FloatingItems { get; } = new();
+
+    /// <summary>
+    /// 「今天做完的事」—— 和上面那一带对称，挂在清单底部（CollectionView.Footer）。
+    ///
+    /// 【为什么不再让完成的行留在主清单里】
+    /// 这正是用户 11-22 22:00 问的「ddl 完成了之后去哪里了」：
+    /// 完成的行混在未完成中间，只靠灰字和删除线区分；排序按 DueAt 走，
+    /// 一条提前完成的「只有截止日」记录会掉到整张清单最末尾——
+    /// 从最显眼的常驻带跳到最不显眼的位置，看起来就像"点完就没了"。
+    /// 分成两段之后，做完的有一个固定去处，勾错了也能在原处勾回来。
+    ///
+    /// 【为什么用独立集合，而不是在同一条上加个"已完成"标记】
+    /// 完成率的分母 = TodayItems.Count + DoneItems.Count（今天一共安排了几件），
+    /// 分子就是 DoneItems.Count。两个数各自干净，不用在一个集合里挑拣。
+    /// </summary>
+    public ObservableCollection<ItemViewModel> DoneItems { get; } = new();
+
+    /// <summary>底部那段只在真有做完的事时出现。</summary>
+    public bool ShowDoneSection => DoneItems.Count > 0;
+
+    /// <summary>
+    /// 整张清单真的空了才提示"还没有安排"。
+    ///
+    /// 【为什么要单独判一次】
+    /// EmptyView 只看 CollectionView 的主集合。把完成的挪走之后，
+    /// "今天全做完了"会让主集合为空、于是弹出"今天还没有安排"——
+    /// 明明刚做完十件事，界面却说今天空着，这是最伤人的一句话。
+    /// </summary>
+    public bool ShowEmptyHint => TodayItems.Count == 0 && DoneItems.Count == 0;
 
     /// <summary>
     /// 常驻带只在看「今天」时出现。翻到别的日子看的是那天发生过/该做什么，
@@ -203,6 +232,7 @@ public partial class MainViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(IsViewingToday))]
     [NotifyPropertyChangedFor(nameof(IsNotViewingToday))]
     [NotifyPropertyChangedFor(nameof(EmptyHint))]
+    [NotifyPropertyChangedFor(nameof(DoneSectionTitle))]
     [NotifyPropertyChangedFor(nameof(AddPlaceholder))]
     [NotifyPropertyChangedFor(nameof(ShowFloatingBand))]
     public partial DateTime SelectedDate { get; set; } = DateTime.Today;
@@ -248,6 +278,15 @@ public partial class MainViewModel : ObservableObject
     public string EmptyHint => IsViewingToday
         ? "今天还没有安排。&#10;在下面加一条，哪怕只是「先看两分钟」。"
         : "这一天还没有安排。&#10;可以提前把想做的事放进来，那天就自动出现。";
+
+    /// <summary>
+    /// 底部那一段的标题。
+    ///
+    /// 【为什么不是写死「今天做完的事」】
+    /// 这张清单能翻到过去（看那天做了什么），翻过去再写"今天"就是错的。
+    /// 和 DayLabelText 用同一套"今天/那天"的说法，界面上才不会同时出现两个时间口径。
+    /// </summary>
+    public string DoneSectionTitle => IsViewingToday ? "今天做完的事" : "这天做完的事";
 
     /// <summary>
     /// 底部输入框的提示语跟着「翻到哪天」和「选了哪种形态」一起变。
@@ -325,6 +364,48 @@ public partial class MainViewModel : ObservableObject
     /// <summary>加载过程中又来了一次加载请求（见 LoadAsync 里的说明）。</summary>
     private bool _reloadPending;
 
+    /// <summary>
+    /// 「每天」的实例补到哪一天了。
+    ///
+    /// 【为什么记在内存里，而不是每次加载都补一遍】
+    /// 补是幂等的，但没必要每翻一页查一次库；
+    /// 记一个日期，软件开着跨过午夜时它会自动对不上，于是补出新的一条。
+    /// </summary>
+    private DateOnly _dailyEnsuredFor = DateOnly.MinValue;
+
+    /// <summary>
+    /// 把「每天」的记录补到今天。
+    ///
+    /// 【为什么放在取清单之前，而不是做成一个后台任务】
+    /// 少一个后台任务，就少一类"它没跑起来"的故障——
+    /// 这个判断在 Item.SkippedAt 的注释里已经立过一次（跳过靠查询判断，不靠改状态）。
+    /// 这里是同一个理由：谁要读清单，谁负责先补齐，顺序天然正确。
+    ///
+    /// 【失败为什么不弹窗】
+    /// 补不出来只影响"今天看不到那条每天的事"，而今天的清单本来就在库里。
+    /// 为它弹一个错误框，是把小问题放大成"软件坏了"。
+    /// 不记 _dailyEnsuredFor，下次加载再试一次就够了。
+    /// </summary>
+    private async Task EnsureDailyInstancesAsync()
+    {
+        var today = DateOnly.FromDateTime(DateTime.Now);
+
+        if (_dailyEnsuredFor == today)
+        {
+            return;
+        }
+
+        try
+        {
+            await _itemRepository.EnsureDailyInstancesAsync(today);
+            _dailyEnsuredFor = today;
+        }
+        catch
+        {
+            // 见上面的说明：静默，下次重试。
+        }
+    }
+
     // ================= 命令 =================
 
     /// <summary>
@@ -370,12 +451,30 @@ public partial class MainViewModel : ObservableObject
     {
         try
         {
+            // 先补「每天」的实例，再读清单。
+            // 顺序反了的话，跨天的第一次加载仍然看不到今天那条每天的事——
+            // 要等下一次刷新才出现，用户会以为它又丢了。
+            await EnsureDailyInstancesAsync();
+
             var items = await _itemRepository.GetDayListAsync(SelectedDay);
 
             TodayItems.Clear();
+            DoneItems.Clear();
             foreach (var item in items)
             {
-                TodayItems.Add(new ItemViewModel(item));
+                // 做完的分到底部那一段，主清单只留还没了结的。
+                // 按 Status 判而不是按 IsDone：两者现在一致，但 Status 是数据本身，
+                // 少一层"VM 属性有没有同步"的依赖。
+                var vm = new ItemViewModel(item);
+
+                if (item.Status == ItemStatus.Done)
+                {
+                    DoneItems.Add(vm);
+                }
+                else
+                {
+                    TodayItems.Add(vm);
+                }
             }
 
             // 常驻带锚定「真实今天」，不跟 SelectedDay 走：它表达的是
@@ -391,9 +490,13 @@ public partial class MainViewModel : ObservableObject
             }
 
             UpdateSummary();
-            // FloatingItems 是 ObservableCollection，CollectionChanged 不会自动
-            // 通知这个计算属性，改完内容得手动喊一声，否则翻回今天这一带不出现。
+            // FloatingItems / DoneItems 都是 ObservableCollection，
+            // CollectionChanged 不会自动通知下面这几个计算属性，改完内容得手动喊一声：
+            // 不喊的后果分别是——翻回今天常驻带不出现、底部"做完的事"不出现、
+            // 以及"今天还没有安排"在该出现/该消失的时候没有动。
             OnPropertyChanged(nameof(ShowFloatingBand));
+            OnPropertyChanged(nameof(ShowDoneSection));
+            OnPropertyChanged(nameof(ShowEmptyHint));
         }
         catch (Exception ex)
         {
@@ -522,24 +625,48 @@ public partial class MainViewModel : ObservableObject
             var wasFloating = FloatingItems.Contains(item);
             var updated = await _itemRepository.ToggleDoneAsync(item.Id);
 
-            if (updated is not null)
+            if (updated is null)
             {
-                if (wasFloating)
-                {
-                    // 【常驻项提前完成，必须整页重查，不能就地改这一行】
-                    // 一勾完成，它就不再满足「还悬着」：常驻带该把它收起，
-                    // 而 GetDayListAsync 的 completedThatDay 分支会把它接进
-                    // 「今天做完的事」——从「一直悬着」搬到「做到了」，
-                    // 这次搬家是两个查询口径一起变的结果，就地 Update 做不到。
-                    // 取消完成同理，它会从清单回到常驻带。
-                    await LoadAsync();
-                }
-                else
-                {
-                    item.Update(updated);
-                    UpdateSummary();
-                }
+                return;
             }
+
+            if (wasFloating)
+            {
+                // 【常驻项提前完成，必须整页重查，不能就地改这一行】
+                // 一勾完成，它就不再满足「还悬着」：常驻带该把它收起，
+                // 而 GetDayListAsync 的 completedThatDay 分支会把它接进
+                // 底部「今天做完的事」——从「一直悬着」搬到「做到了」，
+                // 这次搬家是两个查询口径一起变的结果，就地 Update 做不到。
+                // 取消完成同理，它会从清单回到常驻带。
+                await LoadAsync();
+                return;
+            }
+
+            item.Update(updated);
+
+            if (item.IsDone)
+            {
+                // 【勾完成：搬到底部那一段，不重查】
+                // 重查会把滚动位置扔回顶部，而"做完一条"是高频动作，
+                // 连着点几条时它就一直跟你作对（这条教训写在 ToggleStartPauseAsync 上）。
+                // 搬集合是就地操作：界面跟着动一下，位置也稳。
+                // 放到最前面，是因为刚做完的那条最可能是他想看一眼的那条。
+                TodayItems.Remove(item);
+                DoneItems.Insert(0, item);
+            }
+            else
+            {
+                // 【取消完成：整页重查】
+                // 它要回到主清单里按日期排好的位置，而那个排序在仓储层，
+                // 在内存里猜一个插入点迟早会错位。取消完成是低频动作，
+                // 重查一次换"位置一定对"，划算。
+                await LoadAsync();
+                return;
+            }
+
+            UpdateSummary();
+            OnPropertyChanged(nameof(ShowDoneSection));
+            OnPropertyChanged(nameof(ShowEmptyHint));
         }
         catch (Exception ex)
         {
@@ -700,8 +827,12 @@ public partial class MainViewModel : ObservableObject
     /// </summary>
     private void UpdateSummary()
     {
-        var total = TodayItems.Count;
-        var done = TodayItems.Count(x => x.IsDone);
+        // 分母是「今天一共安排了几件」= 还没做的 + 已经做完的。
+        // 【这一行不能只数 TodayItems】把它们分成两段之后，
+        // 只数主清单会让分母随着完成而缩小，全做完时变成 0/0——
+        // 明明干了一整天，顶上的进度条反而归零。分组最容易踩的就是这个坑。
+        var total = TodayItems.Count + DoneItems.Count;
+        var done = DoneItems.Count;
 
         // 除零保护：清单为空时不能让进度条炸掉，也不能显示 NaN%
         CompletionRatio = total == 0 ? 0 : (double)done / total;
@@ -714,7 +845,12 @@ public partial class MainViewModel : ObservableObject
               + TotalEstimateText();
     }
 
-    /// <summary>清单里所有任务估时的合计。没有估过时的任务不参与，所以可能为空串。</summary>
+    /// <summary>
+    /// 清单里所有任务估时的合计。没有估过时的任务不参与，所以可能为空串。
+    ///
+    /// 只合计「还没做的」：这句话回答的是"今天还要花多久"，
+    /// 已经做完的那几件算进去只会让剩余负担看起来比实际重。
+    /// </summary>
     private string TotalEstimateText()
     {
         var minutes = TodayItems.Sum(x => x.Item.EstimateMinutes ?? 0);

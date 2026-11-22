@@ -133,10 +133,22 @@ public class ItemRepository
             && x.Status != ItemStatus.Abandoned);
 
         // ④ 什么时间都没定的零散待办（只在今天出现，理由见上面的说明）
+        //
+        //    【为什么要把"属于大任务的"排除掉】
+        //    这一条本意是兜住用户在日程页随手加、没定日期的那一两件事，
+        //    免得它们被无限期推迟。
+        //    但大任务下面的子任务是**项目结构**：他建它们是先把事摆开，
+        //    不代表今天要做。放它们进来会有两个后果——
+        //    今天清单被一堆没打算今天做的条目塞满；
+        //    而且一条从没定过日期的子任务，副标题会是一片空白，
+        //    用户只会觉得"我明明没安排，它怎么排到今天了"。
+        //    真要今天做，就在日程页给它定日子，而不是靠"没有日期"被默认收进来。
         var unscheduled = isToday
             ? db.Items.Where(x =>
                 x.StartAt == null
                 && x.DueAt == null
+                && x.ProjectId == null
+                && x.ParentTaskId == null
                 && x.Status != ItemStatus.Done
                 && x.Status != ItemStatus.Abandoned)
             : db.Items.Where(x => false);
@@ -449,6 +461,122 @@ public class ItemRepository
             completionMode: CompletionMode.ByChildren,
             parentTaskId: parentTaskId,
             keepNoDueAt: dueDay is null);
+    }
+
+    /// <summary>
+    /// 给「每天」的记录补出今天这一条。
+    ///
+    /// 【为什么需要它】
+    /// 界面 11-22 就给了「每天」这个新建入口，但当时只写进了当天那一条，
+    /// 后面没有任何东西让它延续——用户第二天打开，发现「背单词」不见了。
+    /// 一个点得出来、却不兑现的入口，比没有这个入口更糟。
+    ///
+    /// 【为什么是"只补今天"，而不是按 RRULE 展开未来】
+    /// 展开未来要处理任选规则、例外日期、跨时区，那是 Ical.Net 那一整套；
+    /// 而这里要的只有一件事：昨天有的，今天还在。
+    /// 「每天各算一次」的口径也正好只需要今天这一条——漏了不滚、不欠账。
+    ///
+    /// 【为什么用 RecurrenceParentId 串成链，而不是复制成互不相干的记录】
+    /// 链上每条都是真实记录，各自有自己的完成状态和完成时间，
+    /// "上周背了几天"才查得出来。
+    /// 同时这个字段天然就是"这条已经长出过下一天"的标记——幂等靠它，
+    /// 不需要再加一张表或者一个"已生成到某天"的游标。
+    ///
+    /// 【为什么只补一天，不补中间漏掉的日子】
+    /// 每天各算一次意味着漏了就漏了：三天没打开软件，那三天就是没背。
+    /// 补一串出来等于凭空造出三条"你没做的事"——正是这个软件要避免的欠账感。
+    ///
+    /// 【为什么可以反复调用】
+    /// 已有人指向的记录直接跳过，所以一天里调多少次都只多出一条。
+    /// </summary>
+    public async Task<int> EnsureDailyInstancesAsync(DateOnly today, CancellationToken ct = default)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var dailies = await db.Items
+            .Where(x => x.DeletedAt == null
+                     && x.CompletionMode == CompletionMode.PerOccurrence
+                     // 【为什么不补 VerdictMode.Never 的那些】
+                     // 它们压根不进清单（见 ItemAxes.EntersDayList），
+                     // 补出来只是每天多一条谁也看不见、也不参与任何统计的记录。
+                     // 22:37 实测踩过一次："0点上床睡觉"和"背单词"一起被补了出来，
+                     // 而前者就算摆在今天的清单里也不会显示。
+                     && x.VerdictMode != VerdictMode.Never)
+            .ToListAsync(ct);
+
+        if (dailies.Count == 0)
+        {
+            return 0;
+        }
+
+        var successorIds = (await db.Items
+                .Where(x => x.DeletedAt == null && x.RecurrenceParentId != null)
+                .Select(x => x.RecurrenceParentId!.Value)
+                .ToListAsync(ct))
+            .ToHashSet();
+
+        var created = 0;
+
+        foreach (var item in dailies)
+        {
+            // 这条属于哪一天：定日的记录 DueAt 就是"那天最后一刻"，
+            // 只有定点型才需要看 StartAt。两个都没有的历史数据退到创建时间。
+            var day = item.DueAt is { } due
+                ? ItemPresence.LocalDay(due)
+                : item.StartAt is { } start
+                    ? ItemPresence.LocalDay(start)
+                    : ItemPresence.LocalDay(item.CreatedAt);
+
+            // 今天或未来建的：还没到需要延续的时候。
+            if (day >= today)
+            {
+                continue;
+            }
+
+            // 链条已经往下长过一条了，别再长第二条。
+            if (successorIds.Contains(item.Id))
+            {
+                continue;
+            }
+
+            db.Items.Add(new Item
+            {
+                Title = item.Title,
+                Notes = item.Notes,
+                Kind = item.Kind,
+
+                // 每天这一条本身是"当天要做的事"，形态固定定日；
+                // 「每天」这个性质由 CompletionMode 表达，不靠 Shape。
+                Shape = ItemShape.DayTask,
+                CompletionMode = CompletionMode.PerOccurrence,
+                VerdictMode = item.VerdictMode,
+
+                DueAt = DateHelper.EndOfDay(today),
+                TimeZoneId = item.TimeZoneId,
+
+                // 归属、估时、最小启动步骤都跟着走：还是同一件事，只是换了一天。
+                ProjectId = item.ProjectId,
+                ParentTaskId = item.ParentTaskId,
+                EstimateMinutes = item.EstimateMinutes,
+                MinimalStep = item.MinimalStep,
+                SortOrder = item.SortOrder,
+
+                // 串成链：接在前一条后面，OriginalStart 记下它替代的是哪一次。
+                RecurrenceParentId = item.Id,
+                OriginalStart = item.DueAt ?? item.StartAt,
+
+                Status = ItemStatus.Pending
+            });
+
+            created++;
+        }
+
+        if (created > 0)
+        {
+            await db.SaveChangesAsync(ct);
+        }
+
+        return created;
     }
 
     /// <summary>

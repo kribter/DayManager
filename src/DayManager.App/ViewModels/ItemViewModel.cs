@@ -37,6 +37,28 @@ public partial class ItemViewModel : ObservableObject
     /// </summary>
     private readonly bool _isFloating;
 
+    /// <summary>
+    /// 副标题开头要不要带形态词（今天 / 定点 / 期限 / 每天）。
+    ///
+    /// 【为什么不是所有地方都要】
+    /// 日程页需要：十几件事混在一张清单里，不标就分不清哪条明天还会自己回来、
+    /// 哪条只到某一天。大任务详情页不需要：那里每行都在同一个项目下，
+    /// 层级靠缩进和「几 / 几 件完成」表达，再给每行加两个字只会和缩进打架。
+    /// </summary>
+    public bool ShowShapeLabel { get; private set; } = true;
+
+    /// <summary>大任务详情页用：关掉形态词并重算副标题。</summary>
+    public void HideShapeLabel()
+    {
+        if (!ShowShapeLabel)
+        {
+            return;
+        }
+
+        ShowShapeLabel = false;
+        Refresh();
+    }
+
     public ItemViewModel(Item item, bool isFloating = false)
     {
         _item = item;
@@ -433,7 +455,22 @@ public partial class ItemViewModel : ObservableObject
     {
         var parts = new List<string>();
 
-        // 预计耗时放在最前面：它是判断"这一条值不值得现在做"的第一信息，
+        // 【形态词排第一】
+        // 它说的是"这条会怎么对待我"，比耗时和钟点都靠前：
+        // 「每天」和「就今天一次」是两种完全不同的事，而这两者在时间字段上
+        // 长得一模一样（都是 StartAt 空 + 今天 23:59），只能靠声明读出来。
+        // 判定在 Core 的 ItemLabels，界面不另写一遍。
+        if (ShowShapeLabel)
+        {
+            var shapeLabel = ItemLabels.ShapeLabel(_item);
+
+            if (shapeLabel is not null)
+            {
+                parts.Add(shapeLabel);
+            }
+        }
+
+        // 预计耗时：判断"这一条值不值得现在做"的第一信息，
         // 比几点截止更影响当下的决策。
         //
         // 【为什么这一版要把它加上】
@@ -489,6 +526,16 @@ public partial class ItemViewModel : ObservableObject
             }
         }
 
+        // 【已经做完的事，到这里就结束】
+        // 上面那句（「用了 18 分钟 · 完成于 22:00」）已经是做完之后全部有用的信息。
+        // 再往下是"几点开始 / 哪天截止 / 逾期几天"——那几项都是**还欠着**才需要看的：
+        // 一条 23 号才到期的事今天提前做完了，副标题还挂着「11月23日 截止」，
+        // 读起来像它还没了结（11-22 22:00 用户指出的那处别扭）。
+        if (_item.Status == ItemStatus.Done)
+        {
+            return string.Join(" · ", parts);
+        }
+
         if (startLocal.HasValue)
         {
             parts.Add($"{startLocal.Value:HH:mm} 开始");
@@ -504,7 +551,13 @@ public partial class ItemViewModel : ObservableObject
                 // 它的截止日在未来，"逾期"是错的，而且会重新变成每天的压力——
                 // 正是这一形态要消除的东西。剩余天数由 Core 算好（不自己减日期），
                 // 跟 AI 提示词里那条用的是同一个函数，界面和 AI 说同一个数。
-                parts.Add(ItemPresence.DeadlineLine(floatingDue, today));
+                // 这里取短句（不带"截止"）——前面已经有「期限」两个字，
+                // 再接一句"截止"就是同一个意思说两遍。
+                // 【详情页例外】那里关掉了形态词，没有「期限」打头，
+                // 就得用整句才读得通，否则只剩「还有 1 天 · 11月23日」。
+                parts.Add(ShowShapeLabel
+                    ? ItemPresence.DeadlineShortLine(floatingDue, today)
+                    : ItemPresence.DeadlineLine(floatingDue, today));
             }
             else if (dueDay < today)
             {
@@ -524,8 +577,20 @@ public partial class ItemViewModel : ObservableObject
             }
             else if (dueDay == today)
             {
-                // 截止时间是 23:59 的记录说明用户还没给它安排具体时间，不该显示成"23:59 截止"
-                parts.Add(dueLocal.Value is { Hour: 23, Minute: 59 } ? "尚未安排时间" : $"{dueLocal.Value:HH:mm} 截止");
+                // 23:59 是落库时"只给了日期、没给钟点"的形态（DateHelper.EndOfDay）。
+                //
+                // 【为什么不再写"没安排时间"那句话】
+                // 形态词已经在最前面说了它是「今天」或「每天」，再说一句"没安排"自相矛盾；
+                // 对「每天」那条更是假话——它天天都安排好了，只是没有钟点。
+                // 只有「期限」当天需要补一句，否则它和普通待办看不出区别。
+                if (dueLocal.Value is not { Hour: 23, Minute: 59 })
+                {
+                    parts.Add($"{dueLocal.Value:HH:mm} 截止");
+                }
+                else if (_item.Shape == ItemShape.DeadlineOnly)
+                {
+                    parts.Add("今天截止");
+                }
             }
             else
             {
@@ -534,7 +599,10 @@ public partial class ItemViewModel : ObservableObject
         }
         else
         {
-            parts.Add("尚未安排时间");
+            // 没有任何时间字段：只有容器会是这里（它不进清单，详情页靠进度行自辨）。
+            // 【为什么不再写"没有安排时间"那句话】对容器来说它压根不需要"排时间"，
+            // 那不是没排，是不适用。说「未排期」至少不撒谎，也不会被误读成漏了什么。
+            parts.Add("未排期");
         }
 
         return string.Join(" · ", parts);

@@ -27,11 +27,161 @@
         第 0 行 Auto  标题和日期      —— 高度随内容
         第 1 行 Auto  今日完成统计    —— 高度随内容
         第 2 行 Auto  「正在做」/「到点了」—— 平时折起来，不占空间
-        第 3 行 *     清单列表        —— 吃掉剩下的所有空间
+        第 3 行 *     清单           —— 吃掉剩下的所有空间，自己滚
         第 4 行 Auto  快速添加区      —— 固定在底部
-        第 5 行 Auto  时间选择器      —— 只有勾了「定时」才出来
-      "*" 表示"把剩余高度全给我"，所以列表会自动撑满中间。
+        第 5 行 Auto  形态/时间/日期选择器 —— 只有点开才出来
+      "*" 表示"把剩余高度全给我"，所以清单会自动撑满中间。
     -->
+
+    <ContentPage.Resources>
+        <!--
+          ============ 清单行模板（今天还没做的、今天做完的，共用这一份）============
+          【为什么能共用】
+          已完成的那些会自动隐藏「启动」和「10 分钟」两个按钮——
+          CanStartPause / CanFocus 对 Done 恒为 false，不需要另抄一套模板。
+          以前在 Footer 里重复写过一份，是多余的。
+
+          【为什么放在 Resources 里】
+          两段各自 BindableLayout 绑它，改一处两边一起变；
+          抄两份的话，早晚有一处忘了改（比如这次加形态词）。
+        -->
+        <DataTemplate x:Key="ItemRowTemplate" x:DataType="vm:ItemViewModel">
+            <!--
+              行高：Padding 从 "2,6" → "4,8" → 现在 "6,10"。
+              一开始一行连内容带间距只有 40 出头，七八条就挤成一团，
+              扫视时相邻两条的说明文字容易看成同一条的。
+              这个软件的清单是要"扫一眼就知道还剩什么"的，行距是功能不是装饰。
+            -->
+            <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto"
+                  ColumnSpacing="8"
+                  Padding="6,10">
+                <!-- 左边的打勾按钮。
+                     Command 需要绑到"页面级"的命令（ToggleCompleteCommand
+                     属于 MainViewModel，不属于每一行的 ItemViewModel），
+                     所以用 RelativeSource AncestorType 往外找，
+                     意思是"沿着界面树往上找第一个 BindingContext 是 MainViewModel 的父级"。
+                     CommandParameter="{Binding .}" 里的 "." 表示"当前这一行的对象"，
+                     这样命令才知道用户点的是哪一条。 -->
+                <Button Grid.Column="0"
+                        Text="&#10003;"
+                        Style="{StaticResource RoundIconButton}"
+                        TextColor="{Binding CheckColor}"
+                        Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=ToggleCompleteCommand}"
+                        CommandParameter="{Binding .}" />
+
+                <!-- 中间：标题 + 状态徽章 + 一行说明（时间/逾期/已进行时长） -->
+                <VerticalStackLayout Grid.Column="1"
+                                     Spacing="2"
+                                     VerticalOptions="Center">
+                    <!--
+                      标题和状态徽章并排。
+                      【为什么徽章要单独占一个位置，而不是并进下面那行说明】
+                      下面那行是"什么时候做"（时间/估时/逾期），
+                      徽章是"这件事现在是什么状态"——两类信息混在一行里会读成一句，
+                      比如"进行中 · 已进行 25 分钟"，扫视时容易看漏前半。
+                      跟标题同行则不同：它紧挨着"是什么事"，
+                      正是人判断"这条我要不要管"时先看的地方。
+                    -->
+                    <HorizontalStackLayout Spacing="6">
+                        <Label Text="{Binding Title}"
+                               TextColor="{Binding TitleColor}"
+                               TextDecorations="{Binding TitleDecorations}"
+                               FontSize="15"
+                               LineBreakMode="TailTruncation"
+                               VerticalOptions="Center" />
+
+                        <Border Padding="5,1"
+                                Stroke="{Binding StatusBrush}"
+                                StrokeThickness="1"
+                                VerticalOptions="Center"
+                                IsVisible="{Binding HasStatusBadge}">
+                            <Border.StrokeShape>
+                                <RoundRectangle CornerRadius="4" />
+                            </Border.StrokeShape>
+                            <Label Text="{Binding StatusText}"
+                                   TextColor="{Binding StatusColor}"
+                                   FontSize="10" />
+                        </Border>
+                    </HorizontalStackLayout>
+
+                    <!-- 最小启动步骤：只在还没了结时出现（见 ItemViewModel.StepText） -->
+                    <Label Text="{Binding StepText}"
+                           Style="{StaticResource Caption}"
+                           TextColor="{StaticResource MutedText}"
+                           IsVisible="{Binding HasMinimalStep}" />
+
+                    <Label Text="{Binding Subtitle}"
+                           Style="{StaticResource Caption}" />
+                </VerticalStackLayout>
+
+                <!--
+                  启动 / 暂停 / 继续。
+
+                  【为什么这个按钮直接摆在条目上】
+                  「开始做」是这个软件最重要的一次点击：
+                  它要解决的正是"知道该做但启动不了"。
+                  把它收进菜单里等于给最需要省步骤的一步多加两下。
+
+                  【为什么它会换字：启动 / 暂停 / 继续】
+                  同一个位置在两种时刻做两件事。靠图标区分要人先记住图标的含义；
+                  直接写成字，"点下去会发生什么"就写在按钮上，
+                  不用猜也不用二次确认。
+
+                  【为什么完成之后它就不见了】
+                  已经了结的事再给一个"开始"是自相矛盾
+                  （CanStartPause 只在待办/跳过/进行中为真）。
+                -->
+                <Button Grid.Column="2"
+                        Text="{Binding StartButtonText}"
+                        Style="{StaticResource ChipButton}"
+                        WidthRequest="52"
+                        IsVisible="{Binding CanStartPause}"
+                        ToolTipProperties.Text="点上就正式开始计时，再点一下暂停"
+                        Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=ToggleStartPauseCommand}"
+                        CommandParameter="{Binding .}" />
+
+                <!--
+                  「先做 10 分钟」
+
+                  【为什么直接放在条目上，而不是收进「更多」菜单】
+                  这个按钮的全部价值就是"少一步"。
+                  让人先想起来去菜单里找它，等于把承诺又抬高了一点——
+                  而它存在的唯一理由是降低承诺。
+                  已完成 / 已放弃的条目不显示（CanFocus）：
+                  那是已经了结的事，再给一个"开始"是自相矛盾。
+                -->
+                <Button Grid.Column="3"
+                        Text="10 分钟"
+                        Style="{StaticResource ChipButton}"
+                        WidthRequest="60"
+                        IsVisible="{Binding CanFocus}"
+                        ToolTipProperties.Text="先做 10 分钟，只做 10 分钟"
+                        Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=StartFocusCommand}"
+                        CommandParameter="{Binding .}" />
+
+                <!--
+                  更多操作（重命名 / 删除 / 改状态在里面的菜单里）
+
+                  【为什么这里写"更多"两个字，而不是 ⋯ / ⋮ 这种图标】
+                  上一版是一个 ⋮ 号的图标按钮，结果有两个问题：
+                    1. 同样是字形问题——有些系统字体里它就是三个点，
+                       小到看不清，甚至干脆是空的，看着像"这里什么都没有"；
+                    2. 更关键的：就算图标显示出来了，它也没说自己是"能点的菜单"，
+                       于是用户根本不知道删除藏在里面。
+                  写成"更多"两个字，不依赖任何字形，而且字面上就说明
+                  "点开还有东西"。两个字的宽度换掉了"找不到删除在哪"这个问题，划算。
+                -->
+                <Button Grid.Column="4"
+                        Text="更多"
+                        Style="{StaticResource ChipButton}"
+                        WidthRequest="46"
+                        ToolTipProperties.Text="重命名 / 删除 / 改状态"
+                        Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=ShowActionsCommand}"
+                        CommandParameter="{Binding .}" />
+            </Grid>
+        </DataTemplate>
+    </ContentPage.Resources>
+
     <!--
       空着的时候不说"没有任务"，而说"加一条，哪怕只是先看两分钟"——
       这一句是给正在逃避的人留的最低门槛。
@@ -160,37 +310,35 @@
             </VerticalStackLayout>
         </Border>
 
-        <!-- ================= 第 3 行：今日清单 =================
-             CollectionView 是列表控件的现代版本。
-             相比老的 ListView，它支持横向/纵向、网格布局，而且性能更好。
-             ItemsSource 绑到 ObservableCollection，集合内容一变界面自动重画。 -->
-        <CollectionView Grid.Row="3"
-                        ItemsSource="{Binding TodayItems}"
-                        SelectionMode="None">
+        <!-- ================= 第 3 行：清单（三段，一个滚动条）=================
 
-            <!--
-              ================= 常驻带：一直悬着、还没到截止日 =================
+             【为什么不再是 CollectionView（11-22 22:22 实测）】
+             原先是一个 CollectionView + Header（常驻带）+ Footer（做完的事）。
+             结果：今天全做完、主清单为空的那天，Footer 的内容照样画出来了，
+             却**完全不参与滚动**——鼠标滚轮没反应，下面几条永远看不到。
+             这是 Windows 上 CollectionView 在空 ItemsSource 时的老毛病：
+             Header/Footer 挂在滚动容器外面，只有真有条目时滚动才成立。
 
-              【为什么用 Header，而不是往 Grid 里加一行、或塞进 TodayItems】
-              1. 它是清单上方的一段内容，跟着主清单一起滚动最自然；单独占一个
-                 Grid 行会固定吃掉一块屏幕，常驻项多时把清单挤没。
-              2. 两个可滚动控件（ScrollView/CollectionView）嵌套是 MAUI 的经典坑，
-                 Header 属于 CollectionView 自己，没有嵌套滚动。
-              3. 最关键：它**不进 TodayItems**，完成率分母天然不含它（见 MainViewModel）。
+             改成一个 ScrollView 装三段之后，页面上只有一层滚动，
+             不存在"内容画出来却滚不动"，也不用再操心 Header/Footer
+             的 BindingContext 不继承（以前每个绑定都得写 RelativeSource）。
+             代价是失去列表虚拟化——但这张清单本来就是几十条的量级，
+             而"滚不动"是当场就能感觉到的坏，取舍很清楚。
 
-              【为什么绑定都写 RelativeSource 到 MainViewModel】
-              Header 和 EmptyView 一样，BindingContext 不保证继承页面的 VM；
-              显式指到 MainViewModel 才不会静默绑空（编不报错、界面一片空）。
+             【三段为什么各自独立】
+             常驻带和做完的事都不该进 TodayItems：前者会天天被算成"今天又没做完"，
+             后者会把完成率分母算成只剩未完成的（详见 MainViewModel 的三个集合）。 -->
+        <ScrollView Grid.Row="3">
+            <VerticalStackLayout Spacing="4">
 
-              【为什么只有两个入口，没有确认弹窗】
-              用户定的：就「完成了」和「先做 10 分钟」，不搞状态机。
-              勾完成后它不是消失，而是被 completedThatDay 接进「今天做完的事」，
-              在那里还能再点一下取消完成、回到这一带——是可逆的，不需要多问一句。
-              对一个启动困难的人来说，多一次确认就是多一次放弃的机会。
-            -->
-            <CollectionView.Header>
+                <!-- ① 一直悬着 · 还没到截止日
+                     不算今天该做完、不进分母；只有「完成了」和「10 分钟」两个入口，
+                     勾完成后它不是消失，而是被挪到下面「今天做完的事」，
+                     在那里还能再点一下取消完成——可逆，不需要多问一句。
+                     对一个启动困难的人来说，多一次确认就是多一次放弃的机会。 -->
                 <VerticalStackLayout Spacing="6"
-                                     IsVisible="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=ShowFloatingBand}">
+                                     Padding="0,0,0,6"
+                                     IsVisible="{Binding ShowFloatingBand}">
                     <Label Text="一直悬着 · 还没到截止日"
                            Style="{StaticResource CardTitle}" />
                     <Label Text="这些不算今天该做完，不用有压力；想动手就点一下。"
@@ -198,7 +346,7 @@
                            TextColor="{StaticResource MutedText}" />
 
                     <VerticalStackLayout Spacing="6"
-                                         BindableLayout.ItemsSource="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=FloatingItems}">
+                                         BindableLayout.ItemsSource="{Binding FloatingItems}">
                         <BindableLayout.ItemTemplate>
                             <DataTemplate x:DataType="vm:ItemViewModel">
                                 <Border Style="{StaticResource CardStyle}" Padding="10,8">
@@ -207,9 +355,8 @@
                                         <VerticalStackLayout Grid.Column="0"
                                                              Spacing="2"
                                                              VerticalOptions="Center">
-                                            <Label Text="{Binding Title}"
-                                                   FontSize="14" />
-                                            <!-- 副标题是「还有 N 天 · X月X日 截止」，由 Core 算，不是"逾期" -->
+                                            <Label Text="{Binding Title}" FontSize="14" />
+                                            <!-- 副标题是「期限 · 还有 N 天 · X月X日」，由 Core 算，不是"逾期" -->
                                             <Label Text="{Binding Subtitle}"
                                                    Style="{StaticResource Caption}" />
                                             <Label Text="{Binding StepText}"
@@ -237,161 +384,41 @@
                         </BindableLayout.ItemTemplate>
                     </VerticalStackLayout>
                 </VerticalStackLayout>
-            </CollectionView.Header>
 
-            <CollectionView.EmptyView>
-                <!-- EmptyView：列表为空时显示的内容。
-                     文案刻意写成鼓励而非催促，避免一打开就有压力。
-                     在别的日子里它会换成"可以提前放进来"的说法（见 EmptyHint）。 -->
-                <Label Text="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=EmptyHint}"
+                <!-- ② 今天还没做的 -->
+                <VerticalStackLayout
+                    BindableLayout.ItemsSource="{Binding TodayItems}"
+                    BindableLayout.ItemTemplate="{StaticResource ItemRowTemplate}" />
+
+                <!-- ③ 真的什么都没有时才说这句。
+                     不能靠"主清单为空"来判断：今天全做完时主清单也是空的，
+                     那时候说"今天还没有安排"等于把一整天抹掉。 -->
+                <Label Text="{Binding EmptyHint}"
+                       IsVisible="{Binding ShowEmptyHint}"
                        Style="{StaticResource Caption}"
                        FontSize="13"
                        HorizontalTextAlignment="Center"
-                       VerticalTextAlignment="Center"
                        Margin="0,40,0,0" />
-            </CollectionView.EmptyView>
 
-            <CollectionView.ItemTemplate>
-                <!-- DataTemplate 描述"每一行长什么样"。
-                     它的 BindingContext 是集合里的单个元素，也就是一个 ItemViewModel，
-                     所以下面的 {Binding Title} 取的是某一行的标题。 -->
-                <DataTemplate x:DataType="vm:ItemViewModel">
-                    <!--
-                      行高：Padding 从 "2,6" → "4,8" → 现在 "6,10"。
-                      一开始一行连内容带间距只有 40 出头，七八条就挤成一团，
-                      扫视时相邻两条的说明文字容易看成同一条的。
-                      这个软件的清单是要"扫一眼就知道还剩什么"的，行距是功能不是装饰。
-                    -->
-                    <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto"
-                          ColumnSpacing="8"
-                          Padding="6,10">
-                        <!-- 左边的打勾按钮。
-                             Command 需要绑到"页面级"的命令（ToggleCompleteCommand
-                             属于 MainViewModel，不属于每一行的 ItemViewModel），
-                             所以用 RelativeSource AncestorType 往外找，
-                             意思是"沿着界面树往上找第一个类型是 MainViewModel 的父级"。
-                             CommandParameter="{Binding .}" 里的 "." 表示"当前这一行的对象"，
-                             这样命令才知道用户点的是哪一条。 -->
-                        <Button Grid.Column="0"
-                                Text="&#10003;"
-                                Style="{StaticResource RoundIconButton}"
-                                TextColor="{Binding CheckColor}"
-                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=ToggleCompleteCommand}"
-                                CommandParameter="{Binding .}" />
+                <!-- ④ 今天做完的事
+                     给它单独一段，而不是留在主清单里划掉：
+                     排序按 DueAt 走，一条提前完成的「只有截止日」会掉到清单最末尾，
+                     于是"点完成"的观感是从最显眼的位置消失、再也没出现。
+                     这里给它一个固定去处——做完就往下沉，点勾还能回原位。 -->
+                <VerticalStackLayout Spacing="2"
+                                     Margin="0,14,0,0"
+                                     IsVisible="{Binding ShowDoneSection}">
+                    <Label Text="{Binding DoneSectionTitle}"
+                           Style="{StaticResource CardTitle}"
+                           Padding="6,0,0,4" />
 
-                        <!-- 中间：标题 + 状态徽章 + 一行说明（时间/逾期/已进行时长） -->
-                        <VerticalStackLayout Grid.Column="1"
-                                             Spacing="2"
-                                             VerticalOptions="Center">
+                    <VerticalStackLayout
+                        BindableLayout.ItemsSource="{Binding DoneItems}"
+                        BindableLayout.ItemTemplate="{StaticResource ItemRowTemplate}" />
+                </VerticalStackLayout>
 
-                            <!--
-                              标题和状态徽章并排。
-                              【为什么徽章要单独占一个位置，而不是并进下面那行说明】
-                              下面那行是"什么时候做"（时间/估时/逾期），
-                              徽章是"这件事现在是什么状态"——两类信息混在一行里会读成一句，
-                              比如"进行中 · 已进行 25 分钟"，扫视时容易看漏前半。
-                              跟标题同行则不同：它紧挨着"是什么事"，
-                              正是人判断"这条我要不要管"时先看的地方。
-                            -->
-                            <HorizontalStackLayout Spacing="6">
-                                <Label Text="{Binding Title}"
-                                       TextColor="{Binding TitleColor}"
-                                       TextDecorations="{Binding TitleDecorations}"
-                                       FontSize="15"
-                                       LineBreakMode="TailTruncation"
-                                       VerticalOptions="Center" />
-
-                                <Border Padding="5,1"
-                                        Stroke="{Binding StatusBrush}"
-                                        StrokeThickness="1"
-                                        VerticalOptions="Center"
-                                        IsVisible="{Binding HasStatusBadge}">
-                                    <Border.StrokeShape>
-                                        <RoundRectangle CornerRadius="4" />
-                                    </Border.StrokeShape>
-                                    <Label Text="{Binding StatusText}"
-                                           TextColor="{Binding StatusColor}"
-                                           FontSize="10" />
-                                </Border>
-                            </HorizontalStackLayout>
-
-                            <!-- 最小启动步骤：只在还没了结时出现（见 ItemViewModel.StepText） -->
-                            <Label Text="{Binding StepText}"
-                                   Style="{StaticResource Caption}"
-                                   TextColor="{StaticResource MutedText}"
-                                   IsVisible="{Binding HasMinimalStep}" />
-
-                            <Label Text="{Binding Subtitle}"
-                                   Style="{StaticResource Caption}" />
-                        </VerticalStackLayout>
-
-                        <!-- 右边：更多操作（重命名 / 删除 / 改状态在里面的菜单里）
-
-                             【为什么这里写"更多"两个字，而不是 ⋯ / ⋮ 这种图标】
-                             上一版是一个 ⋮ 号的图标按钮，结果有两个问题：
-                               1. 同样是字形问题——有些系统字体里它就是三个点，
-                                  小到看不清，甚至干脆是空的，看着像"这里什么都没有"；
-                               2. 更关键的：就算图标显示出来了，它也没说自己是"能点的菜单"，
-                                  于是用户根本不知道删除藏在里面。
-                             写成"更多"两个字，不依赖任何字形，而且字面上就说明
-                             "点开还有东西"。两个字的宽度换掉了"找不到删除在哪"这个问题，划算。 -->
-                        <!--
-                          「先做 10 分钟」
-
-                          【为什么直接放在条目上，而不是收进「更多」菜单】
-                          这个按钮的全部价值就是"少一步"。
-                          让人先想起来去菜单里找它，等于把承诺又抬高了一点——
-                          而它存在的唯一理由是降低承诺。
-                          已完成 / 已放弃的条目不显示（CanFocus）：
-                          那是已经了结的事，再给一个"开始"是自相矛盾。
-                        -->
-                        <!--
-                          启动 / 暂停 / 继续。
-
-                          【为什么这个按钮直接摆在条目上】
-                          「开始做」是这个软件最重要的一次点击：
-                          它要解决的正是"知道该做但启动不了"。
-                          把它收进菜单里等于给最需要省步骤的一步多加两下。
-
-                          【为什么它会换字：启动 / 暂停 / 继续】
-                          同一个位置在两种时刻做两件事。靠图标区分要人先记住图标的含义；
-                          直接写成字，"点下去会发生什么"就写在按钮上，
-                          不用猜也不用二次确认。
-
-                          【为什么完成之后它就不见了】
-                          已经了结的事再给一个"开始"是自相矛盾
-                          （CanStartPause 只在待办/跳过/进行中为真）。
-                        -->
-                        <Button Grid.Column="2"
-                                Text="{Binding StartButtonText}"
-                                Style="{StaticResource ChipButton}"
-                                WidthRequest="52"
-                                IsVisible="{Binding CanStartPause}"
-                                ToolTipProperties.Text="点上就正式开始计时，再点一下暂停"
-                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=ToggleStartPauseCommand}"
-                                CommandParameter="{Binding .}" />
-
-                        <Button Grid.Column="3"
-                                Text="10 分钟"
-                                Style="{StaticResource ChipButton}"
-                                WidthRequest="60"
-                                IsVisible="{Binding CanFocus}"
-                                ToolTipProperties.Text="先做 10 分钟，只做 10 分钟"
-                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=StartFocusCommand}"
-                                CommandParameter="{Binding .}" />
-
-                        <Button Grid.Column="4"
-                                Text="更多"
-                                Style="{StaticResource ChipButton}"
-                                WidthRequest="46"
-                                ToolTipProperties.Text="重命名 / 删除 / 改状态"
-                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:MainViewModel}}, Path=ShowActionsCommand}"
-                                CommandParameter="{Binding .}" />
-
-                    </Grid>
-                </DataTemplate>
-            </CollectionView.ItemTemplate>
-        </CollectionView>
+            </VerticalStackLayout>
+        </ScrollView>
 
         <!-- ================= 第 4 行：快速添加 =================
              输入框和按钮并排，省掉一整行的高度。

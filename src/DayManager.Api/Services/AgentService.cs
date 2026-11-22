@@ -30,6 +30,7 @@ public sealed class AgentService
     private readonly AiProxy _proxy;
     private readonly ItemTools _tools;
     private readonly ItemRepository _items;
+    private readonly ProjectRepository _projects;
     private readonly PolicyRepository _policy;
     private readonly ProfileService _profile;
     private readonly ILogger<AgentService> _logger;
@@ -100,6 +101,7 @@ public sealed class AgentService
         AiProxy proxy,
         ItemTools tools,
         ItemRepository items,
+        ProjectRepository projects,
         PolicyRepository policy,
         ProfileService profile,
         ILogger<AgentService> logger)
@@ -107,6 +109,7 @@ public sealed class AgentService
         _proxy = proxy;
         _tools = tools;
         _items = items;
+        _projects = projects;
         _policy = policy;
         _profile = profile;
         _logger = logger;
@@ -138,6 +141,13 @@ public sealed class AgentService
         // 否则他刚说过「第一章」，下一句问「我那个竞赛拆到哪了」，
         // AI 会答「没看到」，正好破坏「软件里所有信息 AI 都能看到」。
         var stages = await _items.GetStagesAsync(ct);
+
+        // 大任务（项目）和挂在它们下面的任务，同样不进今日清单，
+        // 但他问「这条挂 aaa 还是 abc 下面」时必须答得出来。
+        // 之前只喂了上面那段容器，模型视野里就只有一个孤零零的壳名，
+        // 只好回「我看不到 / 你截个图给我」——那正是要修的那一处。
+        // 只补视野：项目名、归属、项目下清单都从这一份事实里读，不加动作、不改模型。
+        var projectGroups = await _projects.GetAllWithItemsAsync(ct);
 
         // 未来几天。
         //
@@ -171,7 +181,7 @@ public sealed class AgentService
 
         var messages = new List<ChatMessage>
         {
-            new() { Role = "system", Content = await BuildSystemPrompt(day, items, stats, upcoming, review, floating, stages, ct) }
+            new() { Role = "system", Content = await BuildSystemPrompt(day, items, stats, upcoming, review, floating, stages, projectGroups, ct) }
         };
 
         // 只带最近几轮历史：全部带上的话，聊久了 token 会失控，
@@ -205,6 +215,23 @@ public sealed class AgentService
         {
             Role = "system",
             Content = ChatTime.Coordinate(now, lastBeforeCurrent)
+        });
+
+        // 【视野校正，11-22 16:36 截图实测】数据进了最前面的系统提示还不够：
+        // 他在同一个会话里连着问「你现在能看到了吗」「你再看看？」，模型被自己前几轮
+        // 说过的「看不到 aaa / abc」锚住，顺着旧结论又答了一遍「还是没有喵」。
+        // 这类问的是「你自己的状态」，不是「某条挂哪」——所以光写「问归属照那段答」覆盖不到。
+        // 靠后的一条 system 权重最高，且直接给出能引用的具体名字，比反复叮嘱「别说看不到」管用。
+        var projectNames = string.Join("、", projectGroups.Take(5).Select(g => g.Project.Name));
+        var visionNote = $"【视野校正】你现在看得见 {projectGroups.Count} 个大任务（项目），"
+            + (string.IsNullOrEmpty(projectNames) ? "" : $"名字包括 {projectNames} 等，")
+            + "完整清单和各自下面的任务在【大任务（项目）】段。阶段性目标是另一类壳，别混。";
+        messages.Add(new ChatMessage
+        {
+            Role = "system",
+            Content = visionNote
+                + "他问「你现在能看到了吗」「你再看看」时，照这段答「能」，并说出具体项目名；"
+                + "别说看不到、别让他截图。"
         });
 
         // 【为什么格式要求要在最后再说一遍】
@@ -514,6 +541,7 @@ public sealed class AgentService
         IReadOnlyList<DayList> review,
         IReadOnlyList<DayManager.Core.Entities.Item> floating,
         IReadOnlyList<DayManager.Core.Entities.Item> stages,
+        IReadOnlyList<(DayManager.Core.Entities.Project Project, List<DayManager.Core.Entities.Item> Items)> projectGroups,
         CancellationToken ct)
     {
         // 语气是用户自己选的，每次拼提示词时现读——
@@ -593,6 +621,36 @@ public sealed class AgentService
                 + (x.ParentTaskId is not null ? " | 挂在别的阶段下" : "")
                 + (x.DueAt is { } sd ? $" | 阶段截止 {sd:MM-dd}" : "")));
 
+        // 【大任务（项目）】和上面那段容器是两回事：
+        // 项目是 projects 表里那个有名字、能归档的壳；容器是 items 表里靠
+        // ParentTaskId 挂出来的阶段性目标。之前只喂了后者，模型视野里就只有一个
+        // 孤零零的壳名，他问「挂 aaa 还是 abc 下面」时答不了，只好说「我看不到」。
+        //
+        // 【为什么项目也要带 id】真实库里同名项目不止一个（两个 aaa、
+        // 三个「数据结构期末复习」）。不区分的话模型会把它们当成一个，回答归属时张冠李戴。
+        // 【为什么不用短 id】11-22 实测：一开始为了省 token 把项目下任务截成 8 位短 id，
+        // 结果模型拿它去执行 delete，而 ItemTools.FindAsync 要完整 Guid，回「找不到这条记录」——
+        // 他让 AI 删一条，AI 说删了其实没删成（15:38 那条「系统里没找到它的 id」就是）。
+        // 视野里凡可能被拿去动手的 id 一律给完整的，和【今天的清单】段一个口径。
+        var projectText = projectGroups.Count == 0
+            ? "（没有）"
+            : string.Join('\n', projectGroups.Select(g =>
+            {
+                var p = g.Project;
+                var head = $"- id={p.Id} | {p.Name} | "
+                           + (p.Status == ProjectStatus.Archived ? "已归档" : "进行中")
+                           + (p.TargetDate is { } td ? $" | 目标 {td:MM-dd}" : "");
+
+                if (g.Items.Count == 0)
+                {
+                    return head + " | 下面没有任务";
+                }
+
+                return head + "\n" + string.Join('\n', g.Items.Select(i =>
+                    $"  - id={i.Id} | {i.Title} | {StatusName(i.Status)}"
+                    + (ItemAxes.IsContainer(i) ? " | 阶段性目标（就是上面那段里的容器）" : "")));
+            }));
+
         // 【为什么用逐行拼接而不是一整段原始字符串】
         // 提示词里要给出 JSON 示例，而 JSON 的大括号和 C# 字符串插值的 {{ }} 转义会打架，
         // 一旦括号层数对不上就是编译错误，改起来很烦。
@@ -650,7 +708,19 @@ public sealed class AgentService
             "【阶段性目标（容器）】这些是装子任务的壳，自己没有完成按钮：",
             "它们**不算今天该做完、不进完成率、别催**；进度由下面挂的子项算出来。",
             "他问「拆到哪了」可以照着说有哪些阶段，别报「还剩几章没做」这种制造压力的话。",
+            "**这些不是大任务**：有名字、能归档的项目在下面【大任务（项目）】段，别把两段的名字混着答。",
             stagesText,
+            "",
+            // 【为什么大任务要单列一段，不混进阶段性目标】
+            // 两者不是一回事：项目是 projects 表里那个有名字、能归档的壳，
+            // 容器是 items 表里靠 ParentTaskId 挂出来的阶段。混在一起，
+            // 模型会把项目名当成一件「今天该做完」的事去催。
+            "【大任务（项目）】软件里所有项目，以及挂在各自下面的任务：",
+            "**你现在看得见它们。** 前面几轮如果你说过「看不到大任务 / 只认得 abd 一个壳子」，那是旧信息，以本段为准。",
+            "进行中的排前面，已归档的也列出来（他问以前的事同样要答得出来）；同名项目靠 id 区分。",
+            "这些是归拢事情的壳，**不算今天该做完、别拿进度去催**。",
+            "他问「这条挂在哪个大任务下面」「aaa 里有什么」时照这段答，不要再让他截图。",
+            projectText,
             "",
             // 【为什么把"你看不到"改成"可以查"】
             // 旧版明写"更早以前的你看不到"，于是用户问昨天的事它照着这句答"看不到昨天的任务"——
@@ -659,7 +729,7 @@ public sealed class AgentService
             // 边界仍然必须写死：不给边界，模型宁可编几条也不肯说"没有"（"我不知道"在它
             // 的训练里是低质量回答），而编造是这个软件里最坏的一类错误——
             // 他会照着不存在的事去安排，然后不再相信这个界面。
-            $"【你的视野】默认给你：过去 {ReviewDays} 天的回顾 + 今天 + 接下来 {UpcomingDays} 天 + 上面两段「一直悬着」和「阶段性目标」。",
+            $"【你的视野】默认给你：过去 {ReviewDays} 天的回顾 + 今天 + 接下来 {UpcomingDays} 天 + 上面三段「一直悬着」「阶段性目标」「大任务」。",
             "比这更早的日子、或这些天之后的安排，用 query 动作让系统查（见下面【你能做的事】）。",
             "**不要再说「我看不到」**：窗口外的日子是可以查的，先查再答。",
             "查回来写着「空」的日子是真的没有安排；查不到就直说没有，不要编。",

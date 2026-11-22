@@ -181,6 +181,12 @@ public partial class ProjectDetailViewModel : ObservableObject
                     Depth = row.Depth,
                     IsContainer = ItemAxes.IsContainer(row.Item)
                 };
+
+                // 详情页不给形态词：这里每一行都在同一个项目下，
+                // 层级已经由缩进和「几 / 几 件完成」说清楚了，
+                // 每行再加一个「今天」只会和缩进抢位置。
+                vm.HideShapeLabel();
+
                 Items.Add(vm);
             }
 
@@ -304,12 +310,19 @@ public partial class ProjectDetailViewModel : ObservableObject
             }
             else
             {
-                // 叶子仍是「挂在今天的一条待办」，只是多了一个 ParentTaskId。
                 // 不能走 AddToDayAsync：那个入口把 projectId 写死成 null，
                 // 新加的叶子就不属于这个项目，GetItemsAsync 按 ProjectId 查不到它。
-                // 这里显式传 shape，形态仍由入口写死，不靠时间字段反推。
+                //
+                // 【keepNoDueAt 必须给 true：这是 11-22 22:00 实测出来的坑】
+                // AddAsync 有个兜底：没给时间就默认截止到当晚 23:59，
+                // 本意是防止用户在日程页随手加的事被无限推迟。
+                // 但详情页加的是**项目结构**，不是今天的待办——用上那个兜底，
+                // 每加一条子任务它就带着"今天到期"跳进日程页的清单，
+                // 用户会看到 1.1 / 1.2 / 1.3 全都排在今天，而他从没定过日期。
+                // 所以这里明确说"别替我挂到今天"，让它真的空着。
                 await _items.AddAsync(NewTitle.Trim(), projectId: _projectId,
-                    parentTaskId: ParentStageId, shape: ItemShape.DayTask);
+                    parentTaskId: ParentStageId, shape: ItemShape.DayTask,
+                    keepNoDueAt: true);
             }
 
             // 不清输入框内容的理由和日程页一致：加完之后通常还要接着加下一条。
