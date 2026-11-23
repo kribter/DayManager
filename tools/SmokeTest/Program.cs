@@ -3604,7 +3604,6 @@ Console.WriteLine("=== 36. 收分类 + 大任务递归层级：主要是删，�
     Check("归档行和进行中卡片共用一份进度文案（不另写一套）",
         page42.Contains("ArchivedRowTemplate")
         && page42.Contains("{Binding ProgressText}"));
-
     // ⑤ 删除：只对空项目开放。
     // 删有内容的项目不是"干净地没了"——外键是 SetNull，底下任务会变成无主的零散条目。
     var empty42 = await projects42.CreateAsync("空壳项目", null);
@@ -3669,6 +3668,34 @@ Console.WriteLine("=== 36. 收分类 + 大任务递归层级：主要是删，�
         var orphans = dbChk42.Items.IgnoreQueryFilters().Count(x => x.ProjectId == ghost42.Id);
         Check("删完不留孤儿行（软删的残壳一起清掉）", orphans == 0);
     }
+
+    try { File.Delete(dbFile42); } catch { }
+}
+
+// ===== 第 43 节：听得懂拒绝（11-22 追着问四遍，用户用「笨猫」岔开它没听懂）=====
+// 问题不在语气，在它把"这件事还没处理完"当成继续问的理由——而沉默本身就是回答。
+// 这一段全在提示词里，只能扫源码 + 用户实测；下面守的是"这几句没被后来的改动删掉"。
+{
+    var src43 = FindSrcRoot();
+    var prompt43 = src43 is null ? "" : File.ReadAllText(
+        Path.Combine(src43, "DayManager.Api", "Services", "AgentPromptBuilder.cs"));
+
+    Check("提示词里有「他不接，就停」这一节", prompt43.Contains("【他不接，就停"));
+
+    Check("换个说法再问 = 同一个问题问两次（判据写在提示词里）",
+        prompt43.Contains("换了说法问，还是同一个问题问了两次"));
+
+    Check("用户骂「笨」＝让你闭嘴，不是让你再解释一遍",
+        prompt43.Contains("那不是要你再解释一遍，是让你闭嘴"));
+
+    Check("「这件事还没处理完」不能当成继续追问的理由",
+        prompt43.Contains("「这件事还没处理完」不是你继续问的理由"));
+
+    Check("人设盖不掉这条（写进了人设的豁免清单）",
+        prompt43.Contains("以及上面那条「他不接就停、不许追着问」"));
+
+    Check("reply 里不许点破用户不想谈（给台阶，不替他总结情绪）",
+        prompt43.Contains("不许点破"));
 }
 
 Console.WriteLine();

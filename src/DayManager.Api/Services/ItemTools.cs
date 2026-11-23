@@ -147,6 +147,13 @@ public sealed class ItemTools
             return (Fail("create", "只有截止日的事不要再给 time；要定几点就改用 date + time。"), null);
         }
 
+        // date 和 dueDate 是两种形态、二选一：同时给说明模型没分清，
+        // 静默走 dueDate 会丢掉它本意的 date（用户看到的是错的形态），报错让它重说。
+        if (dueDay is not null && !string.IsNullOrWhiteSpace(action.Date))
+        {
+            return (Fail("create", "date 和 dueDate 只能给一个，别同时给。"), null);
+        }
+
         var day = ParseDate(action.Date) ?? DateOnly.FromDateTime(DateTime.Now);
         var time = ParseTime(action.Time);
 
