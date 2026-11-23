@@ -53,6 +53,9 @@ public class AppDbContext : DbContext
     /// </summary>
     public DbSet<WorkSegment> WorkSegments => Set<WorkSegment>();
 
+    /// <summary>AI 关于用户的记忆（语义条目）。画像存数字，这里存话。</summary>
+    public DbSet<AiMemory> AiMemories => Set<AiMemory>();
+
     /// <summary>
     /// 构造函数接收 options，由调用方决定连哪个库（客户端连本机 SQLite，服务端连服务器上的库）。
     /// 这种写法叫依赖注入：DbContext 自己不关心连哪，交给外部配置。
@@ -78,6 +81,7 @@ public class AppDbContext : DbContext
         ConfigureAppRule(modelBuilder.Entity<AppRule>());
         ConfigureChatMessage(modelBuilder.Entity<ChatMessage>());
         ConfigureWorkSegment(modelBuilder.Entity<WorkSegment>());
+        ConfigureAiMemory(modelBuilder.Entity<AiMemory>());
 
         ApplyTimeConverters(modelBuilder);
     }
@@ -391,6 +395,21 @@ public class AppDbContext : DbContext
         // 真要清理由用户显式操作（清屏），那时才写 DeletedAt。
         // （HasQueryFilter 不加 = 查询默认不过滤软删，
         //   所以"清空"要自己带 DeletedAt == null 条件，见 ChatRepository。）
+    }
+
+    private static void ConfigureAiMemory(Microsoft.EntityFrameworkCore.Metadata.Builders.EntityTypeBuilder<AiMemory> b)
+    {
+        b.ToTable("memories");
+        b.HasKey(x => x.Id);
+
+        b.Property(x => x.Content).IsRequired().HasMaxLength(500);
+        b.Property(x => x.Reason).IsRequired().HasMaxLength(500);
+
+        // 拼提示词时按"最近记的"取，倒序扫。
+        b.HasIndex(x => x.CreatedAt);
+
+        // 用户删记忆是软删，查询默认过滤。
+        b.HasQueryFilter(x => x.DeletedAt == null);
     }
 
     /// <summary>

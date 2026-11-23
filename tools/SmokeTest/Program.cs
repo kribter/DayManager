@@ -3698,6 +3698,67 @@ Console.WriteLine("=== 36. 收分类 + 大任务递归层级：主要是删，�
         prompt43.Contains("不许点破"));
 }
 
+// ===== 第 44 节：说过没的闸（复读的硬闸，不是提示词）=====
+// 毛病 #3：同一句跨四天发五遍。提示词"别复读"压不住，得靠代码在落库前查重。
+// 只挡"完全同句"（字符串相等），同义但措辞不同的先不做。
+{
+    var src44 = FindSrcRoot();
+    var proactive44 = src44 is null ? "" : File.ReadAllText(
+        Path.Combine(src44, "DayManager.Api", "Services", "ProactiveService.cs"));
+
+    Check("主动开口落库前有防复读的闸", proactive44.Contains("saidBefore"));
+    Check("闸拦的是 AI 说过的话（只看 assistant 角色）",
+        proactive44.Contains("RoleAssistant"));
+    Check("闸只挡完全同句（字符串相等），不猜同义",
+        proactive44.Contains("StringComparison.Ordinal"));
+    Check("命中了就跳过这次主动开口，不硬改一句",
+        proactive44.Contains("这句最近说过，跳过"));
+}
+
+// ===== 第 45 节：AI 记忆（语义条目）=====
+// 画像存数字、记忆存话——"管家记得你"的落点。日结时从对话提炼，拼进提示词。
+{
+    var src45 = FindSrcRoot();
+    string Read45(string rel) => src45 is null ? "" : File.ReadAllText(Path.Combine(src45, rel));
+
+    var entity45 = Read45(Path.Combine("DayManager.Core", "Entities", "AiMemory.cs"));
+    var repo45 = Read45(Path.Combine("DayManager.Data", "Repositories", "MemoryRepository.cs"));
+    var svc45 = Read45(Path.Combine("DayManager.Api", "Services", "MemoryService.cs"));
+    var prompt45 = Read45(Path.Combine("DayManager.Api", "Services", "AgentPromptBuilder.cs"));
+    var proactive45 = Read45(Path.Combine("DayManager.Api", "Services", "ProactiveService.cs"));
+
+    Check("记忆实体有「内容 + 理由」两个字段", entity45.Contains("Content") && entity45.Contains("Reason"));
+    Check("记忆仓储支持软删", repo45.Contains("DeleteAsync"));
+    Check("提炼上限 5 条", svc45.Contains("MaxNewMemories = 5"));
+    Check("提炼提示词要求带理由", svc45.Contains("为什么记"));
+    Check("对话链路拼了【关于他的记忆】", prompt45.Contains("【关于他的记忆】"));
+    Check("主动开口链路也拼了记忆", proactive45.Contains("【关于他的记忆】"));
+    Check("日结时筛（晚间总结后顺带）", proactive45.Contains("DistillAsync"));
+
+    // 真实临时库：记忆 CRUD + 软删过滤。
+    var dbFile45 = Path.Combine(Path.GetTempPath(), $"dm-smoke-memory-{Guid.NewGuid():N}.db");
+    var factory45 = new TestFactory(dbFile45);
+    await using (var db45 = factory45.CreateDbContext())
+    {
+        await db45.Database.EnsureCreatedAsync();
+    }
+    var memRepo45 = new DayManager.Data.Repositories.MemoryRepository(factory45);
+
+    var mem45 = await memRepo45.AddAsync("目标是 X 考试", "他亲口说的");
+    Check("落一条记忆，能取回来",
+        (await memRepo45.GetAllAsync()).Any(m => m.Id == mem45.Id));
+
+    await memRepo45.UpdateAsync(mem45.Id, "目标改成 Y", "他改主意了");
+    var updated45 = (await memRepo45.GetAllAsync()).First(m => m.Id == mem45.Id);
+    Check("改一条记忆，内容更新", updated45.Content == "目标改成 Y");
+
+    await memRepo45.DeleteAsync(mem45.Id);
+    Check("删一条记忆（软删），默认查不到",
+        (await memRepo45.GetAllAsync()).All(m => m.Id != mem45.Id));
+
+    try { File.Delete(dbFile45); } catch { }
+}
+
 Console.WriteLine();
 Console.WriteLine($"===== 结果：通过 {passed} 项，失败 {failed} 项 =====");
 

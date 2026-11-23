@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using DayManager.App.Services;
 using DayManager.Core.Ai;
+using DayManager.Core.Entities;
 using DayManager.Core.Enums;
 using DayManager.Core.Intervention;
 using DayManager.Core.Planning;
@@ -105,12 +106,17 @@ public partial class TimeViewModel : ObservableObject
     /// <summary>当前看的是哪一天。周/月/年都从它推出来。</summary>
     private DateOnly _anchor = DateOnly.FromDateTime(DateTime.Today);
 
+    private readonly MemoryRepository _memories;
+    private readonly ApiClient _api;
+
     public TimeViewModel(
         UsageRepository usage,
         PolicyRepository policy,
         AppRuleRepository rules,
         DailyContextRepository contexts,
         ProfileRepository profiles,
+        MemoryRepository memories,
+        ApiClient api,
         InterventionService? intervention = null,
         ProactiveNudgeService? proactive = null)
     {
@@ -119,6 +125,8 @@ public partial class TimeViewModel : ObservableObject
         _rules = rules;
         _contexts = contexts;
         _profiles = profiles;
+        _memories = memories;
+        _api = api;
         _intervention = intervention;
         _proactive = proactive;
 
@@ -277,6 +285,52 @@ public partial class TimeViewModel : ObservableObject
         _profileLoadedAt = DateTime.Now;
     }
 
+    /// <summary>加载 AI 关于用户的记忆。和画像一样，跟当前跨度无关。</summary>
+    private async Task LoadMemoriesAsync()
+    {
+        var list = await _memories.GetRecentAsync(50);
+
+        // 冷启动、记忆还是空的：把最近几天的对话筛一遍，让「它记的你」立刻有内容。
+        // 只在有密钥时才触发（没密钥调模型也是白调）。
+        if (list.Count == 0 && _api.HasKey)
+        {
+            await _api.DistillMemoriesAsync(7);
+            list = await _memories.GetRecentAsync(50);
+        }
+
+        Memories.Clear();
+        foreach (var m in list)
+        {
+            Memories.Add(m);
+        }
+
+        HasMemories = Memories.Count > 0;
+        HasNoMemories = !HasMemories;
+    }
+
+    /// <summary>删一条记忆（用户纠正：这条记错了或不该记）。</summary>
+    [RelayCommand]
+    private async Task DeleteMemoryAsync(AiMemory memory)
+    {
+        if (memory is null)
+        {
+            return;
+        }
+
+        await _memories.DeleteAsync(memory.Id);
+        Memories.Remove(memory);
+        HasMemories = Memories.Count > 0;
+        HasNoMemories = !HasMemories;
+    }
+
+    /// <summary>手动触发一次提炼（筛最近 7 天），然后刷新记忆列表。</summary>
+    [RelayCommand]
+    private async Task DistillNowAsync()
+    {
+        await _api.DistillMemoriesAsync(7);
+        await LoadMemoriesAsync();
+    }
+
     /// <summary>
     /// 最近七天对比前七天；两个周期凑不齐时，改成把最近七天的事实说出来。
     ///
@@ -378,9 +432,20 @@ public partial class TimeViewModel : ObservableObject
     /// </summary>
     public ObservableCollection<TrendRow> TrendRows { get; } = new();
 
+    /// <summary>AI 关于用户的记忆（语义条目）。可看、可删。</summary>
+    public ObservableCollection<AiMemory> Memories { get; } = new();
+
     /// <summary>「我是什么样」有没有内容（一行都没有时整块不占地方）。</summary>
     [ObservableProperty]
     public partial bool HasProfile { get; set; }
+
+    /// <summary>「它记的你」有没有内容。</summary>
+    [ObservableProperty]
+    public partial bool HasMemories { get; set; }
+
+    /// <summary>「它记的你」还是空的。</summary>
+    [ObservableProperty]
+    public partial bool HasNoMemories { get; set; } = true;
 
     [ObservableProperty]
     public partial UsageSpan Span { get; set; } = UsageSpan.Day;
@@ -876,6 +941,7 @@ public partial class TimeViewModel : ObservableObject
             // 翻到上个月看历史时，这一块不该跟着变成上个月的对比——
             // 它是"我现在怎么样"，不是"那时候怎么样"。
             await LoadProfileAsync();
+            await LoadMemoriesAsync();
         }
         catch (Exception ex)
         {

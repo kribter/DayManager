@@ -82,3 +82,17 @@ public sealed class SetStatusRequest
     /// <summary>跳过的原因。只在 status=skipped 时有意义。</summary>
     public string? Reason { get; set; }
 }
+
+/// <summary>改一条 AI 记忆（用户纠正）。</summary>
+public sealed class UpdateMemoryRequest
+{
+    public string? Content { get; set; }
+    public string? Reason { get; set; }
+}
+
+/// <summary>手动触发记忆提炼（筛最近 N 天）。</summary>
+public sealed class DistillRequest
+{
+    public int? Days { get; set; }
+    public AiOverride? Ai { get; set; }
+}

@@ -20,11 +20,13 @@ public sealed class AgentPromptBuilder
 
     private readonly PolicyRepository _policy;
     private readonly ProfileService _profile;
+    private readonly MemoryRepository _memories;
 
-    public AgentPromptBuilder(PolicyRepository policy, ProfileService profile)
+    public AgentPromptBuilder(PolicyRepository policy, ProfileService profile, MemoryRepository memories)
     {
         _policy = policy;
         _profile = profile;
+        _memories = memories;
     }
 
     public async Task<string> Build(
@@ -107,6 +109,7 @@ public sealed class AgentPromptBuilder
 
         var skippedNote = stats.SkippedToday > 0 ? $"，今天跳过 {stats.SkippedToday} 条" : "";
         var profileText = ProfileLines.ToPrompt(await _profile.BuildAsync(day, ct));
+        var memoryText = BuildMemoryText(await _memories.GetRecentAsync(30, ct));
 
         var lines = new List<string>
         {
@@ -119,6 +122,7 @@ public sealed class AgentPromptBuilder
             "清单里「实际」只有计过时的才会有；没写就是没计时，别猜。",
             "",
             profileText,
+            memoryText,
             $"【过去 {ReviewDays} 天的回顾】只记那天实际发生的事（有钟点的 + 做完的），欠着没做完的旧账不重复列，它们并进了【今天的清单】。",
             reviewText,
             "",
@@ -319,6 +323,17 @@ public sealed class AgentPromptBuilder
         });
 
         return string.Join('\n', lines);
+    }
+
+    private static string BuildMemoryText(IReadOnlyList<DayManager.Core.Entities.AiMemory> memories)
+    {
+        if (memories.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        return "【关于他的记忆】这些是你过去记下的、关于他的事实，说话时自然带着，别一字一句念出来。\n"
+            + string.Join('\n', memories.Select(m => $"- {m.Content}（{m.Reason}）"));
     }
 
     private static string StatusName(ItemStatus status) => status.ToDisplayName();

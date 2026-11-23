@@ -58,6 +58,8 @@ public sealed class ProactiveService
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
     private readonly PolicyRepository _policy;
     private readonly ProfileService _profile;
+    private readonly MemoryRepository _memories;
+    private readonly MemoryService _memoryService;
     private readonly ILogger<ProactiveService> _logger;
 
     /// <summary>解析模型输出用的宽松选项：字段名大小写不一致时也能认。</summary>
@@ -74,6 +76,8 @@ public sealed class ProactiveService
         IDbContextFactory<AppDbContext> dbFactory,
         PolicyRepository policy,
         ProfileService profile,
+        MemoryRepository memories,
+        MemoryService memoryService,
         ILogger<ProactiveService> logger)
     {
         _proxy = proxy;
@@ -83,6 +87,8 @@ public sealed class ProactiveService
         _dbFactory = dbFactory;
         _policy = policy;
         _profile = profile;
+        _memories = memories;
+        _memoryService = memoryService;
         _logger = logger;
     }
 
@@ -142,6 +148,7 @@ public sealed class ProactiveService
                 Content = await BuildSystemPrompt(
                     kind, today, now, items, stats, usage, recent, target,
                     await _profile.BuildAsync(today, ct),
+                    await _memories.GetRecentAsync(30, ct),
                     nudge, focus, ct)
             }
         };
@@ -229,6 +236,19 @@ public sealed class ProactiveService
 
         var (title, text, pickedId) = parsed.Value;
 
+        // ---------- 说过没的闸：落库前查最近有没有一模一样的话 ----------
+        // 复读是主动开口最伤人的一类：同一句跨四天发五遍（11-17 实况），
+        // 用户一眼看出"它又在念同一句"，比沉默更让人想关掉主动开口。
+        // 这里只挡"完全同句"——同义但措辞不同的先不管（那要语义判断）。
+        var saidBefore = history.Any(m =>
+            m.Role == DayManager.Core.Entities.ChatMessage.RoleAssistant
+            && string.Equals(m.Text.Trim(), text.Trim(), StringComparison.Ordinal));
+        if (saidBefore)
+        {
+            _logger.LogInformation("主动开口命中复读闸（kind={Kind}），这次跳过", kind);
+            return ProactiveResult.Fail("这句最近说过，跳过（防复读）");
+        }
+
         // ---------- ④ 娱乐干预：把占位符换回库里那个原名 ----------
 
         // 【为什么要替换，而不是让模型直接写句子】
@@ -263,6 +283,9 @@ public sealed class ProactiveService
         if (kind == ProactiveKind.Evening)
         {
             await SaveDailySummaryAsync(today, text, ct);
+
+            // 晚间总结时顺带筛昨天的对话，提炼记忆（日结的时机）。
+            await _memoryService.DistillAsync(today.AddDays(-1), ai, ct);
         }
 
         return new ProactiveResult(true, title, text, null, resolvedId);
@@ -504,6 +527,7 @@ public sealed class ProactiveService
         IReadOnlyList<(DateOnly Day, int Total, int Done)> recent,
         Item? target,
         UserProfile profile,
+        IReadOnlyList<AiMemory> memories,
         NudgeRequest? nudge,
         FocusFinishRequest? focus,
         CancellationToken ct)
@@ -555,6 +579,7 @@ public sealed class ProactiveService
             recentText,
             "",
             ProfileLines.ToPrompt(profile),
+            BuildMemoryText(memories),
             "【说话方式】"
         };
 
@@ -709,6 +734,17 @@ public sealed class ProactiveService
         });
 
         return string.Join('\n', lines);
+    }
+
+    private static string BuildMemoryText(IReadOnlyList<AiMemory> memories)
+    {
+        if (memories.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        return "【关于他的记忆】这些是你过去记下的、关于他的事实，说话时自然带着，别一字一句念出来。\n"
+            + string.Join('\n', memories.Select(m => $"- {m.Content}（{m.Reason}）"));
     }
 
     private static string StatusName(ItemStatus status) => status.ToDisplayName();

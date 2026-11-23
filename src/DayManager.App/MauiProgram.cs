@@ -131,6 +131,9 @@ public static class MauiProgram
 		// 必须出自同一段装配，否则两边迟早各说各的。
 		builder.Services.AddSingleton<ProfileRepository>();
 
+		// AI 关于用户的记忆（语义条目）。时间页「它记的你」卡片读它。
+		builder.Services.AddSingleton<MemoryRepository>();
+
 #if WINDOWS
 		// 采集器只有 Windows 一份实现（全靠 user32.dll）。
 		// 【这里为什么用编译符号而不是像数据库路径那样运行时判断】

@@ -127,3 +127,11 @@ public sealed class UndoOutcome
     /// <summary>部分成功也算"成了一些"，必须说清楚冲突，不能简单报成功。</summary>
     public bool Ok => UndoneCount > 0 && !HasConflicts;
 }
+
+/// <summary>AI 关于用户的一条记忆（语义条目）。</summary>
+public sealed class MemoryDto
+{
+    public Guid Id { get; set; }
+    public string Content { get; set; } = string.Empty;
+    public string Reason { get; set; } = string.Empty;
+}

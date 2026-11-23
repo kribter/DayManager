@@ -502,6 +502,10 @@ $RECYCLE.BIN/
 # 属于本地产物，不应随代码一起分享出去）
 /.workbuddy/
 
+# 讨论记录与协作笔记（含 DeepSeek 的长期记忆 MEMORY.md、给 workbuddy 的留言板等，
+# 是本地的私密产物，不是代码，绝不随仓库分享出去）
+/discussion-notes/
+
 # 本地覆盖配置，可能含个人路径/密钥
 appsettings.Local.json
 *.user

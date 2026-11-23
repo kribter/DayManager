@@ -102,6 +102,10 @@ builder.Services.AddSingleton<DayManager.Data.Repositories.UsageRepository>();
 builder.Services.AddSingleton<DayManager.Data.Repositories.WorkSegmentRepository>();
 builder.Services.AddSingleton<DayManager.Data.Repositories.ChatRepository>();
 
+// AI 关于用户的记忆（语义条目）。画像存数字、记忆存话。
+builder.Services.AddSingleton<DayManager.Data.Repositories.MemoryRepository>();
+builder.Services.AddSingleton<MemoryService>();
+
 // AI 说话的语气和自定义人设存在这张表里（时间页改，后端读）。
 builder.Services.AddSingleton<DayManager.Data.Repositories.PolicyRepository>();
 
@@ -440,6 +444,52 @@ app.MapDelete("/api/items/{id:guid}", async (
 {
     await items.SoftDeleteAsync(id, ct);
     return Results.Ok(new { ok = true });
+});
+
+// ------------------------------------------------------------------
+// AI 记忆接口：可看、可改、可删（"管家记得你"的那份账）
+// ------------------------------------------------------------------
+app.MapGet("/api/memories", async (
+    DayManager.Data.Repositories.MemoryRepository memories,
+    CancellationToken ct) =>
+{
+    return Results.Ok(await memories.GetAllAsync(ct));
+});
+
+app.MapPut("/api/memories/{id:guid}", async (
+    Guid id,
+    UpdateMemoryRequest request,
+    DayManager.Data.Repositories.MemoryRepository memories,
+    CancellationToken ct) =>
+{
+    var ok = await memories.UpdateAsync(id, request.Content ?? string.Empty, request.Reason ?? string.Empty, ct);
+    return ok ? Results.Ok(new { ok = true }) : Results.NotFound(new { error = "找不到这条记忆" });
+});
+
+app.MapDelete("/api/memories/{id:guid}", async (
+    Guid id,
+    DayManager.Data.Repositories.MemoryRepository memories,
+    CancellationToken ct) =>
+{
+    var ok = await memories.DeleteAsync(id, ct);
+    return ok ? Results.Ok(new { ok = true }) : Results.NotFound(new { error = "找不到这条记忆" });
+});
+
+// 手动触发一次提炼（筛最近 N 天的对话）。平时靠晚间总结自动触发，这里给"想立刻看到效果"用。
+app.MapPost("/api/memories/distill", async (
+    DistillRequest request,
+    MemoryService memoryService,
+    CancellationToken ct) =>
+{
+    var count = Math.Clamp(request.Days ?? 1, 1, 7);
+    var today = DateOnly.FromDateTime(DateTime.Now);
+    var total = 0;
+    for (var i = 1; i <= count; i++)
+    {
+        total += await memoryService.DistillAsync(today.AddDays(-i), request.Ai, ct);
+    }
+
+    return Results.Ok(new { added = total });
 });
 
 app.Run();

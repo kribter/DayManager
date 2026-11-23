@@ -52,6 +52,9 @@ public sealed class ApiClient
     /// 【为什么这样做没有额外风险】
     /// 链路是本机回环（127.0.0.1），不出网卡。
     /// </summary>
+    /// <summary>填了密钥才算配好。</summary>
+    public bool HasKey => _ai.HasKey;
+
     private object? AiPayload() =>
         _ai.HasKey
             ? new
@@ -497,6 +500,75 @@ public sealed class ApiClient
         }
 
         return string.Empty;
+    }
+
+    /// <summary>AI 关于用户的记忆（语义条目）。拉不到就返回空列表，别让时间页挂掉。</summary>
+    public async Task<List<MemoryDto>> GetMemoriesAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, BuildUrl("/api/memories"));
+            if (!string.IsNullOrWhiteSpace(_settings.Token))
+            {
+                request.Headers.Add(TokenHeader, _settings.Token);
+            }
+
+            using var response = await _http.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                return new List<MemoryDto>();
+            }
+
+            var json = await response.Content.ReadAsStringAsync(cancellationToken);
+            var list = JsonSerializer.Deserialize<List<MemoryDto>>(json, ReadOpts);
+            return list ?? new List<MemoryDto>();
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
+        {
+            return new List<MemoryDto>();
+        }
+    }
+
+    /// <summary>删一条记忆（软删）。</summary>
+    public async Task<bool> DeleteMemoryAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Delete, BuildUrl($"/api/memories/{id}"));
+            if (!string.IsNullOrWhiteSpace(_settings.Token))
+            {
+                request.Headers.Add(TokenHeader, _settings.Token);
+            }
+
+            using var response = await _http.SendAsync(request, cancellationToken);
+            return response.IsSuccessStatusCode;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>手动触发一次记忆提炼（筛最近 N 天的对话）。冷启动、记忆为空时用。</summary>
+    public async Task<bool> DistillMemoriesAsync(int days = 7, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, BuildUrl("/api/memories/distill"));
+            if (!string.IsNullOrWhiteSpace(_settings.Token))
+            {
+                request.Headers.Add(TokenHeader, _settings.Token);
+            }
+
+            request.Content = JsonContent.Create(new { days, ai = AiPayload() }, options: JsonOpts);
+
+            using var response = await _http.SendAsync(request, cancellationToken);
+            return response.IsSuccessStatusCode;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return false;
+        }
     }
 
     private static AiReply ParseReply(string body)

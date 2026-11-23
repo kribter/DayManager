@@ -2,6 +2,7 @@
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
              xmlns:vm="clr-namespace:DayManager.App.ViewModels"
+             xmlns:entities="clr-namespace:DayManager.Core.Entities"
              x:Class="DayManager.App.TimePage"
              x:DataType="vm:TimeViewModel"
              Shell.NavBarIsVisible="False"
@@ -327,6 +328,56 @@
                                              IsVisible="{Binding HasTrend}"
                                              BindableLayout.ItemsSource="{Binding TrendRows}"
                                              BindableLayout.ItemTemplate="{StaticResource FactRowTemplate}" />
+                    </VerticalStackLayout>
+                </Border>
+
+                <!-- ================= AI 记忆 =================
+                     "管家记得你"的那份账。可看、可删（记错了就删掉）。 -->
+                <Border Style="{StaticResource CardStyle}"
+                        Padding="16,14">
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="12" />
+                    </Border.StrokeShape>
+
+                    <VerticalStackLayout Spacing="10">
+                        <Label Text="它记的你"
+                               Style="{StaticResource CardTitle}" />
+
+                        <Label Text="AI 记下的关于你的事，记错了就删掉。"
+                               Style="{StaticResource Caption}" />
+
+                        <Label Text="还没有记忆。今晚总结后，AI 会自己记下关于你的事。"
+                               Style="{StaticResource Caption}"
+                               IsVisible="{Binding HasNoMemories}" />
+
+                        <Button Text="现在提炼"
+                                Style="{StaticResource ChipButton}"
+                                IsVisible="{Binding HasNoMemories}"
+                                Command="{Binding DistillNowCommand}"
+                                HorizontalOptions="Start" />
+
+                        <VerticalStackLayout Spacing="10"
+                                             IsVisible="{Binding HasMemories}"
+                                             BindableLayout.ItemsSource="{Binding Memories}">
+                            <BindableLayout.ItemTemplate>
+                                <DataTemplate x:DataType="entities:AiMemory">
+                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                                        <VerticalStackLayout Spacing="2">
+                                            <Label Text="{Binding Content}"
+                                                   FontSize="14" />
+                                            <Label Text="{Binding Reason}"
+                                                   FontSize="12"
+                                                   TextColor="{StaticResource MutedText}" />
+                                        </VerticalStackLayout>
+                                        <Button Grid.Column="1"
+                                                Text="删"
+                                                Style="{StaticResource ChipButton}"
+                                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:TimeViewModel}}, Path=DeleteMemoryCommand}"
+                                                CommandParameter="{Binding .}" />
+                                    </Grid>
+                                </DataTemplate>
+                            </BindableLayout.ItemTemplate>
+                        </VerticalStackLayout>
                     </VerticalStackLayout>
                 </Border>
 
