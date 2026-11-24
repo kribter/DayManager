@@ -2263,8 +2263,8 @@ Console.WriteLine("=== 30. 视野：过去 7 天回顾 + AI 按需 query（治�
     Check("回顾取数走仓储、口径只有一份", repo30.Contains("GetDayReviewAsync"));
     Check("聊天链路有「查完再答」的循环", agent30.Contains("MaxQueryRounds")
         && agent30.Contains("RunQueriesAsync"));
-    Check("query 在交给执行器前被剔掉（不会进撤销批次）",
-        agent30.Contains("Where(a => !IsQuery(a))"));
+    Check("query、search、weather 在交给执行器前都被剔掉（不会进撤销批次）",
+        agent30.Contains("Where(a => !IsQuery(a) && !IsSearch(a) && !IsWeather(a))"));
     Check("执行器对漏进来的 query 有明确防御", tools30.Contains("case \"query\""));
     Check("动作模型带上了查询结束日", models30.Contains("DateTo"));
 
@@ -2272,7 +2272,7 @@ Console.WriteLine("=== 30. 视野：过去 7 天回顾 + AI 按需 query（治�
         !agent30.Contains("更早以前的、以及这几天之后的安排，你看不到"));
     Check("提示词明确改为「可以查、不要再说看不到」",
         agent30.Contains("不要再说「我看不到」") && agent30.Contains("query"));
-    Check("提示词列了六种操作", agent30.Contains("可用的操作有这六种"));
+    Check("提示词列了八种操作", agent30.Contains("可用的操作有这八种"));
     // 源码里那行是带转义的 C# 字符串字面量，直接找 "op": "query" 会漏；
     // 用示例里独有的文案 + 日期来确认它还在。
     Check("提示词给了 query 的写法示例",
@@ -3194,9 +3194,11 @@ Console.WriteLine("=== 36. 收分类 + 大任务递归层级：主要是删，�
         && !agent37.Contains("上面两段「一直悬着」"));
 
     // ② 范围守约：六种动作没变、query 仍只读、主动开口没被顺手改、新方法只读。
-    Check("范围守约：可用操作仍是六种，query 仍只读",
-        agent37.Contains("可用的操作有这六种")
-        && agent37.Contains("- query      查清单，**只读**"));
+    Check("范围守约：操作扩到八种（多 search + weather），三者都只读",
+        agent37.Contains("可用的操作有这八种")
+        && agent37.Contains("- query      查清单，**只读**")
+        && agent37.Contains("- search     联网查真实信息，**只读**")
+        && agent37.Contains("- weather    查天气，**只读**"));
     Check("范围守约：主动开口链路没被顺手带上项目视野",
         !proactive37.Contains("GetAllWithItemsAsync")
         && !proactive37.Contains("projectGroups"));
@@ -3287,7 +3289,7 @@ Console.WriteLine("=== 36. 收分类 + 大任务递归层级：主要是删，�
         && agent38.Contains("{i.Id} | {i.Title}")
         && tools38.Contains("FindAsync(Guid id"));
     Check("范围守约：没加动作、没碰主动开口链路、没改数据模型",
-        agent38.Contains("可用的操作有这六种")
+        agent38.Contains("可用的操作有这八种")
         && !proactive38.Contains("【视野校正】")
         && !proactive38.Contains("projectGroups")
         && !agent38.Contains("AddContainerAsync"));
@@ -3757,6 +3759,221 @@ Console.WriteLine("=== 36. 收分类 + 大任务递归层级：主要是删，�
         (await memRepo45.GetAllAsync()).All(m => m.Id != mem45.Id));
 
     try { File.Delete(dbFile45); } catch { }
+}
+
+// ===== 第 46 节：昨天跳过的「每天」不该被搬回今天（11-24 12:06 用户截图）=====
+// 11-23 的「背单词」被点了跳过，11-24 它被 ⑤「前一天跳过的该回来」搬了回来，
+// 而今天本来就有一条新实例——同一天两条同名，其中一条还顶着「逾期 1 天」。
+// 「每天各算」的口径里跳过只对那天有效：昨天跳过 = 昨天没背，那天已经封账。
+// 这节同时守住反面：普通待办被跳过，明天必须照常回来。
+{
+    var dbFile46 = Path.Combine(Path.GetTempPath(), $"dm-smoke-daily-skip-{Guid.NewGuid():N}.db");
+    var factory46 = new TestFactory(dbFile46);
+    await using (var db46 = factory46.CreateDbContext())
+    {
+        await db46.Database.EnsureCreatedAsync();
+    }
+
+    var repo46 = new ItemRepository(factory46);
+    var today46 = DateOnly.FromDateTime(DateTime.Now);
+    var yesterday46 = today46.AddDays(-1);
+
+    // 【为什么跳过时刻要手动写，不能直接调 SetStatusAsync】
+    // 它写的是"现在"，而"现在"落在今天 = "今天跳过的"——那种本来就会被 IsHiddenOn 挡住，
+    // 测不到这个 bug。bug 的前提是跳过发生在**昨天**（昨天中午点了跳过，今天它却回来了）。
+    static async Task SkipYesterdayAsync(TestFactory f, Guid id, string? reason)
+    {
+        await using var db = f.CreateDbContext();
+        var it = await db.Items.FindAsync(id);
+        if (it is null) return;
+        it.Status = ItemStatus.Skipped;
+        it.SkippedAt = DateTimeOffset.Now.AddDays(-1);
+        it.SkipReason = reason;
+        it.SkipCount += 1;
+        await db.SaveChangesAsync();
+    }
+
+    // ① 昨天的「每天」被跳过：今天不该看见它
+    var daily46 = await repo46.AddToDayAsync("背单词", yesterday46,
+        completionMode: CompletionMode.PerOccurrence);
+    await SkipYesterdayAsync(factory46, daily46.Id, "昨天不想背");
+
+    var list46a = await repo46.GetDayListAsync(today46);
+    Check("昨天跳过的「每天」不会被搬回今天",
+        list46a.All(x => x.Id != daily46.Id));
+
+    // ② 昨天的普通待办被跳过：明天必须照常回来（别为了修上面把这条逻辑误伤）
+    var once46 = await repo46.AddToDayAsync("交房租", yesterday46);
+    await SkipYesterdayAsync(factory46, once46.Id, "昨天没来得及");
+
+    var list46b = await repo46.GetDayListAsync(today46);
+    Check("昨天跳过的普通待办照常回到今天", list46b.Any(x => x.Id == once46.Id));
+
+    // ③ 补出今天那条之后：清单里只有一条「背单词」，且不是昨天那条
+    await repo46.EnsureDailyInstancesAsync(today46);
+
+    var list46c = await repo46.GetDayListAsync(today46);
+    Check("补出新实例后清单里只有一条「背单词」，不会叠成两条",
+        list46c.Count(x => x.Title == "背单词") == 1);
+
+    Check("留下来的那条是今天的新实例，不是昨天被跳过的",
+        list46c.Any(x => x.Title == "背单词" && x.Id != daily46.Id));
+
+    try { File.Delete(dbFile46); } catch { }
+}
+
+// ===== 第 47 节：改成每天，顺手清旧账（11-24 12:22 用户「你删吧」）=====
+// 「每天」原来只在新建时能选，建完就锁死：一件每天做的事被摊成 N 条一次性待办之后，
+// 没有任何办法收回来，只能看着它每天叠一条、欠账天天滚，摊到哪天就在哪天集体消失。
+// 这节守四件事：改形态生效、旧账只清"更早且没做完的"、已完成的碰都不碰、能改回来。
+{
+    var dbFile47 = Path.Combine(Path.GetTempPath(), $"dm-smoke-setdaily-{Guid.NewGuid():N}.db");
+    var factory47 = new TestFactory(dbFile47);
+    await using (var db47 = factory47.CreateDbContext())
+    {
+        await db47.Database.EnsureCreatedAsync();
+    }
+
+    var repo47 = new ItemRepository(factory47);
+    var t47 = DateOnly.FromDateTime(DateTime.Now);
+
+    // 造出"按天摊出来的一串"：前天（已做完）、昨天（没做完）、今天
+    var done47 = await repo47.AddToDayAsync("每天做的事", t47.AddDays(-2));
+    await repo47.ToggleDoneAsync(done47.Id);
+
+    var stale47 = await repo47.AddToDayAsync("每天做的事", t47.AddDays(-1));
+    var today47 = await repo47.AddToDayAsync("每天做的事", t47);
+
+    Check("改之前数得清会清几条（确认弹窗要显示的数字）",
+        await repo47.CountDailyLeftoversAsync("每天做的事") == 1);
+
+    var cleared47 = await repo47.SetDailyAsync(today47.Id, daily: true);
+    Check("改成每天时清掉了那条更早没做完的", cleared47 == 1);
+
+    await using (var db47b = factory47.CreateDbContext())
+    {
+        var me47 = await db47b.Items.FindAsync(today47.Id);
+        var staleRow47 = await db47b.Items.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(x => x.Id == stale47.Id);
+        var doneRow47 = await db47b.Items.FindAsync(done47.Id);
+
+        Check("今天那条变成了「每天」",
+            me47!.CompletionMode == CompletionMode.PerOccurrence);
+
+        Check("更早没做完的那条被软删（不是物理删，还能捞回来）",
+            staleRow47!.DeletedAt is not null);
+
+        Check("已经做完的那条一条没碰",
+            doneRow47 is not null
+            && doneRow47.DeletedAt is null
+            && doneRow47.Status == ItemStatus.Done);
+    }
+
+    await repo47.SetDailyAsync(today47.Id, daily: false);
+
+    await using (var db47c = factory47.CreateDbContext())
+    {
+        var back47 = await db47c.Items.FindAsync(today47.Id);
+        Check("能改回「只做一次」（点错了有退路）",
+            back47!.CompletionMode == CompletionMode.Once);
+    }
+
+    try { File.Delete(dbFile47); } catch { }
+}
+
+// ===== 第 48 节：联网搜索的结果拼装（11-24，为「拆大事先查真实信息」铺路）=====
+// 搜索只拼文字、不碰网络；这条纯函数在 Core（DayManager.Core.Ai.SearchResults），
+// 冒烟能直接喂 JSON 验证，不用真调一次搜索接口。守：抽出标题/网址/摘要、
+// 综合回答带出来、空结果和坏 JSON 都不炸（搜索是加分项，不能因为它坏了整轮对话）。
+{
+    var src48 = FindSrcRoot();
+    string Read48(string rel) => src48 is null ? "" : File.ReadAllText(Path.Combine(src48, rel));
+
+    Check("动作模型里多了 search/weather 共用的查询词字段",
+        Read48(Path.Combine("DayManager.Api", "Models", "AgentModels.cs")).Contains("public string? Query"));
+    Check("搜索词按 JSON 名 query 绑定（不然模型写 query 接不住）",
+        Read48(Path.Combine("DayManager.Api", "Models", "AgentModels.cs")).Contains("JsonPropertyName(\"query\")"));
+    Check("执行器认得 search 这个只读动作（不写库）",
+        Read48(Path.Combine("DayManager.Api", "Services", "AgentService.cs")).Contains("RunSearchesAsync"));
+    Check("提示词里给模型讲了 search 什么时候用",
+        Read48(Path.Combine("DayManager.Api", "Services", "AgentPromptBuilder.cs")).Contains("联网查真实信息"));
+
+    var body48 = "{\"answer\":\"考研报名通常在每年 10 月\",\"results\":[{\"title\":\"研招网报名\",\"url\":\"https://yz.chsi.com.cn\",\"content\":\"网上报名时间……\"}]}";
+    var text48 = DayManager.Core.Ai.SearchResults.Format(body48);
+    Check("综合回答被带出来", text48.Contains("考研报名通常在每年 10 月"));
+    Check("标题和网址都拼出来了", text48.Contains("研招网报名") && text48.Contains("https://yz.chsi.com.cn"));
+
+    Check("空结果有兜底话，不炸", DayManager.Core.Ai.SearchResults.Format("{}").Contains("没返回任何结果"));
+    Check("坏 JSON 有兜底话，不炸", DayManager.Core.Ai.SearchResults.Format("not json").Contains("解析不了"));
+
+    Check("搜索服务默认走博查、也能切回 tavily",
+        Read48(Path.Combine("DayManager.Api", "Services", "WebSearchService.cs")).Contains("bocha")
+        && Read48(Path.Combine("DayManager.Api", "Services", "WebSearchService.cs")).Contains("BuildPayload"));
+
+    var bocha48 = "{\"code\":200,\"data\":{\"webPages\":{\"value\":[{\"name\":\"北京今天天气\",\"url\":\"https://weather.example.com\",\"summary\":\"晴，18 度\"}]}}}";
+    var bochaText48 = DayManager.Core.Ai.SearchResults.FormatBocha(bocha48);
+    Check("博查返回能解析出标题/网址/摘要",
+        bochaText48.Contains("北京今天天气")
+        && bochaText48.Contains("https://weather.example.com")
+        && bochaText48.Contains("晴，18 度"));
+    Check("博查返回错误码有兜底话，不炸", DayManager.Core.Ai.SearchResults.FormatBocha("{\"code\":403}").Contains("返回错误"));
+
+    Check("博查跳过没有正文的空壳链接",
+        DayManager.Core.Ai.SearchResults.FormatBocha("{\"code\":200,\"data\":{\"webPages\":{\"value\":[{\"name\":\"山西日报\",\"url\":\"http://x\"}]}}}").Contains("没返回任何结果"));
+
+    Check("执行器认得 weather 这个只读动作",
+        Read48(Path.Combine("DayManager.Api", "Services", "AgentService.cs")).Contains("RunWeathersAsync"));
+    Check("天气走 Open-Meteo 结构化数据，不是网页搜索",
+        Read48(Path.Combine("DayManager.Api", "Services", "WeatherService.cs")).Contains("open-meteo.com"));
+
+    Check("坏 JSON 不再原样甩给用户，走 ReplySalvage 兜底",
+        Read48(Path.Combine("DayManager.Api", "Services", "AgentService.cs")).Contains("ReplySalvage.Salvage"));
+    Check("坏 JSON 能捞出 reply（带键）",
+        DayManager.Core.Ai.ReplySalvage.Salvage("{\"think\":\"x\",\"reply\":\"眼下 AI 芯片没人能追\",\"actions\":[]}") == "眼下 AI 芯片没人能追");
+    Check("坏 JSON 能捞出 reply（键全丢、裸写）",
+        DayManager.Core.Ai.ReplySalvage.Salvage("{别装专家说点实话。\",眼下 AI 芯片没人能追。\",}") == "眼下 AI 芯片没人能追。");
+    Check("捞不到 reply 返回 null（交给上层兜底）",
+        DayManager.Core.Ai.ReplySalvage.Salvage("随便一段话") == null);
+
+    Check("天气代码 0 映射成「晴」", DayManager.Core.Ai.WeatherText.MapCode(0) == "晴");
+    var wf = DayManager.Core.Ai.WeatherText.FormatForecast(
+        "{\"current\":{\"temperature_2m\":7.0,\"weather_code\":1},\"daily\":{\"temperature_2m_max\":[7.0],\"temperature_2m_min\":[-4.0],\"weather_code\":[1]}}",
+        "北京");
+    Check("天气预报拼出中文一句话",
+        wf.Contains("北京今天晴间多云") && wf.Contains("当前 7°C") && wf.Contains("夜里最低 -4°C"));
+}
+
+// ===== 第 49 节：搜索 key 跟着请求走（11-24 16:14 用户要求）=====
+// 软件要能发给别人：搜索 key 必须和聊天 key 一样"谁用谁填"。
+// 哪天有人把它改回只读 appsettings，分发出去的包里就得带一把共享 key，
+// 而症状只是一句"联网搜索没配 key"——没人会立刻想到是这里断的。
+{
+    var src49 = FindSrcRoot();
+    string Read49(string rel) => src49 is null ? "" : File.ReadAllText(Path.Combine(src49, rel));
+
+    var search49 = Read49(Path.Combine("DayManager.Api", "Services", "WebSearchService.cs"));
+    var agent49 = Read49(Path.Combine("DayManager.Api", "Services", "AgentService.cs"));
+    var client49 = Read49(Path.Combine("DayManager.App", "Services", "AiSettings.cs"));
+    var api49 = Read49(Path.Combine("DayManager.App", "Services", "ApiClient.cs"));
+    var model49 = Read49(Path.Combine("DayManager.Api", "Models", "ChatRequest.cs"));
+
+    Check("搜索先用请求带来的 key，没有再回退服务端配置",
+        search49.Contains("string.IsNullOrWhiteSpace(keyOverride) ? opt.ApiKey : keyOverride.Trim()"));
+
+    Check("Bearer 里用的是选中的那把 key，不是写死配置里的",
+        search49.Contains("new AuthenticationHeaderValue(\"Bearer\", key)"));
+
+    Check("请求模型带得动 searchApiKey，客户端也确实发了它",
+        model49.Contains("SearchApiKey") && api49.Contains("searchApiKey = "));
+
+    Check("AgentService 把本次请求的 key 传给了搜索",
+        agent49.Contains("RunSearchesAsync(searches, ai?.SearchApiKey, ct)"));
+
+    Check("搜索 key 和聊天 key 同一套本机存储（Preferences，不随安装目录走）",
+        client49.Contains("ai.searchKey") && client49.Contains("SearchApiKey"));
+
+    Check("没填搜索 key 时返回的是一句说明，不是异常",
+        search49.Contains("联网搜索没配 key，这次没查到"));
 }
 
 Console.WriteLine();

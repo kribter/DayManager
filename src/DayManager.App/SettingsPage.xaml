@@ -84,6 +84,18 @@
                                Text="{Binding AiModelInput}"
                                Unfocused="OnAiKeyUnfocused" />
 
+                        <!-- 联网搜索的密钥（博查 / Tavily，和聊天是两家不同的服务）
+
+                             【为什么它留空也能用】
+                             "上网查一下"是加分项：AI 只有在拆大事、需要真实信息时才用得上。
+                             没填就不查，它会在 reply 里说明"这部分可能不全"——
+                             所以这里绝不能拦着谁，也不能让人误以为没填就不能用 AI。
+                             留空是正常的，只是少了这项能力。 -->
+                        <Entry Placeholder="联网搜索密钥（可选，不填就不上网查）"
+                               Text="{Binding SearchKeyInput}"
+                               IsPassword="True"
+                               Unfocused="OnAiKeyUnfocused" />
+
                         <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                             <Label Text="{Binding AiStatusText}"
                                    Style="{StaticResource Caption}"

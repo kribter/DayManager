@@ -25,6 +25,7 @@ public sealed class AiSettings
     private const string KeyApiKey = "ai.apiKey";
     private const string KeyBaseUrl = "ai.baseUrl";
     private const string KeyModel = "ai.model";
+    private const string KeySearchKey = "ai.searchKey";
 
     /// <summary>
     /// 默认接口地址。后端 ApplyAiDefaults 会给留空的请求兜底，
@@ -40,14 +41,28 @@ public sealed class AiSettings
 
     public string Model { get; set; } = DefaultModel;
 
+    /// <summary>
+    /// 联网搜索的密钥（博查 / Tavily，跟聊天是两家不同的服务）。
+    ///
+    /// 【为什么它跟着这里一起存，而不是放服务端配置】
+    /// 理由和聊天密钥一模一样：程序目录里的任何一行密钥都会在"打包发给别人"时跟着走。
+    /// 它留空是完全正常的用法——AI 只是不能上网查，拆大事时照自己知道的来，
+    /// 并且会在 reply 里说明"这部分可能不全"。所以它**不该拦着任何人用软件**。
+    /// </summary>
+    public string SearchApiKey { get; set; } = string.Empty;
+
     /// <summary>填了密钥才算配好。没配时界面要明确指路，不能让人对着一个转圈的对话框猜。</summary>
     public bool HasKey => !string.IsNullOrWhiteSpace(ApiKey);
+
+    /// <summary>填了才能上网查；没填不报错，只是搜索结果会是一句"没配 key"。</summary>
+    public bool HasSearchKey => !string.IsNullOrWhiteSpace(SearchApiKey);
 
     public static AiSettings Load() => new()
     {
         ApiKey = Preferences.Default.Get(KeyApiKey, string.Empty),
         BaseUrl = Preferences.Default.Get(KeyBaseUrl, DefaultBaseUrl),
-        Model = Preferences.Default.Get(KeyModel, DefaultModel)
+        Model = Preferences.Default.Get(KeyModel, DefaultModel),
+        SearchApiKey = Preferences.Default.Get(KeySearchKey, string.Empty)
     };
 
     public void Save()
@@ -55,6 +70,7 @@ public sealed class AiSettings
         Preferences.Default.Set(KeyApiKey, ApiKey);
         Preferences.Default.Set(KeyBaseUrl, BaseUrl);
         Preferences.Default.Set(KeyModel, Model);
+        Preferences.Default.Set(KeySearchKey, SearchApiKey);
     }
 
     /// <summary>

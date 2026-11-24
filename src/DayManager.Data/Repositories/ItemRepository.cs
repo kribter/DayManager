@@ -171,7 +171,18 @@ public class ItemRepository
             x.Status == ItemStatus.Skipped
             && x.SkippedAt != null
             && x.SkippedAt >= dayStart.AddDays(-1)
-            && x.SkippedAt < dayStart);
+            && x.SkippedAt < dayStart
+            //
+            // 【「每天」的不走这条路 —— 11-24 12:06 的真 bug】
+            // 昨天那条 PerOccurrence 被点了跳过，今天它被这条"该自己回来"搬了回来；
+            // 而 Today 本来就有一条新实例（EnsureDailyInstancesAsync 生成的），
+            // 于是同一天出现两条"背单词"，其中一条还顶着「逾期 1 天」。
+            //
+            // 口径上也不该回来：「每天各算一次」里，跳过只对那一天有效——
+            // 昨天跳过＝昨天没背，那天已经封账了，明天是新的一条，不是把旧的搬过来。
+            // 上面 ② 早就按这个口径排除了 PerOccurrence，⑤ 当时漏了同一句。
+            //
+            && x.CompletionMode != CompletionMode.PerOccurrence);
 
         var items = await scheduledThatDay
             .Concat(due)
@@ -577,6 +588,87 @@ public class ItemRepository
         }
 
         return created;
+    }
+
+    /// <summary>
+    /// 把一条记录改成「每天」，或改回「只做一次」。
+    ///
+    /// 【为什么需要它】
+    /// 新建时能选「每天」，**建完就改不了**——界面菜单没有这一项，AI 的动作里也没有。
+    /// 于是"每天跑 5km"一旦被按天摊成 N 条一次性待办，就再也没办法把它们收回来：
+    /// 每天叠一条同名、欠账天天滚，而且摊到哪天为止就在哪天集体消失。
+    ///
+    /// 【为什么改成每天时要顺手清旧账】
+    /// 那 N 条里没做完的会作为"逾期欠账"每天滚进清单，和新的每天实例叠在一起
+    /// （11-24 12:06 用户截图里「背单词」叠成两条，走的就是这个机制）。
+    /// 只改形态不清旧账，等于换个形式继续乱。
+    /// 清的范围卡得很窄：**同名、更早、还没做完、不是容器**；已完成的一条不碰。
+    /// </summary>
+    public async Task<int> SetDailyAsync(Guid id, bool daily, CancellationToken ct = default)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var item = await db.Items.FindAsync([id], ct);
+        if (item is null)
+        {
+            return 0;
+        }
+
+        item.CompletionMode = daily ? CompletionMode.PerOccurrence : CompletionMode.Once;
+
+        var cleared = 0;
+
+        if (daily)
+        {
+            var now = DateTimeOffset.Now;
+            var today = ItemPresence.LocalDay(now);
+
+            var leftovers = await DailyLeftoversQuery(db, item.Title, today, id).ToListAsync(ct);
+
+            foreach (var left in leftovers)
+            {
+                // 软删而不是物理删：万一误伤同名但不同的事，还能从库里捞回来。
+                left.DeletedAt = now;
+                cleared++;
+            }
+        }
+
+        await db.SaveChangesAsync(ct);
+        return cleared;
+    }
+
+    /// <summary>改成每天之前先问一句会清掉几条（界面确认弹窗要显示这个数字）。</summary>
+    public async Task<int> CountDailyLeftoversAsync(string title, CancellationToken ct = default)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var today = ItemPresence.LocalDay(DateTimeOffset.Now);
+        return await DailyLeftoversQuery(db, title, today, Guid.Empty).CountAsync(ct);
+    }
+
+    /// <summary>
+    /// 「同一件事更早没做完的残渣」：同名、今天之前到期、未完成、不是容器。
+    ///
+    /// 【为什么用标题匹配】
+    /// 没有更强的归属可用——这些记录是当初一次性摊出来的，
+    /// 除了标题没有任何字段能说明它们属于同一件事（那时还没给它们 project）。
+    /// 按标题有误伤同名另一件事的可能，但代价只是软删（能恢复），
+    /// 比留着它们天天滚成逾期欠账要轻。
+    /// </summary>
+    private static IQueryable<Item> DailyLeftoversQuery(
+        AppDbContext db, string title, DateOnly today, Guid excludeId)
+    {
+        var dayStart = DateHelper.StartOfDay(today);
+
+        return db.Items.Where(x =>
+            x.DeletedAt == null
+            && x.Id != excludeId
+            && x.Title == title
+            && x.CompletionMode != CompletionMode.ByChildren
+            && x.Status != ItemStatus.Done
+            && x.Status != ItemStatus.Abandoned
+            && x.DueAt != null
+            && x.DueAt < dayStart);
     }
 
     /// <summary>

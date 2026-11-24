@@ -35,6 +35,8 @@ public sealed class AgentService
     private readonly ProfileService _profile;
     private readonly ILogger<AgentService> _logger;
     private readonly AgentPromptBuilder _promptBuilder;
+    private readonly WebSearchService _search;
+    private readonly WeatherService _weather;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -58,6 +60,8 @@ public sealed class AgentService
         PolicyRepository policy,
         ProfileService profile,
         AgentPromptBuilder promptBuilder,
+        WebSearchService search,
+        WeatherService weather,
         ILogger<AgentService> logger)
     {
         _proxy = proxy;
@@ -67,6 +71,8 @@ public sealed class AgentService
         _policy = policy;
         _profile = profile;
         _promptBuilder = promptBuilder;
+        _search = search;
+        _weather = weather;
         _logger = logger;
     }
 
@@ -250,11 +256,16 @@ public sealed class AgentService
             var parsed = ParseReply(content);
             if (parsed is null)
             {
-                // 它压根没按格式来，把原话当回复。这种轮次不会有 query。
+                // 它没按格式来。先试着从坏 JSON 里捞出「reply」那句话，捞不到就
+                // 给一句能接住的话——绝不能把坏 JSON（连同 think 里的自言自语）
+                // 原样甩给用户看。这种轮次不会有 query。
+                var salvaged = ReplySalvage.Salvage(content);
                 return new AgentResult
                 {
                     Success = true,
-                    Reply = CleanReply(content.Trim()),
+                    Reply = string.IsNullOrWhiteSpace(salvaged)
+                        ? "（这句没接好，你再说一遍？）"
+                        : CleanReply(salvaged),
                     Outcomes = new List<ActionOutcome>(),
                     BatchId = null,
                     Suggestions = null
@@ -264,15 +275,32 @@ public sealed class AgentService
             reply = parsed;
 
             var queries = parsed.Actions.Where(IsQuery).ToList();
-            if (queries.Count == 0 || round == MaxQueryRounds)
+            var searches = parsed.Actions.Where(IsSearch).ToList();
+            var weathers = parsed.Actions.Where(IsWeather).ToList();
+            if ((queries.Count == 0 && searches.Count == 0 && weathers.Count == 0) || round == MaxQueryRounds)
             {
                 break;
             }
 
             // 【为什么这一轮的其它动作一律不执行】
             // 它同时说「我要查」和「把那条删了」时，那个写动作是基于**还没查到**的信息做的。
-            // 先读后写：这一轮只当查询请求，查完让它重新给一次完整的 actions。
-            var queryText = await RunQueriesAsync(queries, ct);
+            // 先读后写：这一轮只当查询/搜索/天气请求，查完让它重新给一次完整的 actions。
+            var gathered = new List<string>();
+            if (queries.Count > 0)
+            {
+                gathered.Add(await RunQueriesAsync(queries, ct));
+            }
+            if (searches.Count > 0)
+            {
+                // 搜索 key 跟聊天 key 一样随请求带来：谁在用，就烧谁的额度。
+                gathered.Add(await RunSearchesAsync(searches, ai?.SearchApiKey, ct));
+            }
+            if (weathers.Count > 0)
+            {
+                gathered.Add(await RunWeathersAsync(weathers, ct));
+            }
+
+            var gatherText = string.Join("\n\n", gathered);
 
             // 把它这一轮的原话接回去，再接上系统查回来的结果。
             // 两条都只在本次请求里，不进对话记录——不是任何人说过的话。
@@ -285,13 +313,14 @@ public sealed class AgentService
             messages.Add(new ChatMessage
             {
                 Role = "system",
-                Content = "【系统按你的要求查回来的清单】\n" + queryText
-                    + "\n\n上面是系统查库的真实结果，不是他说的原话。"
-                    + "紧接着那条 assistant 消息只是你刚才申请查询时写的东西，**不算你已经回答过他**。"
+                Content = "【系统按你的要求查回来的结果】\n" + gatherText
+                    + "\n\n上面是系统查回来的真实结果（日程库或联网搜索），不是他说的原话。"
+                    + "紧接着那条 assistant 消息只是你刚才申请查询/搜索时写的东西，**不算你已经回答过他**。"
                     + "现在给出**最终**答复：仍按原来的 JSON 格式，reply 放你要对他说的那句话，"
                     + "actions 里放这次真正要做的改动（刚才那一轮的其它动作没有执行，要重新给）。"
-                    + "不要再发 query。写着「空」、或没列出来的日子，就直说那天没有安排，不要编。"
-                    + "不要把查库结果、你的判断或任何格式说明写进 reply。"
+                    + "不要再发 query 或 search。"
+                    + "搜索结果里没有的信息别自己补，拿不准就标「存疑」；关键事实说「据 XX」。"
+                    + "不要把查回来的结果、你的判断或任何格式说明写进 reply。"
             });
             request.Messages = messages;
             request.JsonMode = true;
@@ -300,7 +329,7 @@ public sealed class AgentService
         // ---------- ④ 执行 ----------
         // query 是只读动作，ItemTools 不认识它，必须在这里剔掉，
         // 否则会多出一条「不认识这个操作」的失败结果显示给他看。
-        var actions = reply!.Actions.Where(a => !IsQuery(a)).ToList();
+        var actions = reply!.Actions.Where(a => !IsQuery(a) && !IsSearch(a) && !IsWeather(a)).ToList();
         var (outcomes, batchId) = actions.Count == 0
             ? (new List<ActionOutcome>(), (Guid?)null)
             : await _tools.ExecuteAsync(actions, Summarize(actions), ct);
@@ -405,6 +434,12 @@ public sealed class AgentService
     private static bool IsQuery(AiAction action) =>
         string.Equals(action.Op?.Trim(), "query", StringComparison.OrdinalIgnoreCase);
 
+    private static bool IsSearch(AiAction action) =>
+        string.Equals(action.Op?.Trim(), "search", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsWeather(AiAction action) =>
+        string.Equals(action.Op?.Trim(), "weather", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>
     /// 执行一批只读查询，把结果拼成一段给模型看的字。只读：不写库、不进撤销批次。
     ///
@@ -477,6 +512,53 @@ public sealed class AgentService
         }
 
         return string.Join("\n", lines);
+    }
+
+    /// <summary>
+    /// 执行一批联网搜索，把结果拼成一段给模型看的字。只读：不写库、不进撤销批次。
+    /// 搜索失败（没配 key、超时、上游报错）由 WebSearchService 自己消化成一句说明，
+    /// 这里不做额外处理——搜索是加分项，不能因为它坏了整轮对话。
+    /// </summary>
+    private async Task<string> RunSearchesAsync(
+        IReadOnlyList<AiAction> searches, string? searchKey, CancellationToken ct)
+    {
+        var lines = new List<string>();
+
+        foreach (var s in searches)
+        {
+            if (string.IsNullOrWhiteSpace(s.Query))
+            {
+                lines.Add("- 有一条搜索没接住：没给 query。");
+                continue;
+            }
+
+            lines.Add($"【搜了：{s.Query}】\n{await _search.SearchAsync(s.Query, searchKey, ct)}");
+        }
+
+        return string.Join("\n\n", lines);
+    }
+
+    /// <summary>
+    /// 执行一批天气查询，把结果拼成给模型看的字。只读：不写库、不进撤销批次。
+    /// 天气走 Open-Meteo（结构化数据），不是网页搜索——网页搜索对「北京天气」
+    /// 经常返回报纸首页链接、没有温度，所以单独接一个稳定的数据源。
+    /// </summary>
+    private async Task<string> RunWeathersAsync(IReadOnlyList<AiAction> weathers, CancellationToken ct)
+    {
+        var lines = new List<string>();
+
+        foreach (var w in weathers)
+        {
+            if (string.IsNullOrWhiteSpace(w.Query))
+            {
+                lines.Add("- 有一条天气查询没接住：没给地点。");
+                continue;
+            }
+
+            lines.Add($"【查了天气：{w.Query}】\n{await _weather.GetAsync(w.Query, ct)}");
+        }
+
+        return string.Join("\n\n", lines);
     }
 
     /// <summary>

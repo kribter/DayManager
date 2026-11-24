@@ -74,6 +74,10 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     public partial string AiModelInput { get; set; } = AiSettings.DefaultModel;
 
+    /// <summary>联网搜索的密钥。留空是正常用法：AI 只是不能上网查，不会因此报错。</summary>
+    [ObservableProperty]
+    public partial string SearchKeyInput { get; set; } = string.Empty;
+
     [ObservableProperty]
     public partial string AiStatusText { get; set; } = "还没填密钥";
 
@@ -92,6 +96,7 @@ public partial class SettingsViewModel : ObservableObject
         _ai.ApiKey = (AiKeyInput ?? string.Empty).Trim();
         _ai.BaseUrl = (AiBaseUrlInput ?? string.Empty).Trim();
         _ai.Model = (AiModelInput ?? string.Empty).Trim();
+        _ai.SearchApiKey = (SearchKeyInput ?? string.Empty).Trim();
         _ai.Save();
 
         AiStatusText = _ai.HasKey ? "已保存。点右边的按钮试一下能不能通。" : "密钥还没填。";
@@ -575,6 +580,7 @@ public partial class SettingsViewModel : ObservableObject
             AiKeyInput = _ai.ApiKey;
             AiBaseUrlInput = _ai.BaseUrl;
             AiModelInput = _ai.Model;
+            SearchKeyInput = _ai.SearchApiKey;
             AiStatusOk = _ai.HasKey;
             AiStatusText = _ai.HasKey
                 ? $"已保存（{AiSettings.Mask(_ai.ApiKey)}）。回对话页说句话就是它在回答。"

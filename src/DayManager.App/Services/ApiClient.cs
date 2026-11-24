@@ -61,7 +61,10 @@ public sealed class ApiClient
             {
                 apiKey = _ai.ApiKey,
                 baseUrl = string.IsNullOrWhiteSpace(_ai.BaseUrl) ? null : _ai.BaseUrl,
-                model = string.IsNullOrWhiteSpace(_ai.Model) ? null : _ai.Model
+                model = string.IsNullOrWhiteSpace(_ai.Model) ? null : _ai.Model,
+                // 搜索密钥跟着同一份凭据走。没填就是 null，后端回退到它自己的配置
+                // （或直接回一句"没配 key"），不会因为没有它挡住对话。
+                searchApiKey = string.IsNullOrWhiteSpace(_ai.SearchApiKey) ? null : _ai.SearchApiKey
             }
             : null;
 

@@ -91,6 +91,15 @@ public class ItemActionService
                     changed = await RenameAsync(page, item);
                     break;
 
+                case MenuMakeDaily:
+                    changed = await MakeDailyAsync(page, item);
+                    break;
+
+                case MenuMakeOnce:
+                    await _items.SetDailyAsync(item.Id, daily: false);
+                    changed = true;
+                    break;
+
                 case "删除":
                     changed = await DeleteAsync(page, item);
                     break;
@@ -114,6 +123,8 @@ public class ItemActionService
     private const string MenuSkip = "今天先跳过（明天再来）";
     private const string MenuAbandon = "放弃不做了";
     private const string MenuStep = "改第一步";
+    private const string MenuMakeDaily = "改成每天";
+    private const string MenuMakeOnce = "改成只做一次";
 
     /// <summary>
     /// 菜单项按当前状态动态生成：已经完成的条目不该再显示"标记完成"。
@@ -160,10 +171,51 @@ public class ItemActionService
             choices.Add(MenuStep);
         }
 
+        // 【形态也能改，不只新建时能选】
+        // 原来"每天"只在新建的形态按钮里有，建完就锁死：
+        // 一件本该每天做的事被按天摊成一串一次性待办之后，没有任何办法收回来。
+        // 容器（按子项算完成）不给这一项——它的完成方式不是"一次/每天"这一回事。
+        if (item.Item.CompletionMode == CompletionMode.PerOccurrence)
+        {
+            choices.Add(MenuMakeOnce);
+        }
+        else if (item.Item.CompletionMode == CompletionMode.Once)
+        {
+            choices.Add(MenuMakeDaily);
+        }
+
         choices.Add("重命名");
         choices.Add("删除");
 
         return choices;
+    }
+
+    /// <summary>
+    /// 改成每天：先问一句，并说清会顺手清掉几条旧账。
+    ///
+    /// 【为什么"清旧账"必须写在确认框里】
+    /// 它删的是别的东西——同名的、更早的、没做完的那些记录。
+    /// 不告诉他一声就动手，等于背着他删了数据；
+    /// 而删的这几条偏偏是他自己都忘了还挂着的残渣。
+    /// </summary>
+    private async Task<bool> MakeDailyAsync(Page page, ItemViewModel item)
+    {
+        var leftovers = await _items.CountDailyLeftoversAsync(item.Title);
+
+        var message = leftovers > 0
+            ? $"「{item.Title}」以后每天都会出现，漏了不滚欠账。\n\n"
+              + $"之前还有 {leftovers} 条更早没做完的同名记录，会一起清掉（已经做完的保留）。"
+            : $"「{item.Title}」以后每天都会出现，漏了不滚欠账。";
+
+        var ok = await page.DisplayAlertAsync("改成每天", message, "改成每天", "算了");
+
+        if (!ok)
+        {
+            return false;
+        }
+
+        await _items.SetDailyAsync(item.Id, daily: true);
+        return true;
     }
 
     private async Task SetStatusAsync(ItemViewModel item, ItemStatus status)

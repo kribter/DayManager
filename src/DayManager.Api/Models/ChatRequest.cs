@@ -65,6 +65,20 @@ public sealed class AiOverride
     public string? ApiKey { get; set; }
     public string? BaseUrl { get; set; }
     public string? Model { get; set; }
+
+    /// <summary>
+    /// 联网搜索的密钥（博查 / Tavily）。和 <see cref="ApiKey"/> 一样是使用者自己的：
+    /// 随请求带来、用完即弃、不写盘不打日志。
+    ///
+    /// 【为什么搜索 key 跟聊天 key 一起传，而不是各走一条接口】
+    /// 它们是同一件事的两半——"AI 要能说话，还要能上网查"。
+    /// 分开传意味着客户端要在两条链路上各维护一份凭据，漏掉一处就出现
+    /// "对话正常但一搜就报没配 key"这种半死状态。合在一起只有一处需要照看。
+    ///
+    /// 【为空是正常的】
+    /// 搜索是加分项：没填就不查，模型会说明"这部分可能不全"，不影响对话本身。
+    /// </summary>
+    public string? SearchApiKey { get; set; }
 }
 
 public sealed class ChatMessage

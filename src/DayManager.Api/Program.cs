@@ -52,6 +52,7 @@ builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, relo
 // 绑定成对象之后，属性名写错是编译错误，而且有智能提示。
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection(AiOptions.SectionName));
+builder.Services.Configure<SearchOptions>(builder.Configuration.GetSection(SearchOptions.SectionName));
 
 // 【为什么用 AddHttpClient 而不是自己 new HttpClient】
 // 直接 new HttpClient 有两个经典陷阱：
@@ -138,6 +139,12 @@ builder.Services.AddSingleton<AgentService>();
 // AiProxy 自己不保存任何请求状态，它每次都从 IOptionsMonitor 现读配置。
 // 没有状态的东西做成单例最省，也避免了不必要的反复创建。
 builder.Services.AddSingleton<AiProxy>();
+
+// 联网搜索：拆大事之前先查真实信息（报名时间、流程、材料）。只读，不进撤销批次。
+builder.Services.AddSingleton<WebSearchService>();
+
+// 天气：走 Open-Meteo（免费、不要 key），返回结构化数据，不是网页。只读。
+builder.Services.AddSingleton<WeatherService>();
 
 var app = builder.Build();
 
@@ -419,6 +426,23 @@ app.MapPost("/api/items/ensure-daily", async (
 
     var created = await items.EnsureDailyInstancesAsync(day, ct);
     return Results.Ok(new { date = day, created });
+});
+
+// 改「每天 / 只做一次」。
+//
+// 【为什么界面能改，还要留这个接口】
+// 一是手机端接进来时走同一条路；
+// 二是它能被脚本直接调用——把一批按天摊出来的残渣收成一条每天的事，
+// 不用在界面上一条条点（真实库里有 5 组共 29 条就是这么来的）。
+// 改形态时会顺手清掉"同名、更早、没做完"的旧账，返回清掉的条数。
+app.MapPost("/api/items/{id:guid}/daily", async (
+    Guid id,
+    bool? daily,
+    DayManager.Data.Repositories.ItemRepository items,
+    CancellationToken ct) =>
+{
+    var cleared = await items.SetDailyAsync(id, daily ?? true, ct);
+    return Results.Ok(new { id, daily = daily ?? true, cleared });
 });
 
 app.MapPost("/api/items/{id:guid}/status", async (

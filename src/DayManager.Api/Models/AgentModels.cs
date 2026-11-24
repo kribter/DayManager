@@ -67,6 +67,19 @@ public sealed class AiAction
     /// </summary>
     public string? DateTo { get; set; }
 
+    /// <summary>
+    /// 外部查询的查询词 / 地点，可空。search 用它当搜索词，weather 用它当地点（城市名）。
+    ///
+    /// 【为什么这里要 JsonPropertyName("query")】
+    /// 提示词告诉模型「参数：query」，它就写 {"op":"search","query":"..."} 或
+    /// {"op":"weather","query":"北京"}。本字段叫 Query，反序列化本来就对得上 query；
+    /// 显式写出来是为了钉死这个约定，防止以后有人把它改名成 QueryText 之类，
+    /// 又把「接不住 query、搜索词变空、压根没发出去」的坑踩回来
+    /// （11-24 实测「连查询词都没送出去」就是字段名和 query 对不上）。
+    /// </summary>
+    [JsonPropertyName("query")]
+    public string? Query { get; set; }
+
     /// <summary>具体几点，HH:mm。可空，给了就表示"到点开始"。</summary>
     public string? Time { get; set; }
 
